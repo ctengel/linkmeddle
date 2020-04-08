@@ -9,13 +9,14 @@ import pathlib
 import requests
 import bs4
 
-YTDL = ['bcove.video']
+YTDL = ['bcove.video', 'player.vimeo.com']
 _YTDLP = str(pathlib.Path.home()) + "/.local/bin/youtube-dl"
 BCV = ['brightcove.services']
 
 
 def getsoup(url):
     """Get a BeautifulSoup4 object from given URL"""
+    # TODO: CloudFlare
     req = requests.get(url)
     soup = bs4.BeautifulSoup(req.text, 'html.parser')
     return soup
@@ -50,8 +51,8 @@ def bcv(url):
 def linkmeddle(url):
     """Actual parsing of single URL"""
     soup = getsoup(url)
-    for link in soup.find_all('a'):
-        href = link.get('href')
+    for href in ([x.get('href') for x in soup.find_all('a')] +
+                 [x.get('src') for x in soup.find_all('iframe')]):
         parsed = urllib.parse.urlparse(href)
         if not parsed.hostname:
             continue
