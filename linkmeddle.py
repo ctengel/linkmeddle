@@ -51,8 +51,10 @@ def bcv(url):
 def linkmeddle(url):
     """Actual parsing of single URL"""
     soup = getsoup(url)
-    for href in ([x.get('href') for x in soup.find_all('a')] +
-                 [x.get('src') for x in soup.find_all('iframe')]):
+    urls = ([x.get('href') for x in soup.find_all('a')] +
+            [x.get('src') for x in soup.find_all('iframe')])
+    absurls = [urllib.parse.urljoin(url, x) for x in urls]
+    for href in absurls:
         parsed = urllib.parse.urlparse(href)
         if not parsed.hostname:
             continue
