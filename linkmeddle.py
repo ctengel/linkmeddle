@@ -6,6 +6,8 @@ import argparse
 import urllib.parse
 import subprocess
 import pathlib
+import os
+import shutil
 import requests
 import bs4
 
@@ -26,6 +28,23 @@ def callytdl(url):
     """Run youtube-dl externally"""
     print(url)
     subprocess.run([_YTDLP, '--all-subs', url], check=True)
+
+
+def basenameurl(url):
+    """Get the base name of a URL"""
+    return os.path.basename(urllib.parse.urlparse(url).path)
+
+
+def download(url, target=None):
+    """Download one file, default target is base name"""
+    print(url)
+    if not target:
+        target = basenameurl(url)
+    req = requests.get(url, stream=True)
+    req.raise_for_status()
+    req.raw.decode_content = True
+    with open(target, 'wb') as fil:
+        shutil.copyfileobj(req.raw, fil)
 
 
 def bcv(url):
@@ -66,14 +85,16 @@ def linkmeddle(url):
                     bcv(href)
 
 
-def cli():
+def cli(fnc=None):
     """Run when called from CLI"""
+    if fnc is None:
+        fnc = linkmeddle
     parser = argparse.ArgumentParser(description='Download all media linked or'
                                      'listed on a page')
     parser.add_argument('url', nargs='+', help='URLs to download')
     args = parser.parse_args()
     for aurl in args.url:
-        linkmeddle(aurl)
+        fnc(aurl)
 
 
 if __name__ == '__main__':
