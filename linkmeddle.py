@@ -8,6 +8,7 @@ import subprocess
 import pathlib
 import os
 import shutil
+import warnings
 import requests
 import bs4
 
@@ -40,6 +41,9 @@ def download(url, target=None):
     print(url)
     if not target:
         target = basenameurl(url)
+    if os.path.exists(target):
+        warnings.warn('{} already exists; skipping {}'.format(target, url))
+        return
     req = requests.get(url, stream=True)
     req.raise_for_status()
     req.raw.decode_content = True
