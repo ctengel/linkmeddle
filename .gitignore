@@ -130,3 +130,6 @@ dmypy.json
 
 # vim swap files
 *.swp
+
+# cookie jar
+cookies.json

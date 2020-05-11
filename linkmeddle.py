@@ -9,6 +9,7 @@ import pathlib
 import os
 import shutil
 import warnings
+import json
 import requests
 import bs4
 
@@ -17,12 +18,21 @@ _YTDLP = str(pathlib.Path.home()) + "/.local/bin/youtube-dl"
 BCV = ['brightcove.services']
 
 
-def getsoup(url):
+def getsoup(url, headers=None, cookies=None, verbose=False):
     """Get a BeautifulSoup4 object from given URL"""
     # TODO: CloudFlare
-    req = requests.get(url)
+    req = requests.get(url, headers=headers, cookies=cookies)
+    if verbose:
+        print(req.text)
     soup = bs4.BeautifulSoup(req.text, 'html.parser')
     return soup
+
+
+def loadjson(filnm):
+    """Load JSON, such as cookies"""
+    with open(filnm) as filhd:
+        data = json.load(filhd)
+    return data
 
 
 def callytdl(url):
