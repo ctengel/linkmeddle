@@ -47,7 +47,7 @@ def loadjson(filnm):
 def callytdl(url):
     """Run youtube-dl externally"""
     print(url)
-    subprocess.run([_YTDLP, '--all-subs', url], check=True)
+    subprocess.run([_YTDLP, '--all-subs', '--write-info-json', url], check=True)
 
 
 def basenameurl(url):

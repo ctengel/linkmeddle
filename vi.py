@@ -35,6 +35,8 @@ def activity(url):
     divids = [x.get('id') for x in soup.find_all('div')]
     newtime = None
     for div in divids:
+        if not div:
+            continue
         matres = re.match(r'^activity-event-(\d+)$', div)
         if matres:
             newtime = matres.group(1)
