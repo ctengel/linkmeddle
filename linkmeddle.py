@@ -7,6 +7,7 @@ import urllib.parse
 import subprocess
 import pathlib
 import os
+import re
 import shutil
 import warnings
 import json
@@ -55,9 +56,10 @@ def basenameurl(url):
     return os.path.basename(urllib.parse.urlparse(url).path)
 
 
-def download(url, target=None, cookies=None, fhead=False, referer=None):
+def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False):
     """Download one file, default target is base name"""
     print(url)
+    assert not (autoname and target)
     headers = None
     if fhead:
         headers = _F_HEAD
@@ -65,14 +67,20 @@ def download(url, target=None, cookies=None, fhead=False, referer=None):
         if not headers:
             headers = {}
         headers['Referer'] = referer
-    if not target:
+    if not target and not autoname:
         target = basenameurl(url)
-    if os.path.exists(target):
+    if not autoname and os.path.exists(target):
         warnings.warn('{} already exists; skipping {}'.format(target, url))
         return
     req = requests.get(url, stream=True, cookies=cookies, headers=headers)
     req.raise_for_status()
     req.raw.decode_content = True
+    if not target and autoname:
+        target =  re.findall("filename=\"(.+)\"", req.headers.get('content-disposition'))[0]
+        print('Auto detecting name as {}'.format(target))
+        if os.path.exists(target):
+            warnings.warn('{} already exists; skipping {}'.format(target, url))
+            return
     with open(target, 'wb') as fil:
         shutil.copyfileobj(req.raw, fil)
 

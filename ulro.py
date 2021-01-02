@@ -27,8 +27,7 @@ def get(url, refer=None, cookies=None):
 def loadidx(url, cookies):
     """Get all URLs from navbar"""
     soup = get(url, cookies=cookies)
-    navul = soup.find_all('ul', class_='nav')[1]
-    return [x.get('href') for x in navul.find_all('a') if x.get]
+    return [x.get('href') for x in soup.find_all('a', class_='js_open_post') if x.get]
 
 
 def convurl(url):

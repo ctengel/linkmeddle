@@ -9,6 +9,8 @@ import time
 import linkmeddle
 
 
+
+
 def get(url, refer=None, cookies=None):
     """Get HTML soup with headers and cookies"""
     headers = {"Accept": "text/html,application/xhtml+xml,application/xml;"
@@ -27,29 +29,25 @@ def get(url, refer=None, cookies=None):
 def loadidx(url, cookies):
     """Get all URLs from navbar"""
     soup = get(url, cookies=cookies)
-    navul = soup.find_all('ul', class_='nav')[1]
-    return [x.get('href') for x in navul.find_all('a') if x.get]
+    navul = soup.find_all('div', class_='card')
+    blady = []
+    for card in navul:
+        thislink = card.find('a')
+        if thislink:
+            blady.append(thislink.get('href'))
+        else:
+            print('CANT GET A LINK')
+    return blady
 
-
-def convurl(url):
-    """Convert URL to avoid iframe in iframe"""
-    path = urllib.parse.urlparse(url).path
-    mtch = re.match(r'^\/external_video\/vimeo\/(\d+)$', path)
-    if mtch:
-        return 'https://player.vimeo.com/video/' + mtch.group(1)
-    return url
 
 
 def loadpg(url, cookies):
     """Load all videos on a page"""
     soup = get(url, cookies=cookies)
-    ifrm = soup.find_all('iframe')
-    vids = [convurl(x.get('src')) for x in ifrm]
-    dll = soup.find('ul', class_='download_list_main_ul')
-    dls = []
-    if dll:
-        dls = [x.get('href') for x in dll.find_all('a')]
-    return vids, dls
+    ifrm = soup.find_all('a', class_='gtag-track')
+    vids = ifrm[1].get('href')
+    print(vids)
+    return vids
 
 
 def run(url, cookfile):
@@ -58,12 +56,9 @@ def run(url, cookfile):
     allpages = loadidx(url, cookiejar)
     for page in allpages:
         print(page)
-        if page.startswith('javascript:void(0)'):
-            continue
-        out = loadpg(page, cookiejar)
-        for big in out:
-            for little in big:
-                print(little)
+        little = loadpg(urllib.parse.urljoin(url, page), cookiejar)
+        print(little)
+        linkmeddle.download(urllib.parse.urljoin(urllib.parse.urljoin(url, page), little), autoname=True, cookies=cookiejar)
         time.sleep(5)
 
 
