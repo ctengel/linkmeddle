@@ -1,3 +1,5 @@
+"""Download via Celery"""
+
 import time
 import click
 import tasks
@@ -13,4 +15,3 @@ def dl(url):
 
 if __name__ == '__main__':
     dl()
-

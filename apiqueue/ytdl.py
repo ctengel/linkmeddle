@@ -1,17 +1,18 @@
+"""Deal with youtube dl on local system as well as associated data structures in flat files"""
 
 import json
 import os
 from youtube_dl import YoutubeDL
 from youtube_dl.utils import locked_file
 
-TGTDIR = '/emergency/bla'
-TGTAR = '/emergency/bla.txt'
-# cachedir, user/password, download_archive, cookiefile, progress_hooks
-OPTS = {'writeinfojson': True, 'download_archive': TGTAR}
+TGTDIR = None
+TGTAR = None
+# cachedir, user/password, cookiefile, progress_hooks
 
 def _ydl():
     os.chdir(TGTDIR)
-    return YoutubeDL(OPTS)
+    opts = {'writeinfojson': True, 'download_archive': TGTAR}
+    return YoutubeDL(opts)
 
 def download(url):
     with _ydl() as ydl:

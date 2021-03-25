@@ -1,4 +1,4 @@
-import time
+"""Attempt to pull files on server into archive - see also importfiles.py"""
 import click
 import tasks
 

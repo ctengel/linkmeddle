@@ -1,20 +1,21 @@
 
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template
 from celery.result import AsyncResult
 from youtube_dl.utils import YoutubeDLError
 import tasks
 
 app = Flask(__name__)
-# TODO persist downloads and urls
+# TODO persist downloads and urls and playlist info
 downloads = {}
 
 
 @app.route('/download/', methods=['POST', 'GET'])
 def download():
     url = None
-    content = request.json
     if request.json and 'url' in request.json:
         url = request.json['url']
+    elif request.form and 'url' in request.form:
+        url = request.form['url']
     elif request.args and 'url' in request.args:
         url = request.args['url']
     else:
@@ -23,25 +24,27 @@ def download():
     # TODO attempt to parse basic info
     result = tasks.download.delay(url)
     downloads[result.id] = url
+    if request.args.get('fmt') == 'html' or request.form.get('fmt') == 'html':
+        return render_template('submit.html', dlid=result.id)
     return {'url': url, 'id': result.id}
 
 @app.route('/download/<dlid>')
 def onedl(dlid):
-    if dlid not in downloads:
-        abort(404)
     res = AsyncResult(dlid, app=tasks.app)
-    finres = {'state': res.state, 'url': downloads[dlid], 'result': None, 'error': None}
+    finres = {'id': dlid, 'state': res.state, 'url': downloads.get(dlid), 'result': None, 'error': None}
     if res.ready():
         try:
             finres['result'] = res.get()
         except YoutubeDLError as e:
             finres['result'] = False
             finres['error'] = str(e)
+    #if request.args.get('fmt') == 'html':
+    #    return render_template("check.html", finres=finres)
     return finres
 
 @app.route('/finished/')
 def finished():
-    # TODO endpoint way more sense
+    # TODO this endpoint needs to make way more sense
     dirlist = tasks.lsdir.delay()
     arclist = tasks.read_archive.delay()
     return {'files': dirlist.get(), 'archive': arclist.get()}
@@ -73,6 +76,6 @@ def importfiles():
     assert aadd.get() is None
     return {'result': 'success'}
 
-
-
-# TODO more state internal like logging playlists or no??
+@app.route('/start')
+def homepg():
+    return render_template('start.html')

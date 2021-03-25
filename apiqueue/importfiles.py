@@ -1,16 +1,16 @@
+"""Load files from local system to REST API"""
+
 import json
 import os
 import click
 import requests
 
-
-DEFAPI='http://127.0.0.1:5000/import'
+DEFAPI = 'http://127.0.0.1:5000/import'
 
 @click.command()
 @click.option('-a', '--api', default=DEFAPI)
 @click.argument('dirpath')
 def pullin(api, dirpath):
-    addtasks = []
     for n in os.listdir(dirpath):
         if not n.endswith('.info.json'):
             continue
@@ -21,7 +21,6 @@ def pullin(api, dirpath):
             print('Skipping {} since no filename...'.format(n))
             continue
         fn = os.path.join(dirpath, sp)
-        # TODO ensure symlink target exists if symlink
         if not os.path.exists(fn) or os.path.getsize(fn) < 1024:
             print('Skipping {} fn since file not exist or zero...'.format(sp))
             continue

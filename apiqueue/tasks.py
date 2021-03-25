@@ -1,15 +1,35 @@
+"""Celery wrappers for ytdl tasks"""
 
-import json
 import os
+from pathlib import Path
+import uuid
+import json
 from celery import Celery
 import ytdl
 
-app = Celery('tasks', backend='redis://', broker='pyamqp://')
+os.environ.setdefault('CELERY_CONFIG_MODULE', 'celeryconfig')
 
+app = Celery('tasks')
+
+app.config_from_envvar('CELERY_CONFIG_MODULE')
+
+ytdl.TGTDIR = app.conf.get('YTDL_DIR')
+ytdl.TGTAR = app.conf.get('YTDL_AR')
 
 @app.task
 def download(url):
-    return ytdl.download(url)
+    ld = app.conf.get('YTDL_LOG')
+    thisfile = None
+    if ld:
+        logdir = Path(ld)
+        thisfile = logdir.joinpath(str(uuid.uuid1()))
+        with thisfile.open('w') as fh:
+            json.dump({'url': url}, fh)
+    res = ytdl.download(url)
+    if thisfile:
+        with thisfile.open('w') as fh:
+            json.dump({'url': url, 'data': res}, fh)
+    return res
 
 @app.task
 def read_archive():
