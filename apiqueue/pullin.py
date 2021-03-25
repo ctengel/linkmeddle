@@ -5,7 +5,7 @@ import tasks
 @click.command()
 def pullin():
     lsdir = tasks.lsdir.delay()
-    infotasks = [tasks.infofiledata.delay(x) for x in lsdir.get() if x.endswith('.json')]
+    infotasks = [tasks.infofiledata.delay(x) for x in lsdir.get() if x.endswith('.info.json')]
     addtasks = []
     for task in infotasks:
         result = task.get()
