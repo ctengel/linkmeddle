@@ -133,3 +133,7 @@ dmypy.json
 
 # cookie jar
 cookies.json
+
+# custom addtions
+apiqueue/celeryconfig.py
+apiqueue/tempweb.sh

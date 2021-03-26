@@ -14,7 +14,7 @@ app = Celery('tasks')
 app.config_from_envvar('CELERY_CONFIG_MODULE')
 
 ytdl.TGTDIR = app.conf.get('YTDL_DIR')
-ytdl.TGTAR = app.conf.get('YTDL_AR')
+ytdl.TGTAR = app.conf.get('YTDL_ARC')
 
 @app.task
 def download(url):

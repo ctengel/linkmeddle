@@ -1,5 +1,5 @@
 
-from flask import Flask, request, abort, render_template
+from flask import Flask, request, abort, render_template, jsonify
 from celery.result import AsyncResult
 from youtube_dl.utils import YoutubeDLError
 import tasks
@@ -19,14 +19,14 @@ def download():
     elif request.args and 'url' in request.args:
         url = request.args['url']
     else:
-        return {'downloads': [{'id': key, 'url': value} for key, value in downloads.items()]}
+        return jsonify({'downloads': [{'id': key, 'url': value} for key, value in downloads.items()]})
     # TODO validate if URL recently downloaded
     # TODO attempt to parse basic info
     result = tasks.download.delay(url)
     downloads[result.id] = url
     if request.args.get('fmt') == 'html' or request.form.get('fmt') == 'html':
         return render_template('submit.html', dlid=result.id)
-    return {'url': url, 'id': result.id}
+    return jsonify({'url': url, 'id': result.id})
 
 @app.route('/download/<dlid>')
 def onedl(dlid):
@@ -40,18 +40,18 @@ def onedl(dlid):
             finres['error'] = str(e)
     #if request.args.get('fmt') == 'html':
     #    return render_template("check.html", finres=finres)
-    return finres
+    return jsonify(finres)
 
 @app.route('/finished/')
 def finished():
     # TODO this endpoint needs to make way more sense
     dirlist = tasks.lsdir.delay()
     arclist = tasks.read_archive.delay()
-    return {'files': dirlist.get(), 'archive': arclist.get()}
+    return jsonify({'files': dirlist.get(), 'archive': arclist.get()})
 
 @app.route('/finished/<fname>')
 def details(fname):
-    return tasks.infofiledata.delay(fname).get()
+    return jsonify(tasks.infofiledata.delay(fname).get())
 
 @app.route('/import', methods=['POST'])
 def importfiles():
@@ -65,16 +65,16 @@ def importfiles():
     inlist = (myname in listdelay.get())
     inarch = checkarchive.get()
     if inlist and inarch:
-        return {'result': 'exists'}
+        return jsonify({'result': 'exists'})
     if inlist:
-        return {'result': 'fexists'}
+        return jsonify({'result': 'fexists'})
     if inarch:
-        return {'result': 'aexists'}
+        return jsonify({'result': 'aexists'})
     aadd = tasks.add_archive.delay(mydata)
     fadd = tasks.newinfofile.delay(myname, mydata)
     assert fadd.get() is None
     assert aadd.get() is None
-    return {'result': 'success'}
+    return jsonify({'result': 'success'})
 
 @app.route('/start')
 def homepg():

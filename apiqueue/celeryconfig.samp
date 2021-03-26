@@ -1,0 +1,5 @@
+CELERY_RESULT_BACKEND = 'redis://'
+BROKER_URL = 'amqp://'
+YTDL_DIR = None
+YTDL_ARC = None
+YTDL_LOG = None
