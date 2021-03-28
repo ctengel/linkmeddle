@@ -7,7 +7,7 @@ from youtube_dl.utils import locked_file
 
 TGTDIR = None
 TGTAR = None
-# cachedir, user/password, cookiefile, progress_hooks
+# TODO cachedir, user/password, cookiefile, progress_hooks,dump-json, flat-playlist, dump-single, json, quiet???
 
 def _ydl():
     os.chdir(TGTDIR)
