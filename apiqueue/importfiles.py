@@ -22,10 +22,15 @@ def pullin(api, dirpath):
             continue
         fn = os.path.join(dirpath, sp)
         if not os.path.exists(fn) or os.path.getsize(fn) < 1024:
-            print('Skipping {} fn since file not exist or zero...'.format(sp))
-            continue
+            trymkv = os.path.splitext(fn)[0] + '.mkv'
+            if os.path.exists(trymkv) and os.path.getsize(trymkv) >= 1024:
+                print('WARN: replacing {} with {}'.format(fn, trymkv))
+                fn = trymkv
+            else:
+                print('Skipping {} fn since file not exist or zero...'.format(sp))
+                continue
         print('Attempting to import {}...'.format(n))
-        resp = requests.post(api, json={'sourcesys': None, 'sourcedir': dirpath, 'ijf': fd, 'ijfn': n})
+        resp = requests.post(api, json={'sourcesys': None, 'sourcedir': dirpath, 'ijf': fd, 'ijfn': n, 'mediafile': fn})
         resp.raise_for_status()
         rj = resp.json()
         print('Result for {}:\t{}'.format(n, rj.get('result')))
