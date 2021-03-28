@@ -1,0 +1,56 @@
+"""Celery wrappers for ytdl tasks"""
+
+import os
+from pathlib import Path
+import uuid
+import json
+from celery import Celery
+import ytdl
+
+os.environ.setdefault('CELERY_CONFIG_MODULE', 'celeryconfig')
+
+app = Celery('tasks')
+
+app.config_from_envvar('CELERY_CONFIG_MODULE')
+
+ytdl.TGTDIR = app.conf.get('YTDL_DIR')
+ytdl.TGTAR = app.conf.get('YTDL_ARC')
+
+@app.task
+def download(url, type=pl, recurse=true, authinfo, guaranteefullpl, ignoreerror):
+    ld = app.conf.get('YTDL_LOG')
+    thisfile = None
+    if ld:
+        logdir = Path(ld)
+        thisfile = logdir.joinpath(str(uuid.uuid1()))
+        with thisfile.open('w') as fh:
+            json.dump({'url': url}, fh)
+    res = ytdl.download(url)
+    if thisfile:
+        with thisfile.open('w') as fh:
+            json.dump({'url': url, 'data': res}, fh)
+    return res
+
+@app.task
+def read_archive():
+    return ytdl.read_archive()
+
+@app.task
+def check_archive(dct):
+    return ytdl.check_archive(dct)
+
+@app.task
+def add_archive(dct):
+    return ytdl.add_archive(dct)
+
+@app.task
+def lsdir():
+    return ytdl.lsdir()
+
+@app.task
+def infofiledata(fname):
+    return ytdl.infofiledata(fname)
+
+@app.task
+def newinfofile(fname, dct):
+    return ytdl.newinfofile(fname, dct)
