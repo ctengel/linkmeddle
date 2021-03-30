@@ -7,7 +7,7 @@ import warnings
 import json
 import linkmeddle
 
-QUAL = ['4K', 'High', 'Low']
+QUAL = ['4K', 'High', 'Med', 'Low']
 
 
 def dl_one(indict, base, qual):
@@ -28,7 +28,7 @@ def proc_one(indict, base):
         if indict['version' + qua]:
             if dl_one(indict, base, qua.lower()):
                 return True
-    assert False
+    #assert False
     return False
 
 
@@ -37,7 +37,8 @@ def json_dl(jsonf, base):
     with open(jsonf) as fil:
         dic = json.load(fil)
     for item in dic:
-        proc_one(item, base)
+        if not proc_one(item, base):
+            print('FAILED {}'.format(item))
 
 
 def _cli():

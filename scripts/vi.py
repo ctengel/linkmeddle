@@ -28,7 +28,8 @@ def activity(url):
                                            None,
                                            None])
         try:
-            linkmeddle.callytdl(newhref)
+            print(newhref)
+            #linkmeddle.callytdl(newhref)
         except subprocess.CalledProcessError as err:
             warnings.warn(str(err))
             time.sleep(30)
