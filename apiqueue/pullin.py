@@ -4,6 +4,7 @@ import tasks
 
 @click.command()
 def pullin():
+    """Attempt to load in files via celery....not recommended though since only hits archive"""
     lsdir = tasks.lsdir.delay()
     infotasks = [tasks.infofiledata.delay(x) for x in lsdir.get() if x.endswith('.info.json')]
     addtasks = []
@@ -20,4 +21,3 @@ def pullin():
 
 if __name__ == '__main__':
     pullin()
-

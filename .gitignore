@@ -139,3 +139,5 @@ apiqueue/celeryconfig.py
 apiqueue/tempweb.sh
 *.csv
 scripts/*.txt
+*.info.json
+*.mp4

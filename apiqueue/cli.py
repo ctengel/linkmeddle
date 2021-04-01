@@ -7,7 +7,8 @@ import tasks
 @click.command()
 @click.argument('url')
 def dl(url):
-    result = tasks.download.delay(url)
+    """Download via celery config, bypassing API"""
+    result = tasks.download.delay({'url': url})
     while not result.ready():
         print('waiting...')
         time.sleep(5)

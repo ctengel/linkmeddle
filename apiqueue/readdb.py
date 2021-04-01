@@ -82,8 +82,6 @@ def dirar(ard, dird):
             extra_info(item)
             dird.append(item)
     return dird
-
-
  
 
 def extra_info(item):  #dird):
@@ -106,6 +104,7 @@ def extra_info(item):  #dird):
 @click.argument('arcfile')
 @click.argument('outcsv')
 def logs2csv(dirname, arcfile, outcsv):
+    """Read a local ytdl directory and archive file and output a CSV"""
     print('Reading directory...')
     mydirinfo = pulldirinfo(dirname)
     print('Reading archive...')

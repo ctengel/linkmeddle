@@ -11,6 +11,7 @@ DEFAPI = 'http://127.0.0.1:5000/import'
 @click.option('-a', '--api', default=DEFAPI)
 @click.argument('dirpath')
 def pullin(api, dirpath):
+    """Look through a local directory for .info.json files and import/register with API ytdl backend"""
     for n in os.listdir(dirpath):
         if not n.endswith('.info.json'):
             continue
@@ -38,4 +39,3 @@ def pullin(api, dirpath):
 
 if __name__ == '__main__':
     pullin()
-
