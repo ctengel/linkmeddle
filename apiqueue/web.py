@@ -31,7 +31,7 @@ def download():
 
     assert 'id' not in info
     
-    result = tasks.download.delay(url)
+    result = tasks.download.delay(info)
 
     # TODO validate if URL recently downloaded
     # TODO attempt to parse basic info
