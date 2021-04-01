@@ -8,7 +8,7 @@
 			</p>
 		</form>
 		<p>
-		<a href="javascript:void(window.open('{{url_for('download', _external=True)}}?url='+document.location.href));">Bookmarklet</a>
+		<a href="javascript:void(window.open('{{url_for('download', _external=True)}}?fmt=html&url='+encodeURIComponent(document.location.href)));">Bookmarklet</a>
 		</p>
 	</body>
 </html>

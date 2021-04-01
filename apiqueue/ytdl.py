@@ -3,7 +3,7 @@
 import json
 import os
 from youtube_dl import YoutubeDL
-from youtube_dl.utils import locked_file
+from youtube_dl.utils import locked_file, YoutubeDLError
 
 TGTDIR = None
 TGTAR = None
@@ -16,14 +16,19 @@ def _ydl():
 
 def download(info):
     """Do a download"""
+    error = None
     url = info.get('url')
     # TODO broader support for new input format
     assert url
     with _ydl() as ydl:
         # TODO add way to not download or process
-        retcode = ydl.extract_info(url)
+        try:
+            retcode = ydl.extract_info(url)
+        except YoutubeDLError as e:
+            retcode = None
+            error = str(e)
     # TODO broader support for new output format
-    return {'url': url, 'data': retcode}
+    return {'url': url, 'data': retcode, 'error': error}
 
 
 def read_archive():

@@ -40,12 +40,16 @@ def download(info):
         logdir = Path(ld)
         # TODO use task ID instead??? or include in info at least???
         thisfile = logdir.joinpath(str(uuid.uuid1()))
+        initiallog = info.copy()
+        initiallog['error'] = None
         with thisfile.open('w') as fh:
-            json.dump(info, fh)
+            json.dump(initiallog, fh)
     res = BACKENDS[myback]['download'](info)
     # TODO spawn child tasks
     if url and not res.get('url'):
         res['url'] = url
+    if not res.get('error'):
+        res['error'] = None
     if thisfile:
         with thisfile.open('w') as fh:
             json.dump(res, fh)
