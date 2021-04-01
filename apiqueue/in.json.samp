@@ -1,0 +1,1 @@
+{'url': 'http://....', 'backend': ['youtube-dl', 'youtube'], 'metadata': {}, 'type': 'media|list', 'backend_id': ['youtube', 'xyz'], ret_full_pl: False, auth: {}, backend_opts: {}, recurse: True, subtask: True, strict/vs skip errors)
