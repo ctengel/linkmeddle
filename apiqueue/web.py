@@ -1,7 +1,7 @@
 
 from flask import Flask, request, render_template, jsonify
 from celery.result import AsyncResult
-from youtube_dl.utils import YoutubeDLError
+#from youtube_dl.utils import YoutubeDLError
 import tasks
 
 app = Flask(__name__)
@@ -46,17 +46,23 @@ def download():
 def onedl(dlid):
     """Get details on one download"""
     res = AsyncResult(dlid, app=tasks.app)
-    finres = {'id': dlid, 'state': res.state, 'url': downloads.get(dlid), 'result': None, 'error': None}
+    finres = {'id': dlid, 'state': res.state, 'celery_state': res.state 'url': downloads.get(dlid), 'result': None, 'error': None}
     if res.ready():
-        try:
-            fullres = res.get()
-            finres['result'] = fullres.get('data')
-            if not finres.get('url') and fullres.get('url'):
-                finres['url'] = fullres['url']
-            # TODO parse and return other relevant sections...
-        except YoutubeDLError as e:
+        #try:
+        fullres = res.get()
+        if fullres.get('error'):
+            finres['error'] = fullres['error']
             finres['result'] = False
-            finres['error'] = str(e)
+            if finres['state'] == 'SUCCESS':
+                finres['state'] = 'FAILURE'
+        else:
+            finres['result'] = fullres.get('data')
+        if not finres.get('url') and fullres.get('url'):
+            finres['url'] = fullres['url']
+            # TODO parse and return other relevant sections...
+        #except YoutubeDLError as e:
+        #    finres['result'] = False
+        #    finres['error'] = str(e)
     #if request.args.get('fmt') == 'html':
     #    return render_template("check.html", finres=finres)
     return jsonify(finres)
