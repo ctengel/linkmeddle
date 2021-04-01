@@ -113,42 +113,12 @@ def analyze(items):
 
 @click.command()
 @click.argument('dirname')
-@click.argument('arcfile')
-@click.argument('outcsv')
 def logs2csv(dirname, arcfile, outcsv):
     """Read a local ytdl directory and archive file and output a CSV"""
     print('Reading directory...')
-    mydirinfo = pulldirinfo(dirname)
-    print('Reading archive...')
-    myarcinfo = read_archive(arcfile)
-    print('Combining...')
-    myclean = dirar(myarcinfo, mydirinfo)
-    #print('cleanup...')
-    #myclean = extra_info(mycomb)
-    print('writing...')
-    with open(outcsv, 'w', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=myclean[0].keys())
-        writer.writeheader()
-        for myitem in myclean:
-            writer.writerow(myitem)
-    print('analyzing')
-    orphan, nomedia, ulers, playlists = analyze(myclean)
-    print('orphan files (no metadata)')
-    for x in orphan:
+    mydirinfo = set(pulldirinfo(dirname))
+    for x in mydirinfo:
         print(x)
-    print()
-    print('no media (just metadata)')
-    for x in nomedia:
-        print(x)
-    print()
-    print('uploaders')
-    for x in ulers:
-        print("{}\t{}".format(x[1], x[0]))
-    print()
-    for x in playlists:
-        print("{} {}\t{}".format(x[1], x[2], x[0]))
-    print()
-    print('done!')
 
 if __name__ == '__main__':
     logs2csv()
