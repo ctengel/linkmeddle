@@ -102,20 +102,37 @@ def extra_info(item):  #dird):
 
 
 def analyze(items):
-    orphan = [x['mediafile'] for x in items if not x['in_archive'] or not x['ijfn']]
+    orphan = [x['mediafile'] for x in items if x['mediafile'] and (not x['in_archive'] or not x['ijfn'])]
     nomedia = [x['webpage_url'] for x in items if not x['mediafile']]
     ulers = {x['channel_url'] for x in items if x['channel_url']} | {x['uploader_url'] for x in items if x['uploader_url']}
-    ulers = sorted([(len([x for x in items if x['channel_url'] == y or x['uploader_url'] == y]), y) for y in ulers])
+    for x in list(ulers):
+        if x.startswith('http://') and x.replace('http://', 'https://') in ulers:
+            ulers.remove(x)
+    for x in items:
+        if not x.get('channel_url'):
+            x['channel_url'] = ''
+        if not x.get('uploader_url'):
+            x['uploader_url'] = ''
+    ulers = sorted([(len([x for x in items if x['channel_url'] == y or x['uploader_url'] == y or x['channel_url'].replace('http://', 'https://') == y or x['uploader_url'].replace('http://', 'https://') == y]), y) for y in ulers])
     playlists = {(x['extractor_key'], x['playlist_id']) for x in items if x['playlist_id']}
     playlists = sorted([(len([x for x in items if x['extractor_key'] == y[0] and x['playlist_id'] == y[1]]), y[0], y[1]) for y in playlists])
     return orphan, nomedia, ulers, playlists
 
+def stripchannels(pls, chans):
+    """Remove channels from playlist list"""
+    for x in list(pls):
+        for y in chans:
+            if x[1] in y[1].split('/')[2] and y[1].endswith(x[2]):
+                pls.remove(x)
 
 @click.command()
 @click.argument('dirname')
 @click.argument('arcfile')
 @click.argument('outcsv')
-def logs2csv(dirname, arcfile, outcsv):
+@click.option('-s', '--skip-missing', help='Do not output missing files', is_flag=True)
+@click.option('-i', '--investigate', help='files to retry', type=click.File('w'))
+@click.option('-w', '--watch', help='urls to refresh', type=click.File('w'))
+def logs2csv(dirname, arcfile, outcsv, skip_missing, investigate, watch):
     """Read a local ytdl directory and archive file and output a CSV"""
     print('Reading directory...')
     mydirinfo = pulldirinfo(dirname)
@@ -136,18 +153,32 @@ def logs2csv(dirname, arcfile, outcsv):
     print('orphan files (no metadata)')
     for x in orphan:
         print(x)
+    if(investigate):
+        investigate.write('\n'.join(orphan))
+        investigate.write('\n')
+        investigate.close()
     print()
-    print('no media (just metadata)')
-    for x in nomedia:
-        print(x)
-    print()
+    if not skip_missing:
+        print('no media (just metadata)')
+        for x in nomedia:
+            print(x)
+        print()
+    stripchannels(playlists, ulers)
     print('uploaders')
     for x in ulers:
         print("{}\t{}".format(x[1], x[0]))
     print()
     for x in playlists:
-        print("{} {}\t{}".format(x[1], x[2], x[0]))
+        print("{}:{}\t{}".format(x[1], x[2], x[0]))
     print()
+    if(watch):
+        watch.write('\n'.join([x[1] for x in ulers]))
+        if ulers:
+            watch.write('\n')
+        watch.write('\n'.join(['https://www.youtube.com/playlist?list={}'.format(x[2]) for x in playlists if x[1] == 'youtube']))
+        if playlists:
+            watch.write('\n')
+        watch.close()
     print('done!')
 
 if __name__ == '__main__':
