@@ -3,15 +3,18 @@
 import json
 import os
 import click
-import requests
+import lmaqcl 
 
-DEFAPI = 'http://127.0.0.1:5000/import'
+DEFAPI = 'http://127.0.0.1:5000/'
 
 @click.command()
 @click.option('-a', '--api', default=DEFAPI)
 @click.argument('dirpath')
 def pullin(api, dirpath):
     """Look through a local directory for .info.json files and import/register with API ytdl backend"""
+    if api.endswith('/import'):
+        api = api.rsplit('/', 1)[0] + '/'
+    myapi = lmaqcl.LinkMeddleClient(api)
     for n in os.listdir(dirpath):
         if not n.endswith('.info.json'):
             continue
@@ -31,10 +34,10 @@ def pullin(api, dirpath):
                 print('Skipping {} fn since file not exist or zero...'.format(sp))
                 continue
         print('Attempting to import {}...'.format(n))
-        resp = requests.post(api, json={'sourcesys': None, 'sourcedir': dirpath, 'ijf': fd, 'ijfn': n, 'mediafile': fn})
-        resp.raise_for_status()
-        rj = resp.json()
-        print('Result for {}:\t{}'.format(n, rj.get('result')))
+        print('Result for {}:\t{}'.format(n, myapi.import_info(info=fd,
+                                                               info_name=n,
+                                                               media_name=fn,
+                                                               localdir=dirpath))
 
 
 if __name__ == '__main__':

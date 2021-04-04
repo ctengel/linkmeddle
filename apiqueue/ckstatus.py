@@ -1,9 +1,9 @@
 """Check status of downloads"""
 
 import click
-import requests
+import lmaqcl
 
-DEFAPI = 'http://127.0.0.1:5000/download/'
+DEFAPI = 'http://127.0.0.1:5000/'
 
 @click.command()
 @click.option('-a', '--api', default=DEFAPI)
@@ -13,18 +13,18 @@ def pullin(api, dlid):
 
     output any not SUCCESS
     """
+    if api.endswith('/download/'):
+        api = api.rsplit('/', 2)[0] + '/'
+    myapi = lmaqcl.LinkMeddleClient(api)
     ids = []
     if dlid:
         ids = [dlid]
     if not ids:
-        resp = requests.get(api)
-        resp.raise_for_status()
-        ids = [x['id'] for x in resp.json()['downloads']]
+        ids = myapi.all_downloads()
     for myid in ids:
-        r2 = requests.get(api + myid)
-        r2.raise_for_status()
-        if r2.json()['state'] != 'SUCCESS':
-            print(r2.json()['url'])
+        r2 = myapi.download_detail(myid)
+        if r2['state'] != 'SUCCESS':
+            print(r2['url'])
 
 
 if __name__ == '__main__':
