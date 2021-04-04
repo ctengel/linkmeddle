@@ -1,5 +1,5 @@
 
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template, jsonify, url_for
 from celery.result import AsyncResult
 #from youtube_dl.utils import YoutubeDLError
 import tasks
@@ -24,7 +24,7 @@ def download():
     elif request.args and 'url' in request.args:
         url = request.args['url']
     else:
-        return jsonify({'downloads': [{'id': key, 'url': value} for key, value in downloads.items()]})
+        return jsonify({'downloads': [{'id': key, 'url': value, 'links': {'self': url_for('onedl', dlid=key)}} for key, value in downloads.items()]})
 
     if not info:
         info = {'url': url}
@@ -40,13 +40,14 @@ def download():
         return render_template('submit.html', dlid=result.id)
     outp = dict(info)
     outp['id'] = result.id
+    outp['links'] = {'self': url_for('onedl', dlid=result.id)}
     return jsonify(outp)
 
 @app.route('/download/<dlid>')
 def onedl(dlid):
     """Get details on one download"""
     res = AsyncResult(dlid, app=tasks.app)
-    finres = {'id': dlid, 'state': res.state, 'celery_state': res.state 'url': downloads.get(dlid), 'result': None, 'error': None}
+    finres = {'id': dlid, 'state': res.state, 'celery_state': res.state, 'url': downloads.get(dlid), 'result': None, 'error': None, 'links': {'self': url_for('onedl', dlid=dlid)}}
     if res.ready():
         #try:
         fullres = res.get()

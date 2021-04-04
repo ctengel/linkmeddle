@@ -103,6 +103,7 @@ def extra_info(item):  #dird):
 
 def analyze(items):
     orphan = [x['mediafile'] for x in items if x['mediafile'] and (not x['in_archive'] or not x['ijfn'])]
+    faildl = [x['webpage_url'] for x in items if not x['in_archive'] and x['ijfn']]
     nomedia = [x['webpage_url'] for x in items if not x['mediafile']]
     ulers = {x['channel_url'] for x in items if x['channel_url']} | {x['uploader_url'] for x in items if x['uploader_url']}
     for x in list(ulers):
@@ -116,7 +117,7 @@ def analyze(items):
     ulers = sorted([(len([x for x in items if x['channel_url'] == y or x['uploader_url'] == y or x['channel_url'].replace('http://', 'https://') == y or x['uploader_url'].replace('http://', 'https://') == y]), y) for y in ulers])
     playlists = {(x['extractor_key'], x['playlist_id']) for x in items if x['playlist_id']}
     playlists = sorted([(len([x for x in items if x['extractor_key'] == y[0] and x['playlist_id'] == y[1]]), y[0], y[1]) for y in playlists])
-    return orphan, nomedia, ulers, playlists
+    return orphan, nomedia, ulers, playlists, faildl
 
 def stripchannels(pls, chans):
     """Remove channels from playlist list"""
@@ -149,12 +150,12 @@ def logs2csv(dirname, arcfile, outcsv, skip_missing, investigate, watch):
         for myitem in myclean:
             writer.writerow(myitem)
     print('analyzing')
-    orphan, nomedia, ulers, playlists = analyze(myclean)
+    orphan, nomedia, ulers, playlists, faildl = analyze(myclean)
     print('orphan files (no metadata)')
     for x in orphan:
         print(x)
     if(investigate):
-        investigate.write('\n'.join(orphan))
+        investigate.write('\n'.join(faildl))
         investigate.write('\n')
         investigate.close()
     print()
@@ -164,6 +165,10 @@ def logs2csv(dirname, arcfile, outcsv, skip_missing, investigate, watch):
             print(x)
         print()
     stripchannels(playlists, ulers)
+    print('failed')
+    for x in faildl:
+        print(x)
+    print()
     print('uploaders')
     for x in ulers:
         print("{}\t{}".format(x[1], x[0]))

@@ -7,11 +7,11 @@ from youtube_dl.utils import locked_file, YoutubeDLError
 
 TGTDIR = None
 TGTAR = None
-# TODO cachedir, user/password, cookiefile, progress_hooks,dump-json, flat-playlist, dump-single, json, quiet???
+# TODO cachedir, user/password, cookiefile, progress_hooks, flat-playlist, quiet, simulate, restrictfilenames, ignoreerrors, nooverwrites, playlistrandom,skip_download,extract_flat,auto_subtitles
 
 def _ydl():
     os.chdir(TGTDIR)
-    opts = {'writeinfojson': True, 'download_archive': TGTAR}
+    opts = {'writeinfojson': True, 'download_archive': TGTAR, 'writethumbnail': True, 'writesubtitles': True, 'sleep_interval': 4, 'max_sleep_interval': 16}
     return YoutubeDL(opts)
 
 def download(info):
