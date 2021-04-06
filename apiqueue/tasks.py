@@ -32,7 +32,7 @@ def download(info):
     myback = info.get('backend', [None])[0]
     if not myback:
         myback = 'ytdl'
-        info['myback'] = myback
+        info['backend'] = [myback, None]
     # TODO more generic log name
     ld = app.conf.get('YTDL_LOG')
     thisfile = None
