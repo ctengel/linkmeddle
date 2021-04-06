@@ -59,6 +59,8 @@ def pulldirinfo(tdr):
         extra_info(itr)
         output.append(itr)
     for item in mediaf + tinyf:
+        if item.endswith('.jpg') or item.endswith('.webp') or item.endswith('.en.vtt'):
+            continue
         itr = {'ijf': None, 'ijfn': None, 'mediafile': item, 'extractor_key': None, 'id': None}
         extra_info(itr)
         output.append(itr)
