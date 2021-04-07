@@ -6,8 +6,9 @@ import uuid
 import json
 from celery import Celery
 import ytdl
+import vi
 
-BACKENDS = {'ytdl': ytdl.backends()}
+BACKENDS = {'ytdl': ytdl.backends(), 'vi': vi.backends()}
 
 os.environ.setdefault('CELERY_CONFIG_MODULE', 'celeryconfig')
 
@@ -23,36 +24,38 @@ def download(info):
     """Given a dictionary:
     url: ""
     backend: []
+    recurse:
 
     Do a download and log and return:
     url: ""
-    data: ""
+    data: "" (w/ entries)
     """
     url = info.get('url')
     myback = info.get('backend', [None])[0]
     if not myback:
+        # TODO auto detect others based on URL
         myback = 'ytdl'
         info['backend'] = [myback, None]
     # TODO more generic log name
-    ld = app.conf.get('YTDL_LOG')
+    ldp = app.conf.get('YTDL_LOG')
     thisfile = None
-    if ld:
-        logdir = Path(ld)
+    if ldp:
+        logdir = Path(ldp)
         # TODO use task ID instead??? or include in info at least???
         thisfile = logdir.joinpath(str(uuid.uuid1()))
         initiallog = info.copy()
         initiallog['error'] = None
-        with thisfile.open('w') as fh:
-            json.dump(initiallog, fh)
+        with thisfile.open('w') as filehand:
+            json.dump(initiallog, filehand)
     res = BACKENDS[myback]['download'](info)
-    # TODO spawn child tasks
+    # TODO spawn child tasks - or downstream?
     if url and not res.get('url'):
         res['url'] = url
     if not res.get('error'):
         res['error'] = None
     if thisfile:
-        with thisfile.open('w') as fh:
-            json.dump(res, fh)
+        with thisfile.open('w') as filehand:
+            json.dump(res, filehand)
     return res
 
 @app.task

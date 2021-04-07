@@ -4,6 +4,7 @@ from pathlib import Path
 import datetime
 import uuid
 import json
+import collections
 #import csv
 import click
 
@@ -40,18 +41,22 @@ def greplogs(logf, whendct):
     """Grep a log file for interesting minutes"""
     greps = collections.defaultdict(list)
     result = {k: [] for k in whendct.keys()}
-    for k,v in whendict:
+    for k,v in whendct:
         for thismin in [-1, 0, 1]:
             # TODO determine string value from v + thismin
+            minstring = v + thismin
             greps[minstring].append(k)
     # TODO verify proper sort or do string conversion here...
     actual_greps = sorted(greps.keys())
+    currentgrep = None
     with logf.open():
         # TODO intelligent grepping
+        assert actual_greps
+        fullline = ''
         # if found...
         for tgt in greps[currentgrep]:
             result[tgt].append(fullline)
-    return fulline
+    return fullline
 
 def logtimes(dirdata):
     """determine the times when failures may have occured"""

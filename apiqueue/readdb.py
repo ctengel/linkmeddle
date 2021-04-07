@@ -55,7 +55,7 @@ def pulldirinfo(tdr):
                 mediafile = None
         if mediafile:
             mediaf.remove(mediafile)
-        itr = {'ijf': ijf, 'ijfn': item, 'mediafile': mediafile, 'extractor_key': ijf.get('extractor_key').lower(), 'id': ijf.get('id')}
+        itr = {'ijf': ijf, 'ijfn': item, 'mediafile': mediafile, 'extractor_key': ijf.get('extractor_key').lower(), 'id': ijf.get('id'), 'possiblefiles': possiblefiles}
         extra_info(itr)
         output.append(itr)
     for item in mediaf + tinyf:

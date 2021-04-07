@@ -37,7 +37,7 @@ def pullin(api, dirpath):
         print('Result for {}:\t{}'.format(n, myapi.import_info(info=fd,
                                                                info_name=n,
                                                                media_name=fn,
-                                                               localdir=dirpath))
+                                                               localdir=dirpath)))
 
 
 if __name__ == '__main__':
