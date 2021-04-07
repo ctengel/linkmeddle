@@ -18,12 +18,13 @@ def cli(ctx, api, quiet):
 @cli.command()
 @click.argument('url', nargs=-1)
 @click.option('-w', '--wait', type=int, help='check for resp every X secs')
+@click.option('-b', '--backend', help='Specify a backend')
 @click.pass_context
-def download(ctx, url, wait):
+def download(ctx, url, wait, backend):
     """Download one or more URLs"""
     # TODO return error status if wait and failure
     # TODO more concise status reporting
-    ids = [ctx.obj['api'].start_download(x) for x in url]
+    ids = [ctx.obj['api'].start_download(x, backend=backend) for x in url]
     if not ctx.obj['quiet']:
         print('ID(s):')
         for myid in ids:
