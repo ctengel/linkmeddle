@@ -86,12 +86,14 @@ def download(info):
     recurse = False
     # TODO attempt to parse actual page URL instead of xhr stuff
     assert url
+    urls = urllib.parse.urlparse(url)
+    assert urls
     # TODO allow others besides profiles...
-    assert urllib.parse.urlparse(url).path.startswith('/profiles/')
-    subp = info.get('backend', []).get(1)
-    if not subp and url.path.endswith('/activity'):
+    assert urls.path.startswith('/profiles/')
+    subp = info.get('backend', [None, None])[1]
+    if not subp and urls.path.endswith('/activity'):
         subp = 'profile_activity'
-    if not subp and url.path.endswith('/videos/best'):
+    if not subp and urls.path.endswith('/videos/best'):
         subp = 'profile_videos_best'
     assert subp
     # TODO use domain to determine ytdl subparser
