@@ -48,6 +48,13 @@ def download(info):
         with thisfile.open('w') as filehand:
             json.dump(initiallog, filehand)
     res = BACKENDS[myback]['download'](info)
+    if res.get('recurse') == 'async' and res.get('recurse_status') == 'prepared' and res.get('type') == 'playlist':
+        for childtask in res['data']['entries']:
+            cptask = childtask.copy()
+            assert not cptask.pop('retrieved')
+            newid = download.delay(cptask)
+            childtask['jobid'] = newid.id
+        res['recurse_status'] = 'submitted'
     # TODO spawn child tasks - or downstream?
     if url and not res.get('url'):
         res['url'] = url

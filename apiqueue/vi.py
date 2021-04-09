@@ -80,10 +80,8 @@ def download(info):
     url = info.get('url')
     mytype = info.get('type', 'playlist')
     assert mytype == 'playlist'
-    # TODO recurse here or upstream?
-    recurse = info.get('recurse', True)
-    # TODO actually honor recurse
-    recurse = False
+    recurse = info.get('recurse', 'async')
+    assert recurse in ['async', False]  # sync and internal not supported yet
     # TODO attempt to parse actual page URL instead of xhr stuff
     assert url
     urls = urllib.parse.urlparse(url)
@@ -97,13 +95,20 @@ def download(info):
         subp = 'profile_videos_best'
     assert subp
     # TODO use domain to determine ytdl subparser
-    entries = [{'url': x, 'backend': ['ytdl', None]} for x in SUBPARSERS[subp](url)]
+    entries = [{'url': x,
+                'backend': ['ytdl', None],
+                'retrieved': False} for x in SUBPARSERS[subp](url)]
+    recurse_status = None
+    if entries and recurse == 'async':
+        # TODO specify here more jobs needed
+        recurse_status = 'prepared'
     # TODO is data-entries the right way to do this?
     return {'url': url,
             'backend': ['vi', subp],
             'data': {'entries': entries},
             'error': error,
             'recurse': recurse,
+            'recurse_status': recurse_status,
             'type': mytype,
             'partial': subp != 'profile_videos_best'}
 
