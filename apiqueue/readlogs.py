@@ -41,22 +41,20 @@ def greplogs(logf, whendct):
     """Grep a log file for interesting minutes"""
     greps = collections.defaultdict(list)
     result = {k: [] for k in whendct.keys()}
-    for k,v in whendct:
-        for thismin in [-1, 0, 1]:
-            # TODO determine string value from v + thismin
-            minstring = v + thismin
+    for k,v in whendct.items():
+        for thismin in [-31, 31]:
+            newtime = v + datetime.timedelta(seconds=thismin)
+            minstring = newtime.isoformat(sep=' ')[0:16]
             greps[minstring].append(k)
-    # TODO verify proper sort or do string conversion here...
-    actual_greps = sorted(greps.keys())
     currentgrep = None
-    with logf.open():
-        # TODO intelligent grepping
-        assert actual_greps
-        fullline = ''
-        # if found...
-        for tgt in greps[currentgrep]:
-            result[tgt].append(fullline)
-    return fullline
+    with logf.open() as myfh:
+        while True:
+            fulline = myfh.readline()
+            if not fulline:
+                break
+            for tgt in greps[fulline[1:17]]:
+                result[tgt].append(fulline.strip())
+    return result
 
 def logtimes(dirdata):
     """determine the times when failures may have occured"""
@@ -67,7 +65,7 @@ def addlogdetails(dirdata, logfile):
     times = logtimes(dirdata)
     details = greplogs(logfile, times)
     for x in dirdata:
-        x['logdetails'] = details[x['logid']]
+        x['logdetails'] = details.get(x['logid'])
 
 # TODO attempt to read flask.log ?
 
@@ -83,6 +81,9 @@ def logs2csv(dirname, cellog, outcsv):
     """Read a local log directory and log file and output a CSV"""
     print('Reading directory...')
     mydirinfo = pulldirinfo(Path(dirname))
+    for x in mydirinfo:
+        print(x)
+    addlogdetails(mydirinfo, Path(cellog))
     for x in mydirinfo:
         print(x)
 
