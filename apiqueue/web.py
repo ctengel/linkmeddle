@@ -58,7 +58,7 @@ def onedl(dlid):
               'result': None,
               'error': None,
               'links': {'self': url_for('onedl', dlid=dlid)},
-              'ignoreerorrs': None}
+              'ignoreerrors': None}
     if res.ready():
         #try:
         fullres = res.get()
