@@ -53,19 +53,30 @@ def download(ctx, url, wait, backend, ignore_errors):
 @click.option('-p', '--partial', type=int, help='Process a random 1/Nth of file')
 @click.option('-i', '--ignore-errors-sometimes', is_flag=True,
               help='Pass ignore errors half the time')
+@click.option('-b', '--backends-inline', is_flag=True,
+              help='Respect backends in file')
 @click.pass_context
-def refresh(ctx, filename, partial, ignore_errors_sometimes):
+def refresh(ctx, filename, partial, ignore_errors_sometimes, backends_inline):
     """Refresh all URLs in a given file"""
+    backend = None
     urls = [line.rstrip('\n') for line in filename]
     if partial:
         full = len(urls)
         mypart = int(full/partial) + 1
         urls = random.sample(urls, mypart)
     for url in urls:
+        if backends_inline:
+            backend, _, realurl = url.rpartition('\t')
+            if not backend:
+                backend = None
+        else:
+            realurl = url
         ignoreerrors = False
         if ignore_errors_sometimes and bool(random.getrandbits(1)):
             ignoreerrors = True
-        myid = ctx.obj['api'].start_download(url, ignoreerrors=ignoreerrors)
+        myid = ctx.obj['api'].start_download(url=realurl,
+                                             ignoreerrors=ignoreerrors,
+                                             backend=backend)
         if not ctx.obj['quiet']:
             print("{}\t{}".format(myid, url))
 
