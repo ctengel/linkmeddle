@@ -41,12 +41,11 @@ def greplogs(logf, whendct):
     """Grep a log file for interesting minutes"""
     greps = collections.defaultdict(list)
     result = {k: [] for k in whendct.keys()}
-    for k,v in whendct.items():
+    for k, v in whendct.items():
         for thismin in [-31, 31]:
             newtime = v + datetime.timedelta(seconds=thismin)
             minstring = newtime.isoformat(sep=' ')[0:16]
             greps[minstring].append(k)
-    currentgrep = None
     with logf.open() as myfh:
         while True:
             fulline = myfh.readline()

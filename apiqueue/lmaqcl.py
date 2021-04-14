@@ -39,10 +39,12 @@ class LinkMeddleClient:
         resp.raise_for_status()
         return resp.json()
 
-    def start_download(self, url, backend=None):
+    def start_download(self, url, backend=None, ignoreerrors=False):
         """Initiate download of given URL and return ID"""
         # TODO support more than just URL
         resp = requests.post(urljoin(self.api, 'download/'),
-                             json={'url': url, 'backend': [backend, None]})
+                             json={'url': url,
+                                   'backend': [backend, None],
+                                   'ignoreerrors': ignoreerrors})
         resp.raise_for_status()
         return resp.json().get('id')

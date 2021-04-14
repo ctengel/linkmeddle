@@ -25,11 +25,17 @@ def download(info):
     url: ""
     backend: []
     recurse:
+    ignoreerrors
 
     Do a download and log and return:
     url: ""
-    data: "" (w/ entries)
+    data: "" (w/ entries - retrieved, jobid)
+    error:
+    recurse:
+    recurse_status
     """
+
+    # Preperation
     url = info.get('url')
     myback = info.get('backend', [None])[0]
     if not myback:
@@ -39,6 +45,8 @@ def download(info):
     # TODO more generic log name
     ldp = app.conf.get('YTDL_LOG')
     thisfile = None
+
+    # Initial log
     if ldp:
         logdir = Path(ldp)
         # TODO use task ID instead??? or include in info at least???
@@ -47,7 +55,11 @@ def download(info):
         initiallog['error'] = None
         with thisfile.open('w') as filehand:
             json.dump(initiallog, filehand)
+
+    # Run
     res = BACKENDS[myback]['download'](info)
+
+    # Recurse
     if res.get('recurse') == 'async' and res.get('recurse_status') == 'prepared' and res.get('type') == 'playlist':
         for childtask in res['data']['entries']:
             cptask = childtask.copy()
@@ -55,7 +67,8 @@ def download(info):
             newid = download.delay(cptask)
             childtask['jobid'] = newid.id
         res['recurse_status'] = 'submitted'
-    # TODO spawn child tasks - or downstream?
+
+    # Results
     if url and not res.get('url'):
         res['url'] = url
     if not res.get('error'):

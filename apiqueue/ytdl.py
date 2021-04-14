@@ -7,11 +7,20 @@ from youtube_dl.utils import locked_file, YoutubeDLError
 
 TGTDIR = None
 TGTAR = None
-# TODO cachedir, user/password, cookiefile, progress_hooks, flat-playlist, quiet, simulate, restrictfilenames, ignoreerrors, nooverwrites, playlistrandom,skip_download,extract_flat,auto_subtitles
 
-def _ydl():
+def _ydl(ignoreerrors=False):
     os.chdir(TGTDIR)
-    opts = {'writeinfojson': True, 'download_archive': TGTAR, 'writethumbnail': True, 'writesubtitles': True, 'sleep_interval': 4, 'max_sleep_interval': 16}
+    # TODO user, password, cookiefile
+    # TODO extract_flat:in_playlist, simulate, skip_download
+    # TODO progress_hooks, quiet
+    # TODO cachedir, restrictfilenames, nooverwrites, playlistrandom, auto_subtitles
+    opts = {'writeinfojson': True,
+            'download_archive': TGTAR,
+            'writethumbnail': True,
+            'writesubtitles': True,
+            'sleep_interval': 4,
+            'max_sleep_interval': 16,
+            'ignoreerrors': ignoreerrors}
     return YoutubeDL(opts)
 
 def download(info):
@@ -20,7 +29,8 @@ def download(info):
     url = info.get('url')
     # TODO broader support for new input format
     assert url
-    with _ydl() as ydl:
+    ignoreerrors = info.get('ignoreerrors', False)
+    with _ydl(ignoreerrors=ignoreerrors) as ydl:
         # TODO add way to not download or process
         try:
             retcode = ydl.extract_info(url)
@@ -28,7 +38,7 @@ def download(info):
             retcode = None
             error = str(e)
     # TODO broader support for new output format
-    return {'url': url, 'data': retcode, 'error': error}
+    return {'url': url, 'data': retcode, 'error': error, 'ignoreerrors': ignoreerrors}
 
 
 def read_archive():
