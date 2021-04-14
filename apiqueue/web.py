@@ -1,3 +1,4 @@
+"""Flask-based WebGUI and RESTful API into LinkMeddle task queue"""
 
 from flask import Flask, request, render_template, jsonify, url_for
 from celery.result import AsyncResult
@@ -14,7 +15,7 @@ def download():
     """Download a file or list downloads"""
     url = None
     info = None
-    
+
     # Pull URL or full JSON from input
     if request.json:
         url = request.json.get('url')
@@ -24,13 +25,16 @@ def download():
     elif request.args and 'url' in request.args:
         url = request.args['url']
     else:
-        return jsonify({'downloads': [{'id': key, 'url': value, 'links': {'self': url_for('onedl', dlid=key)}} for key, value in downloads.items()]})
+        return jsonify({'downloads': [{'id': key,
+                                       'url': value,
+                                       'links': {'self': url_for('onedl', dlid=key)}}
+                                      for key, value in downloads.items()]})
 
     if not info:
         info = {'url': url}
 
     assert 'id' not in info
-    
+
     result = tasks.download.delay(info)
 
     # TODO validate if URL recently downloaded
@@ -47,7 +51,14 @@ def download():
 def onedl(dlid):
     """Get details on one download"""
     res = AsyncResult(dlid, app=tasks.app)
-    finres = {'id': dlid, 'state': res.state, 'celery_state': res.state, 'url': downloads.get(dlid), 'result': None, 'error': None, 'links': {'self': url_for('onedl', dlid=dlid)}}
+    finres = {'id': dlid,
+              'state': res.state,
+              'celery_state': res.state,
+              'url': downloads.get(dlid),
+              'result': None,
+              'error': None,
+              'links': {'self': url_for('onedl', dlid=dlid)},
+              'ignoreerorrs': None}
     if res.ready():
         #try:
         fullres = res.get()
@@ -60,6 +71,7 @@ def onedl(dlid):
             finres['result'] = fullres.get('data')
         if not finres.get('url') and fullres.get('url'):
             finres['url'] = fullres['url']
+        finres['ignoreerrors'] = fullres.get('ignoreerrors')
             # TODO parse and return other relevant sections...
         #except YoutubeDLError as e:
         #    finres['result'] = False
