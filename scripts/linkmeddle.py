@@ -74,15 +74,19 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
         return
     req = requests.get(url, stream=True, cookies=cookies, headers=headers)
     req.raise_for_status()
+    #if not r.ok or int(r.headers['content-length']) < 1024*1024:
     req.raw.decode_content = True
     if not target and autoname:
-        target =  re.findall("filename=\"(.+)\"", req.headers.get('content-disposition'))[0]
+        target = re.findall("filename=\"(.+)\"", req.headers.get('content-disposition'))[0]
         print('Auto detecting name as {}'.format(target))
         if os.path.exists(target):
             warnings.warn('{} already exists; skipping {}'.format(target, url))
             return
     with open(target, 'wb') as fil:
         shutil.copyfileobj(req.raw, fil)
+        #for chunk in r.iter_content(chunk_size=1073741824):
+        #    if chunk:
+        #        f.write(chunk)
 
 
 def bcv(url):
@@ -134,6 +138,14 @@ def cli(fnc=None):
     for aurl in args.url:
         fnc(aurl)
 
+#def get_json(url):
+#    #requests_cache.install_cache('zzz_cache', expire_after=datetime.timedelta(hours=12))
+#    #start = time.time()
+#    #data = requests.get(url).json()
+#    #print('Got API in {} seconds.'.format(time.time() - start))
+#    #requests_cache.uninstall_cache()
+#    data = dohresolver.doh_session().get(url).json()
+#    return data
 
 if __name__ == '__main__':
     cli()

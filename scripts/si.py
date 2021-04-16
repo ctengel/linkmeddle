@@ -1,17 +1,32 @@
 #!/usr/bin/env python3
 
+
 """Download files from JSON"""
+
 
 import argparse
 import warnings
 import json
 import linkmeddle
+#import requests_cache
+#import datetime
+#import time
+#import requests
+#import dohresolver
+#import collections
+#import random
+#import re
+#import os
+#import urllib
+
 
 QUAL = ['4K', 'High', 'Med', 'Low']
 
 
 def dl_one(indict, base, qual):
     """Try to dl video of one quality"""
+    #file_name = dest + '/' + re.sub('[^\w.]', '_', base_name)
+    #url = '{}{}'.format(baseurl, urllib.parse.quote(base_name))
     url = (base + indict['siteName'] + ' ' + indict['videoName'] + ' ' +
            qual + '.mp4')
     try:
@@ -40,6 +55,30 @@ def json_dl(jsonf, base):
         if not proc_one(item, base):
             print('FAILED {}'.format(item))
 
+
+#def split_data(data, by='bonusGroup'):
+#    result = collections.defaultdict(list)
+#    for d in data:
+#        result[d[by]].append(d)
+#    return result
+#def try_sub(subarea, base, dest, over=False):
+#    total = 0
+#    random.shuffle(subarea)
+#    for i in subarea:
+#        result = attempt_download(i, base, dest)
+#        if not result and not total and not over:
+#            return 0
+#        if result == 1:
+#            total = total + 1
+#    return total
+#def do_it(api, base, dest):
+#    data = split_data(get_json(api))
+#    total = 0
+#    for k, v in data.items():
+#        print(k)
+#        num_dl = try_sub(v, base, dest)
+#        total = total + num_dl
+#    return total
 
 def _cli():
     parser = argparse.ArgumentParser(description='Download files from JSON')
