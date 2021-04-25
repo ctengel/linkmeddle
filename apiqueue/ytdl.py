@@ -78,6 +78,14 @@ def newinfofile(fname, dct):
         json.dump(dct, fh)
 
 
+def set_config(cfg_info):
+    """Set config based on config dict"""
+    global TGTDIR
+    global TGTAR
+    TGTDIR = cfg_info.get('DIR')
+    TGTAR = cfg_info.get('ARC')
+
+
 def backends():
     # TODO add generic import, check, list functions
-    return {'download': download}
+    return {'download': download, 'set_config': set_config}

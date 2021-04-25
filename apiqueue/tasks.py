@@ -7,14 +7,23 @@ import json
 from celery import Celery
 import ytdl
 import vi
+import si
 
-BACKENDS = {'ytdl': ytdl.backends(), 'vi': vi.backends()}
+BACKENDS = {'ytdl': ytdl.backends(), 'vi': vi.backends(), 'si': si.backends()}
 
 os.environ.setdefault('CELERY_CONFIG_MODULE', 'celeryconfig')
 
 app = Celery('tasks')
 
 app.config_from_envvar('CELERY_CONFIG_MODULE')
+
+for BCKND, BCKNDCT in BACKENDS.items():
+    BCKNDF = BCKNDCT.get('set_config')
+    if BCKNDF:
+        BCKNDF(app.conf.get('LMB_' + BCKND.upper())
+
+del BCKND
+del BCKNDCT
 
 ytdl.TGTDIR = app.conf.get('YTDL_DIR')
 ytdl.TGTAR = app.conf.get('YTDL_ARC')

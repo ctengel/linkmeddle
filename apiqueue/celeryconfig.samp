@@ -1,5 +1,7 @@
 CELERY_RESULT_BACKEND = 'redis://'
 BROKER_URL = 'amqp://'
-YTDL_DIR = None
-YTDL_ARC = None
+LMB_YTDL = {'DIR': '',
+            'ARC': ''}
+LMB_SI = {'DIR': '',
+          'KEY': ''}
 YTDL_LOG = None

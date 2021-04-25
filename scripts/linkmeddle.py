@@ -138,14 +138,14 @@ def cli(fnc=None):
     for aurl in args.url:
         fnc(aurl)
 
-#def get_json(url):
-#    #requests_cache.install_cache('zzz_cache', expire_after=datetime.timedelta(hours=12))
-#    #start = time.time()
-#    #data = requests.get(url).json()
-#    #print('Got API in {} seconds.'.format(time.time() - start))
-#    #requests_cache.uninstall_cache()
-#    data = dohresolver.doh_session().get(url).json()
-#    return data
+def get_json(url):
+    #requests_cache.install_cache('zzz_cache', expire_after=datetime.timedelta(hours=12))
+    #start = time.time()
+    data = requests.get(url).json()
+    #print('Got API in {} seconds.'.format(time.time() - start))
+    #requests_cache.uninstall_cache()
+    #data = dohresolver.doh_session().get(url).json()
+    return data
 
 if __name__ == '__main__':
     cli()

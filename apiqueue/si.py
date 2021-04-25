@@ -39,6 +39,7 @@ def dl_one(indict, base, qual):
 
 def proc_one(indict, base):
     """Get best available quality of video"""
+    # TODO get thumbnail
     for qua in QUAL:
         if indict['version' + qua]:
             if dl_one(indict, base, qua.lower()):
@@ -79,6 +80,25 @@ def json_dl(jsonf, base):
 #        num_dl = try_sub(v, base, dest)
 #        total = total + num_dl
 #    return total
+
+def download(info):
+    mytype = info.get('type', 'playlist')
+    burl = info.get('burl')
+    if mytype == 'video':
+        # TODO download one to proper place
+        return {}
+    assert mytype == 'playlist'
+    recurse = info.get('recurse', 'async')
+    assert recurse in ['async', False]  # sync and internal not supported yet
+    # TODO save versioned/dated JSON file
+    # TODO allow passing in site instead of url=JSON, burl
+    vids = linkmeddle.get_json(url)
+
+
+
+def backends():
+    """Return available backends"""
+    return {'download': download, 'set_config': set_config}
 
 def _cli():
     parser = argparse.ArgumentParser(description='Download files from JSON')
