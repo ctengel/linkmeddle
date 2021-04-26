@@ -98,15 +98,15 @@ def logs2csv(dirname, log_file, csv_file, success, failure):
         simple_list = {}
         for myitem in mydirinfo:
             if myitem['ignoreerrors']:
-                if (myitem['backend'], myitem['url']) in simple_list:
+                if (myitem['backend'][0], myitem['url']) in simple_list:
                     continue
-                simple_list[(myitem['backend'], myitem['url'])] = (myitem['type'], False)
+                simple_list[(myitem['backend'][0], myitem['url'])] = (myitem['type'], False)
                 continue
-            simple_list[(myitem['backend'], myitem['url'])] = (myitem['type'], myitem['success'])
+            simple_list[(myitem['backend'][0], myitem['url'])] = (myitem['type'], myitem['success'])
         if success:
             with open(success, 'w') as succ_f:
                 for key, val in simple_list.items():
-                    if val[1] and val[0] != 'video':
+                    if val[1] and val[0] == 'playlist':
                         print('\t'.join(key), file=succ_f)
         if failure:
             with open(failure, 'w') as fail_f:
