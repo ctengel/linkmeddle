@@ -46,14 +46,14 @@ def greplogs(logf, whendct):
     for key, val in whendct.items():
         for thismin in [-8, 0, 8]:
             newtime = val + datetime.timedelta(seconds=thismin)
-            minstring = newtime.isoformat(sep=' ')[0:17]
+            minstring = newtime.isoformat(sep=' ')[0:18]
             greps[minstring].add(key)
     with logf.open() as myfh:
         while True:
             fulline = myfh.readline()
             if not fulline:
                 break
-            for tgt in greps[fulline[1:18]]:
+            for tgt in greps[fulline[1:19]]:
                 result[tgt].append(fulline.strip())
     return result
 
