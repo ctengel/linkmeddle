@@ -22,6 +22,7 @@ import linkmeddle
 
 QUAL = ['4K', 'High', 'Med', 'Low']
 
+SICFG = None
 
 def dl_one(indict, base, qual):
     """Try to dl video of one quality"""
@@ -83,18 +84,23 @@ def json_dl(jsonf, base):
 
 def download(info):
     mytype = info.get('type', 'playlist')
-    burl = info.get('burl')
+    url = info.get('burl')
     if mytype == 'video':
         # TODO download one to proper place
+        # what should URL be???
         return {}
     assert mytype == 'playlist'
     recurse = info.get('recurse', 'async')
     assert recurse in ['async', False]  # sync and internal not supported yet
     # TODO save versioned/dated JSON file
-    # TODO allow passing in site instead of url=JSON, burl
+    # TODO allow passing in site instead of JSON
     vids = linkmeddle.get_json(url)
+    # TODO add passback info and return
 
 
+def set_config(cfg_info):
+    global SICFG
+    SICFG = cfg_info.copy()
 
 def backends():
     """Return available backends"""

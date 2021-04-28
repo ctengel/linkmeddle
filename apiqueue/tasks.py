@@ -20,13 +20,10 @@ app.config_from_envvar('CELERY_CONFIG_MODULE')
 for BCKND, BCKNDCT in BACKENDS.items():
     BCKNDF = BCKNDCT.get('set_config')
     if BCKNDF:
-        BCKNDF(app.conf.get('LMB_' + BCKND.upper())
+        BCKNDF(app.conf.get('LMB_' + BCKND.upper()))
 
 del BCKND
 del BCKNDCT
-
-ytdl.TGTDIR = app.conf.get('YTDL_DIR')
-ytdl.TGTAR = app.conf.get('YTDL_ARC')
 
 @app.task
 def download(info):

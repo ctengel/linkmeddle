@@ -3,5 +3,6 @@ BROKER_URL = 'amqp://'
 LMB_YTDL = {'DIR': '',
             'ARC': ''}
 LMB_SI = {'DIR': '',
-          'KEY': ''}
+          'VPATH': '',
+          'PPATH': ''}
 YTDL_LOG = None
