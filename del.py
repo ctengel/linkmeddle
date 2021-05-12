@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 
-import sys
 
 from pathlib import Path
+import click
 
-with open(sys.argv[1]) as fh:
-    paths = [Path(x.strip('\n')) for x in fh]
+@click.command()
+@click.argument('textfile')
+def delmany(textfile):
+    """Delete many files using a text file"""
+    with open(textfile) as fh:
+        paths = [Path(x.strip('\n')) for x in fh]
+    for item in paths:
+        print(item, item.exists())
+        if item.exists():
+            item.unlink()
+        print(item, item.exists())
 
-for item in paths:
-    print(item, item.exists())
-    if item.exists():
-        item.unlink()
-    print(item, item.exists())
+if __name__ == '__main__':
+    delmany()
