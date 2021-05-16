@@ -26,32 +26,33 @@ def txt2paths(textfile):
 
 def csv2paths(csvfile, users, directory='.'):
     """Return paths associated with users from a text file"""
-    dirlist = list(Path(directory).iterdir())
+    mydir = Path(directory)
+    dirlist = list(mydir.iterdir())
     with open(csvfile, newline='') as csvfh:
-        interest = [x for x in csv.DictReader(csvfh) if x['uploader'] in users]
+        interest = [x for x in csv.DictReader(csvfh) if x['uploader'] in users and x['extractor_key'] == 'youtube']
     dellist = []
     for thisfile in interest:
         if thisfile['mediafile'] and thisfile['ijfn'] and not thisfile['possiblefiles'] and thisfile['mediafile'].startswith(thisfile['title']) and thisfile['ijfn'].startswith(thisfile['title']):
             assert thisfile['ijfn'].endswith('.info.json')
             base = thisfile['ijfn'][:-10]
             assert thisfile['mediafile'].startswith(base)
-            dellist.append(thisfile['ijfn'])
-            dellist.append(thisfile['mediafile'])
+            dellist.append(mydir.joinpath(thisfile['ijfn']))
+            dellist.append(mydir.joinpath(thisfile['mediafile']))
             for ckone in dirlist:
-                if ckone.startswith(base) and ckone not in [thisfile['ijfn'], thisfile['mediafile']]:
-                    warnings.warn('additional', ckone)
+                if ckone.name.startswith(base) and ckone.name not in [thisfile['ijfn'], thisfile['mediafile']]:
+                    warnings.warn('additional {}'.format(ckone))
                     dellist.append(ckone)
             continue
         if thisfile['mediafile']:
-            dellist.append(thisfile['mediafile'])
+            dellist.append(mydir.joinpath(thisfile['mediafile']))
             continue
-        warnings.warn('skipping', thisfile['title'])
+        warnings.warn('skipping {}'.format(thisfile['title']))
     return dellist
 
 @click.command()
 @click.option('-t', '--textfile', help='text file with files to delete')
 @click.option('-c', '--csvfile', help='CSV output from readdb.py')
-@click.option('-p', '--pretend', help='Don\'t actually delete, just pretend')
+@click.option('-p', '--pretend', help='Don\'t actually delete, just pretend', is_flag=True)
 @click.option('-d', '--directory', help='Directory for CSV mode')
 @click.argument('users', nargs=-1)
 def delmany(textfile=None, csvfile=None, pretend=False, directory='.', users=None):
