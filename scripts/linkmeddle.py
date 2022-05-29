@@ -28,10 +28,10 @@ _F_HEAD = {"Accept": "text/html,application/xhtml+xml,application/xml;"
                          "Gecko/20100101 Firefox/75.0"}
 
 
-def getsoup(url, headers=None, cookies=None, verbose=False):
+def getsoup(url, headers=None, cookies=None, verbose=False, auth=None):
     """Get a BeautifulSoup4 object from given URL"""
     # TODO: CloudFlare
-    req = requests.get(url, headers=headers, cookies=cookies)
+    req = requests.get(url, headers=headers, cookies=cookies, auth=auth)
     if verbose:
         print(req.text)
     soup = bs4.BeautifulSoup(req.text, 'html.parser')
@@ -56,7 +56,7 @@ def basenameurl(url):
     return os.path.basename(urllib.parse.urlparse(url).path)
 
 
-def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False):
+def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False, auth=None):
     """Download one file, default target is base name"""
     print(url)
     assert not (autoname and target)
@@ -72,7 +72,7 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
     if not autoname and os.path.exists(target):
         warnings.warn('{} already exists; skipping {}'.format(target, url))
         return
-    req = requests.get(url, stream=True, cookies=cookies, headers=headers)
+    req = requests.get(url, stream=True, cookies=cookies, headers=headers, auth=auth)
     req.raise_for_status()
     #if not r.ok or int(r.headers['content-length']) < 1024*1024:
     req.raw.decode_content = True
