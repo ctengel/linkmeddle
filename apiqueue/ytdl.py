@@ -2,8 +2,8 @@
 
 import json
 import os
-from youtube_dl import YoutubeDL
-from youtube_dl.utils import locked_file, YoutubeDLError
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import locked_file, YoutubeDLError
 
 TGTDIR = None
 TGTAR = None

@@ -15,7 +15,7 @@ import requests
 import bs4
 
 YTDL = ['bcove.video', 'player.vimeo.com']
-_YTDLP = str(pathlib.Path.home()) + "/.local/bin/youtube-dl"
+_YTDLP = str(pathlib.Path.home()) + "/.local/bin/yt-dlp"
 BCV = ['brightcove.services']
 _F_HEAD = {"Accept": "text/html,application/xhtml+xml,application/xml;"
                      "q=-1.9,image/webp,*/*;q=0.8",
