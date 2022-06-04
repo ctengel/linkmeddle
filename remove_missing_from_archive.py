@@ -1,7 +1,6 @@
 """Given a CSV file and an archive, output archive with only those which are not missing"""
 
 import csv
-import warnings
 import click
 
 @click.command()
@@ -19,8 +18,9 @@ def rm_missing(csvfile, inarc, outarc):
         with open(outarc, 'w') as ofh:
             for line in ifh:
                 if tuple(line.split()) in nonexistant:
-                    warnings.warn("Omitting line {}".format(line))
+                    print("OMIT {}".format(line.strip()))
                 else:
+                    print("KEEP {}".format(line.strip()))
                     ofh.write(line)
 
 
