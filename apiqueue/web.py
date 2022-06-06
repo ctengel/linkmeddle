@@ -17,7 +17,7 @@ def download():
     info = None
 
     # Pull URL or full JSON from input
-    if request.json:
+    if request.is_json:
         url = request.json.get('url')
         info = dict(request.json)
     elif request.form and 'url' in request.form:
