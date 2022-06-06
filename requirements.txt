@@ -1,0 +1,7 @@
+click
+flask
+celery
+requests
+redis
+bs4
+yt-dlp
