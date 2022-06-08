@@ -37,6 +37,9 @@ def download(info):
         except YoutubeDLError as e:
             retcode = None
             error = str(e)
+    if retcode:
+        # TODO cleaner way to clean up unserializable objects
+        retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
     # TODO broader support for new output format
     return {'url': url, 'data': retcode, 'error': error, 'ignoreerrors': ignoreerrors}
 
