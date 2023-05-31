@@ -10,7 +10,7 @@ def vidpg(aurl, auth):
     ulz = soup.find_all('ul', class_='dropdown downloaddropdown')[0]
     liz = ulz.find_all('li')[1]
     az = liz.find_all('a')[0]
-    linkmeddle.download(urllib.parse.urljoin(aurl, az.get('href')), auth=auth)
+    linkmeddle.download(urllib.parse.urljoin(aurl, az.get('href')), auth=auth, ignore_nf=True)
 
 def idxpg(aurl, auth):
     print(aurl)

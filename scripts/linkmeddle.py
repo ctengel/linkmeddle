@@ -56,7 +56,7 @@ def basenameurl(url):
     return os.path.basename(urllib.parse.urlparse(url).path)
 
 
-def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False, auth=None):
+def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False, auth=None, ignore_nf=False):
     """Download one file, default target is base name"""
     print(url)
     assert not (autoname and target)
@@ -73,7 +73,14 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
         warnings.warn('{} already exists; skipping {}'.format(target, url))
         return
     req = requests.get(url, stream=True, cookies=cookies, headers=headers, auth=auth)
-    req.raise_for_status()
+    if ignore_nf:
+        if req.status_code == 404:
+            warnings.warn('{} returned 404, skipping'.format(url))
+            return
+        else:
+            req.raise_for_status()
+    else:
+        req.raise_for_status()
     #if not r.ok or int(r.headers['content-length']) < 1024*1024:
     req.raw.decode_content = True
     if not target and autoname:
