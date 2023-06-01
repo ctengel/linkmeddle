@@ -11,20 +11,52 @@ import linkmeddle
 TITLE_EXTRA = ' - Photo Gallery'
 TS_FIND = 'Added on'
 
+def find_next_link(soup):
+    """Find the next link, if there is one"""
+    for next_link in soup.find_all("a", class_="pagenav-link1"):
+        if next_link.string == "Next":
+            return next_link.get("href")
+    return None
+
+
+def parse_photos(my_id, url):
+    """Parse js photo album"""
+    for script in linkmeddle.getsoup(url).find_all("script"):
+        for line in script.string.splitlines():
+            if not line.startswith('"'):
+                continue
+            linkmeddle.download(urljoin(url, line.split('"')[1]), directory=str(my_id))
+
 
 def parse_highres(my_id, base_url, soup):
     """Given some soup, look for photos/zips"""
     zip_url = urljoin(base_url, soup.find_all("a", class_='content-link3')[1].get("href"))
     with open(f'{my_id}.zip.url', 'w', encoding="utf8") as url_file:
         url_file.write(zip_url)
-    # TODO handle zip failure case
-    linkmeddle.download(zip_url, f'{my_id}.zip')
+    try:
+        linkmeddle.download(zip_url, f'{my_id}.zip')
+    except linkmeddle.requests.exceptions.HTTPError:
+        for link in soup.find_all("a"):
+            href = link.get("href")
+            if "image.php" in href:
+                parse_photos(my_id, urljoin(base_url, href))
+                return
 
-def parse_vids(soup):
-    pass
 
-def do_vids(url):
-    pass
+def parse_vids(my_id, url):
+    """Parse videos from a link
+
+    Recurses for multiple pages
+    """
+    print(url)
+    soup = linkmeddle.getsoup(url)
+    for vid_link in reversed(soup.find_all("a", class_='vid-link')):
+        href = vid_link.get('href')
+        if href.endswith('.mpg') or href.endswith('.wmv'):
+            linkmeddle.download(urljoin(url, href), directory=str(my_id))
+    next_link = find_next_link(soup)
+    if next_link:
+        parse_vids(my_id, urljoin(url, next_link))
 
 def rli_gal(url):
     """Get info on single gallery"""
@@ -69,9 +101,8 @@ def rli_gal(url):
                   json_file)
     if 'highres' in types:
         parse_highres(my_id, url, soup)
-    #if 'vids' in types:
-    #    parse_vids()
-    #    pass
+    if 'vids' in types:
+        parse_vids(my_id, f'{url}&type=vids')
 
 if __name__ == '__main__':
     linkmeddle.cli(rli_gal)

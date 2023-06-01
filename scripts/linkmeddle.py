@@ -55,8 +55,19 @@ def basenameurl(url):
     """Get the base name of a URL"""
     return os.path.basename(urllib.parse.urlparse(url).path)
 
+def add_dir(directory: str, target: str) -> str:
+    """Add directory component to a target, creating the directory if needed"""
+    if not directory:
+        return target
+    dir_obj = pathlib.Path(directory)
+    if dir_obj.exists():
+        assert dir_obj.is_dir()
+    else:
+        dir_obj.mkdir()
+    return str(dir_obj.joinpath(target))
 
-def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False, auth=None, ignore_nf=False):
+
+def download(url, target=None, cookies=None, fhead=False, referer=None, autoname=False, auth=None, ignore_nf=False, directory=None):
     """Download one file, default target is base name"""
     print(url)
     assert not (autoname and target)
@@ -69,6 +80,7 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
         headers['Referer'] = referer
     if not target and not autoname:
         target = basenameurl(url)
+    target = add_dir(directory, target)
     if not autoname and os.path.exists(target):
         warnings.warn('{} already exists; skipping {}'.format(target, url))
         return
@@ -77,8 +89,7 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
         if req.status_code == 404:
             warnings.warn('{} returned 404, skipping'.format(url))
             return
-        else:
-            req.raise_for_status()
+        req.raise_for_status()
     else:
         req.raise_for_status()
     #if not r.ok or int(r.headers['content-length']) < 1024*1024:
@@ -86,6 +97,7 @@ def download(url, target=None, cookies=None, fhead=False, referer=None, autoname
     if not target and autoname:
         target = re.findall("filename=\"(.+)\"", req.headers.get('content-disposition'))[0]
         print('Auto detecting name as {}'.format(target))
+        target = add_dir(directory, target)
         if os.path.exists(target):
             warnings.warn('{} already exists; skipping {}'.format(target, url))
             return
