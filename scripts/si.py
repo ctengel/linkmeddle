@@ -20,15 +20,18 @@ import linkmeddle
 #import urllib
 
 
-QUAL = ['4K', 'High', 'Med', 'Low']
+#QUAL = ['4K', 'High', 'Med', 'Low']
+QUAL = ['High', 'Low']
 
 
 def dl_one(indict, base, qual):
     """Try to dl video of one quality"""
     #file_name = dest + '/' + re.sub('[^\w.]', '_', base_name)
     #url = '{}{}'.format(baseurl, urllib.parse.quote(base_name))
-    url = (base + indict['siteName'] + ' ' + indict['videoName'] + ' ' +
-           qual + '.mp4')
+    qualmod = ''
+    if qual == 'low':
+        qualmod = 'low/'
+    url = (base + qualmod + indict['siteName'] + ' ' + indict['videoName'] + '.mp4')
     try:
         linkmeddle.download(url)
     except Exception as excpt:
@@ -40,7 +43,7 @@ def dl_one(indict, base, qual):
 def proc_one(indict, base):
     """Get best available quality of video"""
     for qua in QUAL:
-        if indict['version' + qua]:
+        if indict.get('version' + qua):
             if dl_one(indict, base, qua.lower()):
                 return True
     #assert False
