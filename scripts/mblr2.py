@@ -9,10 +9,13 @@ import csv
 import linkmeddle
 
 
+
 def get_blog(blog_url):
-    """DL entire XML"""
+    """Convert XML to CSV and JSON"""
     xmlpath = pathlib.Path(blog_url)
     outcsv = pathlib.Path(xmlpath.stem + ".csv")
+    # TODO JSON
+    #outjson = pathlib.Path(xmlpath.stem + ".json")
     with outcsv.open('w', newline='') as cfh:
         cdw = csv.DictWriter(cfh,fieldnames=('source', 'target'))
         cdw.writeheader()
@@ -23,6 +26,8 @@ def get_blog(blog_url):
             slug = post.attrib['slug']
             pid = post.attrib['id']
             video = post.find('video-player')
+            if video is None:
+                video = post.find('regular-body')
             if video is not None:
                 for link in video.text.split('"'):
                     if re.match(r"^https?\:\/\/.+\.mp4$", link):
@@ -30,6 +35,7 @@ def get_blog(blog_url):
                                       "target": "{}_{}-{}".format(slug,
                                                                   pid,
                                                                   linkmeddle.basenameurl(link))})
+                        # TODO consider possibility of multiple videos
                         break
             else:
                 print("NOVID", pid, slug)

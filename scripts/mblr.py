@@ -28,12 +28,14 @@ def get_blog(blog_url):
     offset = 0
     all_posts = []
     while True:
+        print(api_url, offset, MAXLEN)
         resp = requests.get(api_url, params={"start": offset, "num": MAXLEN})
         posts = page2posts(resp.content)
         if not posts:
             break
         all_posts += posts
         offset += MAXLEN
+        # TODO consider a pause here
     new_top = ET.Element('lmposts', {'source': api_url})
     for pst in all_posts:
         new_top.append(pst)
