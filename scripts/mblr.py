@@ -4,6 +4,8 @@
 
 import xml.etree.ElementTree as ET
 import urllib.parse
+import random
+import time
 import requests
 import linkmeddle
 
@@ -35,7 +37,7 @@ def get_blog(blog_url):
             break
         all_posts += posts
         offset += MAXLEN
-        # TODO consider a pause here
+        time.sleep(random.randint(0, 15))
     new_top = ET.Element('lmposts', {'source': api_url})
     for pst in all_posts:
         new_top.append(pst)
