@@ -28,7 +28,7 @@ def get_blog(blog_url, bucket=BUCKET):
         for line in cdr:
             # Check to see if exists first
             filez = oicl.search_files({'url': line['source']})
-            if len(filez) == 1 and filez[0].info['file_object']['obj_size'] > 1024*1024:
+            if len(filez) == 1 and filez[0].info['file_object']['completed'] and filez[0].info['file_object']['obj_size'] > 1024*1024:
                 print(f"already got {line['source']}")
                 continue
             with tempfile.NamedTemporaryFile() as temp:
