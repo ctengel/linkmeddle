@@ -1,80 +1,153 @@
+"""LinkMeddle data models
+
+Includes DLP-compat and LM-native
+"""
+
+import datetime
 from pydantic import BaseModel
 
-# base dlpthing
-
-class PlVidDLP(BaseModel):
-    id: str
-    title: str
-    thumbnail: str
-    description: str
+class CommonDLP(BaseModel):
+    """DLP: Elements fon in both playlists and entries thereof"""
     channel_id: str
-    uploader_id: str
-    uploader: str
     channel_url: str
-    uploader_url: str
-    channel: str
-    duration: int
-    webpage_url: str
-    original_url: str
-    webpage_url_basename: str
-    webpage_url_domain: str
-    epoch: int
-    categories: list[str]
-    live_status: str
-    is_live: bool
-    was_live: bool
-    upload_date: str  # YYYYMMDD
-    timestamp: int  # is this a timestamp of what?
+    description: str
     extractor_key: str
     extractor: str
+    id: str
+    original_url: str
     playlist_count: int
-    playlist: str
-    playlist_id: str
-    playlist_uploader: str
-    playlist_uploader_id: str
-    playlist_channel_id: str
-    playlist_webpage_url: str
-    n_entries: int
-    playlist_index: int
-    playlist_autonumber: int
+    title: str
+    uploader_id: str
+    uploader: str
+    uploader_url: str
+    webpage_url_basename: str
+    webpage_url_domain: str
+    webpage_url: str
+
+
+class PlVidDLP(CommonDLP):
+    """DLP: A vid as seen as a playlist entry"""
+    categories: list[str]
+    channel: str
     display_id: str
+    duration: int
+    epoch: int
+    ext: str  # filename?
+    format_id: str
+    format: str
     fulltitle: str
     _has_drm: bool  # or None
-    format: str
-    format_id: str
-    ext: str  # filename?
-    protocol: str
-    language: str
-    width: int
     height: int
+    is_live: bool
+    language: str
+    live_status: str
+    n_entries: int
+    playlist_autonumber: int
+    playlist_channel_id: str
+    playlist_id: str
+    playlist_index: int
+    playlist: str
+    playlist_uploader_id: str
+    playlist_uploader: str
+    playlist_webpage_url: str
+    protocol: str
+    thumbnail: str
+    timestamp: int  # is this a timestamp of what?
+    upload_date: str  # YYYYMMDD
+    was_live: bool
+    width: int
+
 
 class DLPVersion(BaseModel):
+    """DLP version info"""
     version: str
     current_git_head: str  # optional
     release_git_head: str
     repository: str
 
-class PlaylistDLP(BaseModel):
-    id: str
-    title: str
-    description: str
+class PlaylistDLP(CommonDLP):
+    """A DLP root playlist"""
+    entries: list[PlVidDLP]
+    epoch: int  # is this a timestamp of what?
     modified_date: str  # YYYYMMDD
-    playlist_count: int
+    _type: str  # "playlist
+    _version: DLPVersion
+
+class UlChan(BaseModel):
+    """Uploader/Channel description"""
     channel_id: str
     uploader_id: str
     uploader: str
     channel_url: str
     uploader_url: str
-    _type: str  # "playlist
-    entries: list[PlVidDLP]
+
+class DLPIE(BaseModel):
+    """DLP extractor used"""
     extractor_key: str
     extractor: str
+
+class VidFull(BaseModel):
+    """LM-native full video"""
+    channel: UlChan
+    description: str
+    extractor: DLPIE
+    id: str
+    title: str
     webpage_url: str
-    original_url: str
-    webpage_url_basename: str
-    webpage_url_domain: str
-    epoch: int  # is this a timestamp of what?
-    _version: DLPVersion
+    categories: list[str]
+    duration: int
+    ext: str  # filename?
+    format: str
+    height: int
+    is_live: bool
+    language: str
+    n_entries: int
+    thumbnail: str
+    upload_date:  datetime.datetime
+    was_live: bool
+    width: int
 
+class PlaylistCommon(BaseModel):
+    """Common elements"""
+    id: str
+    title: str
+    modified_date: datetime.datetime
+    webpage_url: str
+    playlist_count: int
 
+class PlaylistFull(PlaylistCommon):
+    """LM-native full playlist"""
+    channel: UlChan
+    entries: list[VidFull]
+    extractor: DLPIE
 
+class PlaylistSum(PlaylistCommon):
+    """Suitable for simple pl lookup table"""
+    channel: str
+    entries: list[str]
+    extractor_id: str
+
+class PlaylistStats(BaseModel):
+    """Stats of a playlist run"""
+    modified_date: datetime.datetime
+    playlist_count: int
+    entries_hash: str
+    different: bool
+    success: bool
+    download_count: int
+    input_params: dict
+    output_params: dict
+    timestamp: datetime.datetime
+    newest_item: datetime.datetime
+    interval: int
+    # schedule: PlaylistSched
+
+class PlaylistSched(BaseModel):
+    """A scedule of when to attempt a playlist"""
+    extractor_id: str
+    id: str
+    next_run: datetime.date
+    freq_days: int
+    input_prams: dict
+    webpage_url: str
+    runs: list[PlaylistStats]  # or flip this relationship
