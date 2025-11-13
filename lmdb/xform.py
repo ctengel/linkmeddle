@@ -1,6 +1,7 @@
 """analytics and transformation"""
 
 import statistics
+import datetime
 from typing import Optional
 from . import models
 
@@ -22,20 +23,22 @@ def compare_pl_runs(old: models.PlaylistStats, new: models.PlaylistStats) -> boo
         return True
     return False
 
+def next_fib(existing: int | float, up: bool) -> int:
+    """Next fibonacci number up or down"""
+    if up:
+        for i in FIB:
+            if i > existing:
+                return i
+        return FIB[-1]
+    for i in sorted(FIB, reverse=True):
+        if i < existing:
+            return i
+    return FIB[0]
 
 def adjust(existing: list[int], up: bool) -> int:
     """Change interval uo or down"""
     med = statistics.median(existing)
-    if up:
-        for i in FIB:
-            if i > med:
-                return i
-        return FIB[-1]
-    for i in sorted(FIB, reverse=True):
-        if i < med:
-            return i
-    return FIB[0]
-
+    return next_fib(med, up)
 
 def rec_adjust_freq(runs: list[models.PlaylistStats]) -> Optional[int]:
     """Recommend a different frequency"""
@@ -48,6 +51,39 @@ def rec_adjust_freq(runs: list[models.PlaylistStats]) -> Optional[int]:
         return adjust(intervals, False)
     return None
 
+def sort_runs(runs: list[models.PlaylistStats]) -> list[models.PlaylistStats]:
+    """Sort run stats"""
+    runs.sort(key=lambda x: x.timestamp)
+    return runs
 
-def next_run(runs, interval):
-    pass
+def next_run(runs: list[models.PlaylistStats], interval: int) -> datetime.date:
+    """Determine when next run should be based on recent runs and some stats"""
+    runs = sort_runs(runs)
+    last_date = runs[-1].timestamp.date()
+    if not runs[-1].success and not all(not x.success for x in runs):
+        if runs[-2].success:
+            return last_date + datetime.timedelta(days=1)
+        return last_date + datetime.timedelta(days=next_fib(runs[-1].interval, True))
+    return last_date + datetime.timedelta(days=interval)
+
+def rum_deltas(old: models.PlaylistStats, new: models.PlaylistStats) -> models.PlaylistStats:
+    """Determine difference between two runs and populate the new with stats"""
+    assert new.timestamp >= old.timestamp
+    new.interval = (new.timestamp.date() - old.timestamp.date()).days
+    new.different = compare_pl_runs(old, new)
+    return new
+
+def add_new_run(schedule: models.PlaylistSched,
+                existing: list[models.PlaylistStats],
+                new: models.PlaylistStats) -> tuple[models.PlaylistSched,
+                                                    list[models.PlaylistStats],
+                                                    models.PlaylistStats]:
+    """Go through motions of adding a new run stats summary"""
+    existing = sort_runs(existing)
+    new = rum_deltas(existing[-1], new)
+    existing.append(new)
+    new_freq = rec_adjust_freq(existing[-3:])
+    if new_freq and new_freq != schedule.freq_days:
+        schedule.freq_days = next_fib(schedule.freq_days, new_freq > schedule.freq_days)
+    schedule.next_run = next_run(existing[-3:], schedule.freq_days)
+    return schedule, existing, new
