@@ -126,3 +126,25 @@ def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.Play
                                 newest_item=newest(inputpl.entries).upload_date,
                                 different=None,  # feed it to him later
                                 interval=None)  # feed it to him later
+
+def failed_stat() -> models.PlaylistStats:
+    return models.PlaylistStats(playlist_count=0,
+                                entries_hash=pl_hash([]),
+                                success=False,
+                                download_count=0,
+                                timestamp=datetime.datetime.now())
+
+def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSum:
+    # clener way to copy common fields?
+    # validate count
+    return models.PlaylistSum(id=inputpl.id,
+                              title=inputpl.title,
+                              modified_date=inputpl.modified_date,
+                              webpage_url=inputpl.webpage_url,
+                              playlist_count=inputpl.playlist_count,
+                              channel=inputpl.channel.channel_url,  # is this right?
+                              entries=[entry2text(x) for x in inputpl.entries],
+                              extractor_id=inputpl.extractor.extractor_key)  # is this right?
+
+def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
+    pass
