@@ -3,6 +3,7 @@
 import statistics
 import datetime
 from typing import Optional
+import hashlib
 from . import models
 
 FIB = [1, 2, 3, 5, 8, 13, 21, 34]
@@ -87,3 +88,41 @@ def add_new_run(schedule: models.PlaylistSched,
         schedule.freq_days = next_fib(schedule.freq_days, new_freq > schedule.freq_days)
     schedule.next_run = next_run(existing[-3:], schedule.freq_days)
     return schedule, existing, new
+
+def entry2text(entry: models.VidFull) -> str:
+    """Change a pl entry into single unique string"""
+    # TODO implement
+
+def pl2txt(entries: list[models.VidFull]) -> str:
+    """Change playlist entries into a string"""
+    return "\n".join([entry2text(x) for x in entries])
+
+def pl_hash(entries: list[models.VidFull]) -> bytes:
+    """Hash a playlist"""
+    hash_object = hashlib.sha256()
+    hash_object.update(pl2txt(entries).encode())
+    return hash_object.digest()
+
+def newest(entries: list[models.VidFull]) -> models.VidFull:
+    """Find newest playlist entry"""
+    # TODO implement
+
+def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.PlaylistStats:
+    """Convert a 'full' LM-Native playlist into stats
+    
+    The stats can be easily stored in a DB and used for future analysis
+    """
+    count = len(inputpl.entries)
+    assert count == inputpl.playlist_count
+    # TODO model rework based on below analysis
+    return models.PlaylistStats(modified_date=inputpl.modified_date,
+                                playlist_count=count,
+                                entries_hash=pl_hash(inputpl.entries),
+                                success=True,  # assuming True since we have a playlist (indiv vid retry seperate flow?)
+                                download_count=download_count,  # extend VidFull to indicate dl or not?
+                                input_params={},  # allow arg override! optional?
+                                output_params={},  # new func arg??? optional?
+                                timestamp=datetime.datetime.now(),  # allow arg override?
+                                newest_item=newest(inputpl.entries).upload_date,
+                                different=None,  # feed it to him later
+                                interval=None)  # feed it to him later

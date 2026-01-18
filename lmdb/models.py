@@ -4,6 +4,7 @@ Includes DLP-compat and LM-native
 """
 
 import datetime
+from typing import Optional
 from pydantic import BaseModel
 
 class CommonDLP(BaseModel):
@@ -131,15 +132,15 @@ class PlaylistStats(BaseModel):
     """Stats of a playlist run"""
     modified_date: datetime.datetime
     playlist_count: int
-    entries_hash: str
-    different: bool
+    entries_hash: bytes
+    different: bool  # optional???
     success: bool
     download_count: int
     input_params: dict
     output_params: dict
     timestamp: datetime.datetime
     newest_item: datetime.datetime
-    interval: int
+    interval: int  # optional???
     # schedule: PlaylistSched
 
 class PlaylistSched(BaseModel):
