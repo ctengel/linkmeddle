@@ -24,10 +24,13 @@ class ObjIdxDlArch:
     there is no 'add' - the way to add to OI is a complete non-partial upload
     or a 'deleted completed' entry
     """
+    # TODO consider subclassing set
     objidx = None
     archive_set = set()
+    archive_eph = set()
 
     def __init__(self, objidx: oic.ObjectIndex) -> None:
+        # TODO allow specifying set or file
         self.objidx = objidx
 
     def download_archive_set(self, bucket=None, extractor=None, refresh=False) -> set:
@@ -35,20 +38,24 @@ class ObjIdxDlArch:
         
         Bucket not implemented
         """
+        # TODO allow output to file
         assert extractor
         if self.archive_set and not refresh:
             return self.archive_set
         assert extractor
         assert not bucket
         self.archive_set = {oif2archive(x) for x
-                            in self.objidx.search_file({'extra': f"ytdl-extractor={extractor}"})}
+                            in self.objidx.search_file({'extra': f"ytdl-extractor={extractor}"})} | self.archive_eph
         self.archive_set.discard(None)
         return self.archive_set
 
     def in_download_archive(self, extractor: str, video_id: str) -> bool:
         """Returns true if we can find object in OI"""
+        archive_key = f"{extractor.lower()} {video_id}"
         if self.archive_set:
-            return f"{extractor.lower()} {video_id}" in self.archive_set
+            return archive_key in self.archive_set
+        if archive_key in self.archive_eph:
+            return True
         archive_set = {oif2archive(x)
                        for x in self.objidx.search_file({'extra': f"ytdl-id={video_id}"})
                        if x.info['extra']['ytdl-extractor'].lower() == extractor.lower()}
@@ -59,6 +66,8 @@ class ObjIdxDlArch:
         """similar to `in_download_archive` but accepts an archive key string"""
         if self.archive_set:
             return archive_key in self.archive_set
+        if archive_key in self.archive_eph:
+            return True
         extractor, _, video_id = archive_key.partition(' ')
         return self.in_download_archive(extractor, video_id)
 
@@ -73,9 +82,19 @@ class ObjIdxDlArch:
         
         suitable for overriding ytdl.in_download_archive
         """
+        archive_key = f"{info_dict['extractor_key'].lower()} {info_dict['id']}"
         if self.archive_set:
-            return f"{info_dict['extractor_key'].lower()} {info_dict['id']}" in self.archive_set
+            return archive_key in self.archive_set
+        if archive_key in self.archive_eph:
+            return True
         return self.url_in_download_archive(info_dict['webpage_url'])
 
     def __contains__(self, item: str) -> bool:
         return self.str_in_download_archive(archive_key=item)
+
+    def add(self, item: str) -> None:
+        """Emulate set().add()"""
+        # TODO implement permenant IF we have a file
+        self.archive_eph.add(item)
+        if self.archive_set:
+            self.archive_set.add(item)
