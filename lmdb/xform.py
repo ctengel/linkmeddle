@@ -145,6 +145,7 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSum:
     """Summarize playlist"""
     # clener way to copy common fields?
     # validate count
+    # TODO generate pseudo playlists for channels
     return models.PlaylistSum(id=inputpl.id,
                               title=inputpl.title,
                               modified_date=inputpl.modified_date,

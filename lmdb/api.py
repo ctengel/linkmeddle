@@ -42,29 +42,20 @@ def apply_update(instance, update_data: dict):
 
 
 
-@app.get("/playlist_sums/", response_model=List[PlaylistSum])
+@app.get("/playlists/", response_model=List[PlaylistSum])
 def list_playlist_sums(session: Session = Depends(get_session)):
-    # TODO allow search/filtering by video ids, channel, extractor, etc
+    # TODO allow search/filtering by channel
     return session.exec(select(PlaylistSum)).all()
 
 
-@app.get("/playlist_sums/{item_id}", response_model=PlaylistSum)
+@app.get("/playlists/{url}", response_model=PlaylistSum)
 def get_playlist_sum(item_id: int, session: Session = Depends(get_session)):
+    # TODO include schedules
     return get_or_404(session, PlaylistSum, item_id)
 
 
-@app.put("/playlist_sums/{item_id}", response_model=PlaylistSum)
-def update_playlist_sum(item_id: int, item: PlaylistSum, session: Session = Depends(get_session)):
-    db_item = get_or_404(session, PlaylistSum, item_id)
-    apply_update(db_item, item.dict())
-    session.add(db_item)
-    session.commit()
-    session.refresh(db_item)
-    return db_item
-
-
 # --- PlaylistSched CRUD --------------------------------------------------------------
-@app.post("/playlist_scheds/", response_model=PlaylistSched, status_code=status.HTTP_201_CREATED)
+@app.post("/schedules/", response_model=PlaylistSched, status_code=status.HTTP_201_CREATED)
 def create_playlist_sched(item: PlaylistSched, session: Session = Depends(get_session)):
     session.add(item)
     session.commit()
@@ -72,17 +63,18 @@ def create_playlist_sched(item: PlaylistSched, session: Session = Depends(get_se
     return item
 
 
-@app.get("/playlist_scheds/", response_model=List[PlaylistSched])
+@app.get("/schedules/", response_model=List[PlaylistSched])
 def list_playlist_scheds(session: Session = Depends(get_session)):
+    # TODO allow search/filtering by next_run
     return session.exec(select(PlaylistSched)).all()
 
 
-@app.get("/playlist_scheds/{item_id}", response_model=PlaylistSched)
+@app.get("/schedules/{item_id}", response_model=PlaylistSched)
 def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
     return get_or_404(session, PlaylistSched, item_id)
 
 
-@app.put("/playlist_scheds/{item_id}", response_model=PlaylistSched)
+@app.patch("/schedules/{item_id}", response_model=PlaylistSched)
 def update_playlist_sched(item_id: int, item: PlaylistSched, session: Session = Depends(get_session)):
     db_item = get_or_404(session, PlaylistSched, item_id)
     apply_update(db_item, item.dict())
@@ -92,37 +84,14 @@ def update_playlist_sched(item_id: int, item: PlaylistSched, session: Session = 
     return db_item
 
 
-@app.delete("/playlist_scheds/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_playlist_sched(item_id: int, session: Session = Depends(get_session)):
-    db_item = get_or_404(session, PlaylistSched, item_id)
-    session.delete(db_item)
-    session.commit()
-    return None
+#@app.delete("/playlist_scheds/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+#def delete_playlist_sched(item_id: int, session: Session = Depends(get_session)):
+#    db_item = get_or_404(session, PlaylistSched, item_id)
+#    session.delete(db_item)
+#    session.commit()
+#    return None
 
-
-# --- PlaylistStats CRUD --------------------------------------------------------------
-# TODO put playlist stats under playlist sched
-
-
-@app.get("/playlist_stats/", response_model=List[PlaylistStats])
-def list_playlist_stats(session: Session = Depends(get_session)):
-    return session.exec(select(PlaylistStats)).all()
-
-
-@app.get("/playlist_stats/{item_id}", response_model=PlaylistStats)
-def get_playlist_stats(item_id: int, session: Session = Depends(get_session)):
-    return get_or_404(session, PlaylistStats, item_id)
-
-
-@app.delete("/playlist_stats/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_playlist_stats(item_id: int, session: Session = Depends(get_session)):
-    # TODO better way to prune old stats?
-    db_item = get_or_404(session, PlaylistStats, item_id)
-    session.delete(db_item)
-    session.commit()
-    return None
-
-@app.post("/playlist_run", response_model=PlaylistRunResult, status_code=status.HTTP_201_CREATED)
+@app.post("/playlist-run", response_model=PlaylistRunResult, status_code=status.HTTP_201_CREATED)
 def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_session)):
     """Designed to be called upon playlist completion by postprocessor
     
@@ -134,6 +103,7 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
     # TODO download count???
     summary = xform.full2sum(item)
     # TODO check for existing summary and update
+    # TODO upsert pseudo playlists for channels
     session.add(summary)
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.playlist_id == summary.id)).first()
     # TODO consider creating schedule or inserting without sched if none exists
@@ -144,9 +114,19 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
         session.add(sched)
         session.add(new_stats)
     session.commit()
+    # TODO delete old stats???
     session.refresh(summary)
     return PlaylistRunResult(
         summary=summary,
         schedule=sched,
         new_stats=new_stats
     )
+
+# TODO videos endpoint
+@app.get("/videos/{extractor}/{video_id}", response_model=VidFull)
+def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
+    statement = select(PlaylistSum).where(PlaylistSum.entries.any(video_id))
+    result = session.exec(statement).all()
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
+    return result
