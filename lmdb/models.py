@@ -4,9 +4,9 @@ Includes DLP-compat and LM-native
 """
 
 import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Column, Field, Session, SQLModel, create_engine, select, ARRAY, TEXT
 
 class CommonDLP(BaseModel):
     """DLP: Elements fon in both playlists and entries thereof"""
@@ -132,9 +132,12 @@ class PlaylistSumBase(PlaylistCommon):
 class PlaylistSum(PlaylistSumBase, table=True):
     """LM-native summarized playlist"""
     __tablename__ = "playlist_sums"
+    # TODO consider int primary key instead of url
     webpage_url: str = Field(primary_key=True)
-    entries: list[str] = Field(sa_column=Field(sa_column={ARRAY(TEXT)"}))
+    # TODO fix array type
+    entries: List[str] = Field(sa_column=Column(ARRAY(TEXT)))
 
+# TODO need a version with and without schedule relationship
 class PlaylistStats(SQLModel, table=True):
     """Stats of a playlist run"""
     modified_date: datetime.datetime
@@ -148,6 +151,8 @@ class PlaylistStats(SQLModel, table=True):
     timestamp: datetime.datetime
     newest_item: datetime.datetime
     interval: int  # optional???
+    sched_id: Optional[int] = Field(default=None, foreign_key="playlist_scheds.sched_id")
+    # TODO relationship
     # schedule: PlaylistSched
 
 class PlaylistSchedBase(SQLModel):
@@ -158,12 +163,13 @@ class PlaylistSchedBase(SQLModel):
     freq_days: int
     input_prams: dict
     webpage_url: str
-    runs: list[PlaylistStats]  # or flip this relationship
 
 class PlaylistSched(PlaylistSchedBase, table=True):
     """A schedule of when to attempt a playlist"""
     __tablename__ = "playlist_scheds"
     sched_id: int = Field(primary_key=True, autoincrement=True)
+    # TODO relationship
+    runs: list[PlaylistStats]
 
 class PlaylistSchedWithStats(PlaylistSched):
     """Playlist schedule with stats included"""
@@ -171,14 +177,14 @@ class PlaylistSchedWithStats(PlaylistSched):
 
 class PlaylistSchedWithStatsAndSum(PlaylistSchedWithStats):
     """Playlist schedule with stats and summary included"""
-    summary: PlaylistSumBase
+    summary: PlaylistSumBase | None
 
 class PlaylistSumWithSched(PlaylistSum):
     """Playlist summary with schedule included"""
-    schedules: list[PlaylistSched]
+    schedules: list[PlaylistSchedBase]
 
 class PlaylistRunResult(BaseModel):
     """Result of a playlist run"""
     summary: PlaylistSum
     schedule: Optional[PlaylistSched]
-    new_stats: PlaylistStats
+    new_stats: Optional[PlaylistStats]

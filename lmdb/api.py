@@ -2,7 +2,8 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Session, create_engine, select
 from typing import List
 import os
-from .models import PlaylistSum, PlaylistSched, PlaylistStats, PlaylistFull
+import datetime
+from .models import PlaylistSchedBase, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistFull, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult
 from . import xform
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
@@ -42,40 +43,51 @@ def apply_update(instance, update_data: dict):
 
 
 
-@app.get("/playlists/", response_model=List[PlaylistSum])
-def list_playlist_sums(session: Session = Depends(get_session)):
-    # TODO allow search/filtering by channel
-    return session.exec(select(PlaylistSum)).all()
+@app.get("/playlists/", response_model=List[PlaylistSumBase])
+def list_playlist_sums(extractor: str, channel: str, session: Session = Depends(get_session)):
+    assert extractor and channel, "extractor and channel are required"
+    statement = select(PlaylistSum).where(PlaylistSum.extractor_id == extractor,
+                                         PlaylistSum.channel == channel)
+    return session.exec(statement).all()
 
 
-@app.get("/playlists/{url}", response_model=PlaylistSum)
-def get_playlist_sum(item_id: int, session: Session = Depends(get_session)):
-    # TODO include schedules
-    return get_or_404(session, PlaylistSum, item_id)
+@app.get("/playlists/{url}", response_model=PlaylistSumWithSched)
+def get_playlist_sum(url: str, session: Session = Depends(get_session)):
+    # TODO make below call work
+    pl = get_or_404(session, PlaylistSum, url)
+    sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
+    pl_with_sched = PlaylistSumWithSched(**pl.dict(), schedules=list(sched))
+    return pl_with_sched
 
 
 # --- PlaylistSched CRUD --------------------------------------------------------------
-@app.post("/schedules/", response_model=PlaylistSched, status_code=status.HTTP_201_CREATED)
-def create_playlist_sched(item: PlaylistSched, session: Session = Depends(get_session)):
+@app.post("/schedules/", response_model=PlaylistSchedWithStatsAndSum, status_code=status.HTTP_201_CREATED)
+def create_playlist_sched(item: PlaylistSchedBase, session: Session = Depends(get_session)):
     session.add(item)
     session.commit()
     session.refresh(item)
     return item
 
 
-@app.get("/schedules/", response_model=List[PlaylistSched])
-def list_playlist_scheds(session: Session = Depends(get_session)):
-    # TODO allow search/filtering by next_run
-    return session.exec(select(PlaylistSched)).all()
+@app.get("/schedules/", response_model=List[PlaylistSchedBase])
+def list_playlist_scheds(next_run: datetime.date | None = None, extractor: str | None = None, session: Session = Depends(get_session)):
+    statement = select(PlaylistSched)
+    if next_run is not None:
+        statement = statement.where(PlaylistSched.next_run == next_run)
+    if extractor is not None:
+        statement = statement.where(PlaylistSched.extractor_id == extractor)
+    return session.exec(statement).all()
 
-
-@app.get("/schedules/{item_id}", response_model=PlaylistSched)
+@app.get("/schedules/{item_id}", response_model=PlaylistSchedWithStatsAndSum)
 def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
-    return get_or_404(session, PlaylistSched, item_id)
+    pl = get_or_404(session, PlaylistSched, item_id)
+    #stats = session.exec(select(PlaylistStats).where(PlaylistStats.playlist_id == pl.id)).all()
+    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == pl.webpage_url)).first()
+    return PlaylistSchedWithStatsAndSum(**pl.dict(), summary=summary) # runs=list(stats),
 
 
-@app.patch("/schedules/{item_id}", response_model=PlaylistSched)
-def update_playlist_sched(item_id: int, item: PlaylistSched, session: Session = Depends(get_session)):
+@app.patch("/schedules/{item_id}", response_model=PlaylistSchedWithStatsAndSum)
+def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Session = Depends(get_session)):
     db_item = get_or_404(session, PlaylistSched, item_id)
     apply_update(db_item, item.dict())
     session.add(db_item)
@@ -105,12 +117,14 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
     # TODO check for existing summary and update
     # TODO upsert pseudo playlists for channels
     session.add(summary)
-    sched = session.exec(select(PlaylistSched).where(PlaylistSched.playlist_id == summary.id)).first()
-    # TODO consider creating schedule or inserting without sched if none exists
+    # TODO allow passing in schedule id and/or matching multiple schedules
+    sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == summary.webpage_url)).first()
+    new_stats = None
     if sched:
-        existing_stats = session.exec(select(PlaylistStats).where(PlaylistStats.playlist_id == summary.id)).all()
+        # TODO handele following call with join/relationship
+        existing_stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == sched.sched_id)).all()
         new_stats = xform.full2stats(item)
-        sched, updated_stats, new_stat = xform.add_new_run(sched, list(existing_stats), new_stats)
+        sched, updated_stats, new_stats = xform.add_new_run(sched, list(existing_stats), new_stats)
         session.add(sched)
         session.add(new_stats)
     session.commit()
@@ -118,13 +132,13 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
     session.refresh(summary)
     return PlaylistRunResult(
         summary=summary,
-        schedule=sched,
-        new_stats=new_stats
+        schedule=sched if sched else None,
+        new_stats=new_stats if sched else None
     )
 
-# TODO videos endpoint
-@app.get("/videos/{extractor}/{video_id}", response_model=VidFull)
+@app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumBase])
 def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
+    # TODO fix below query
     statement = select(PlaylistSum).where(PlaylistSum.entries.any(video_id))
     result = session.exec(statement).all()
     if not result:
