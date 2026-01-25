@@ -129,8 +129,8 @@ def full2stats(inputpl: models.PlaylistFull,
                                 entries_hash=pl_hash(inputpl.entries),
                                 success=True,  # assuming True since we have a playlist (indiv vid retry seperate flow?)
                                 download_count=download_count,  # extend VidFull to indicate dl or not?
-                                input_params={},  # allow arg override! optional?
-                                output_params={},  # new func arg??? optional?
+                                input_params='',  # allow arg override! optional?
+                                output_params='',  # new func arg??? optional?
                                 timestamp=datetime.datetime.now(),  # allow arg override?
                                 newest_item=newest(inputpl.entries).upload_date,
                                 different=True,  # TODO feed it to him later

@@ -30,7 +30,7 @@ sched = models.PlaylistSched(extractor_id=summary.extractor_id,
                              id=summary.id,
                              next_run=datetime.date.today(),
                              freq_days=0,
-                             input_prams={},
+                             input_params='',
                              webpage_url=summary.webpage_url,
                              sched_id=1)
 

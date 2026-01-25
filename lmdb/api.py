@@ -156,6 +156,7 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
         session.add(summary)
         existing_pl = summary
     for vid in base_summary.entries:
+        assert existing_pl.playlist_id is not None
         pl_vid = PlaylistVid(vid_id=vid, playlist_id=existing_pl.playlist_id)
         session.add(pl_vid)
     session.commit()
@@ -172,6 +173,7 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
         sched, _, new_stats = xform.add_new_run(sched, list(existing_stats), new_stats)
         session.add(sched)
         new_stats_db = PlaylistStats.model_validate(new_stats)
+        assert sched.sched_id is not None
         new_stats_db.sched_id = sched.sched_id
         session.add(new_stats_db)
     session.commit()

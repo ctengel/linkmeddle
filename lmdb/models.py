@@ -132,13 +132,13 @@ class PlaylistSumBase(PlaylistCommon):
 class PlaylistSum(PlaylistSumBase, table=True):
     """LM-native summarized playlist"""
     #__tablename__ = "playlist_sums"
-    playlist_id: int = Field(primary_key=True)
+    playlist_id: int | None =Field(primary_key=True, default=None)
     entries: List['PlaylistVid'] = Relationship(back_populates="playlist")
 
 class PlaylistVid(SQLModel, table=True):
     """Link between vids and playlists"""
     vid_id: str = Field(primary_key=True)
-    playlist_id: int = Field(foreign_key="playlist_sums.playlist_id", primary_key=True)
+    playlist_id: int = Field(foreign_key="playlistsum.playlist_id", primary_key=True)
     playlist: PlaylistSum = Relationship(back_populates="entries")
 
 class PlayylistSumWithVids(PlaylistSumBase):
@@ -154,8 +154,8 @@ class PlaylistStatsBase(SQLModel):
     different: Optional[bool]
     success: bool
     download_count: int
-    input_params: dict
-    output_params: dict
+    input_params: Optional[str]  # TODO JSON-encoded dict
+    output_params: Optional[str]  # TODO JSON-encoded dict
     timestamp: datetime.datetime
     newest_item: datetime.datetime
     interval: Optional[int]
@@ -163,8 +163,9 @@ class PlaylistStatsBase(SQLModel):
 
 class PlaylistStats(PlaylistStatsBase, table=True):
     """Stats of a playlist run"""
-    sched_id: int = Field(default=None, foreign_key="playlist_scheds.sched_id")
-    stat_id: int = Field(primary_key=True)
+    sched_id: int = Field(default=None, foreign_key="playlistsched.sched_id")
+    # TODO consider composite key of sched_id + timestamp
+    stat_id: int | None = Field(primary_key=True, default=None)
     schedule: 'PlaylistSched' = Relationship(back_populates="runs")
 
 class PlaylistSchedBase(SQLModel):
@@ -173,25 +174,27 @@ class PlaylistSchedBase(SQLModel):
     id: str
     next_run: datetime.date
     freq_days: int
-    input_prams: dict
+    input_params: str  # TODO JSON-encoded dict
     webpage_url: str
 
 class PlaylistSched(PlaylistSchedBase, table=True):
     """A schedule of when to attempt a playlist"""
     #__tablename__ = "playlist_scheds"
-    sched_id: int = Field(primary_key=True)
+    sched_id: int | None = Field(primary_key=True, default=None)
     runs: list[PlaylistStats] = Relationship(back_populates="schedule")
-    playlist_id: Optional[int] = Field(default=None, foreign_key="playlist_sums.playlist_id")
+    playlist_id: Optional[int] = Field(default=None, foreign_key="playlistsum.playlist_id")
 
-class PlaylistSchedWithStats(PlaylistSched):
-    """Playlist schedule with stats included"""
-    # TODO consider collapsing with PlaylistSched
+#class PlaylistSchedWithStats(PlaylistSched):
+#    """Playlist schedule with stats included"""
+#    # TODO consider collapsing with PlaylistSched
 
-class PlaylistSchedWithStatsAndSum(PlaylistSchedWithStats):
+class PlaylistSchedWithStatsAndSum(PlaylistSchedBase):
     """Playlist schedule with stats and summary included"""
-    summary: PlaylistSumBase | None
+    sched_id: int
+    runs: list[PlaylistStatsBase] = []
+    summary: PlaylistSumBase | None = None
 
-class PlaylistSumWithSched(PlaylistSum):
+class PlaylistSumWithSched(PlayylistSumWithVids):
     """Playlist summary with schedule included"""
     schedules: list[PlaylistSchedBase]
 
