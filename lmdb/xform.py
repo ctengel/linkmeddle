@@ -8,7 +8,7 @@ from . import models
 
 FIB = [1, 2, 3, 5, 8, 13, 21, 34]
 
-def compare_pl_runs(old: models.PlaylistStats, new: models.PlaylistStats) -> bool:
+def compare_pl_runs(old: models.PlaylistStatsBase, new: models.PlaylistStatsBase) -> bool:
     """Determine whether a playlist changed between runs"""
     assert new.timestamp >= old.timestamp
     assert new.timestamp >= new.modified_date
@@ -24,8 +24,10 @@ def compare_pl_runs(old: models.PlaylistStats, new: models.PlaylistStats) -> boo
         return True
     return False
 
-def next_fib(existing: int | float, up: bool) -> int:
+def next_fib(existing: int | float | None, up: bool) -> int:
     """Next fibonacci number up or down"""
+    if existing is None:
+        return FIB[0]
     if up:
         for i in FIB:
             if i > existing:
@@ -41,9 +43,9 @@ def adjust(existing: list[int], up: bool) -> int:
     med = statistics.median(existing)
     return next_fib(med, up)
 
-def rec_adjust_freq(runs: list[models.PlaylistStats]) -> Optional[int]:
+def rec_adjust_freq(runs: list[models.PlaylistStatsBase]) -> Optional[int]:
     """Recommend a different frequency"""
-    intervals = [x.interval for x in runs]
+    intervals = [x.interval for x in runs if x.interval is not None]
     if all(not x.success for x in runs):
         return adjust(intervals, True)
     if all(not x.different for x in runs):
@@ -52,12 +54,12 @@ def rec_adjust_freq(runs: list[models.PlaylistStats]) -> Optional[int]:
         return adjust(intervals, False)
     return None
 
-def sort_runs(runs: list[models.PlaylistStats]) -> list[models.PlaylistStats]:
+def sort_runs(runs: list[models.PlaylistStatsBase]) -> list[models.PlaylistStatsBase]:
     """Sort run stats"""
     runs.sort(key=lambda x: x.timestamp)
     return runs
 
-def next_run(runs: list[models.PlaylistStats], interval: int) -> datetime.date:
+def next_run(runs: list[models.PlaylistStatsBase], interval: int) -> datetime.date:
     """Determine when next run should be based on recent runs and some stats"""
     runs = sort_runs(runs)
     last_date = runs[-1].timestamp.date()
@@ -67,7 +69,8 @@ def next_run(runs: list[models.PlaylistStats], interval: int) -> datetime.date:
         return last_date + datetime.timedelta(days=next_fib(runs[-1].interval, True))
     return last_date + datetime.timedelta(days=interval)
 
-def rum_deltas(old: models.PlaylistStats, new: models.PlaylistStats) -> models.PlaylistStats:
+def rum_deltas(old: models.PlaylistStatsBase,
+               new: models.PlaylistStatsBase) -> models.PlaylistStatsBase:
     """Determine difference between two runs and populate the new with stats"""
     assert new.timestamp >= old.timestamp
     new.interval = (new.timestamp.date() - old.timestamp.date()).days
@@ -75,10 +78,10 @@ def rum_deltas(old: models.PlaylistStats, new: models.PlaylistStats) -> models.P
     return new
 
 def add_new_run(schedule: models.PlaylistSched,
-                existing: list[models.PlaylistStats],
-                new: models.PlaylistStats) -> tuple[models.PlaylistSched,
-                                                    list[models.PlaylistStats],
-                                                    models.PlaylistStats]:
+                existing: list[models.PlaylistStatsBase],
+                new: models.PlaylistStatsBase) -> tuple[models.PlaylistSched,
+                                                    list[models.PlaylistStatsBase],
+                                                    models.PlaylistStatsBase]:
     """Go through motions of adding a new run stats summary"""
     existing = sort_runs(existing)
     if existing:
@@ -112,7 +115,8 @@ def newest(entries: list[models.VidFull]) -> models.VidFull:
     # TODO handle empty list
     return sorted(entries, key=lambda x: x.upload_date, reverse=True)[0]
 
-def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.PlaylistStatsBase:
+def full2stats(inputpl: models.PlaylistFull,
+               download_count: int) -> models.PlaylistStatsBase:
     """Convert a 'full' LM-Native playlist into stats
     
     The stats can be easily stored in a DB and used for future analysis
@@ -132,18 +136,18 @@ def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.Play
                                 different=True,  # TODO feed it to him later
                                 interval=0)  # TODO feed it to him later
 
-def failed_stat() -> models.PlaylistStats:
-    """Create a 'failed' playlist stat entry"""
-    return models.PlaylistStats(playlist_count=0,
-                                entries_hash=pl_hash([]),
-                                success=False,
-                                download_count=0,
-                                timestamp=datetime.datetime.now())
+#def failed_stat() -> models.PlaylistStats:
+#    """Create a 'failed' playlist stat entry"""
+#    return models.PlaylistStats(playlist_count=0,
+#                                entries_hash=pl_hash([]),
+#                                success=False,
+#                                download_count=0,
+#                                timestamp=datetime.datetime.now())
 
 def full2sum(inputpl: models.PlaylistFull) -> models.PlayylistSumWithVids:
     """Summarize playlist"""
-    # clener way to copy common fields?
-    # validate count
+    # TODO use model_validate?
+    # TODO validate count
     # TODO generate pseudo playlists for channels
     return models.PlayylistSumWithVids(id=inputpl.id,
                               title=inputpl.title,
@@ -156,6 +160,7 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlayylistSumWithVids:
 
 def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
     """Raw DLP playlist to LM-native playlist"""
+    # TODO use model_validate?
     return models.PlaylistFull(id=dlpin.id,
                                title=dlpin.title,
                                modified_date=datetime.datetime.fromtimestamp(dlpin.epoch),  # TODO
