@@ -3,7 +3,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from typing import List
 import os
 import datetime
-from .models import PlaylistSchedBase, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistFull, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult
+from .models import PlaylistSchedBase, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistFull, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistVid, PlayylistSumWithVids
 from . import xform
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
@@ -53,8 +53,9 @@ def list_playlist_sums(extractor: str, channel: str, session: Session = Depends(
 
 @app.get("/playlists/{url}", response_model=PlaylistSumWithSched)
 def get_playlist_sum(url: str, session: Session = Depends(get_session)):
-    # TODO make below call work
-    pl = get_or_404(session, PlaylistSum, url)
+    pl = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == url)).first()
+    if not pl:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
     pl_with_sched = PlaylistSumWithSched(**pl.dict(), schedules=list(sched))
     return pl_with_sched
@@ -113,16 +114,23 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
     """
     # TODO allow partial
     # TODO download count???
-    summary = xform.full2sum(item)
-    # TODO check for existing summary and update
+    base_summary = xform.full2sum(item)
+    summary = PlaylistSum.model_validate(base_summary)
+    existing_pl = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == summary.webpage_url)).first()
+    if not existing_pl:
+        session.add(summary)
+        existing_pl = summary
+    for vid in base_summary.entries:
+        pl_vid = PlaylistVid(vid_id=vid, playlist_id=existing_pl.playlist_id)
+        session.add(pl_vid)
+    session.commit()
     # TODO upsert pseudo playlists for channels
-    session.add(summary)
     # TODO allow passing in schedule id and/or matching multiple schedules
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == summary.webpage_url)).first()
     new_stats = None
     if sched:
         # TODO handele following call with join/relationship
-        existing_stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == sched.sched_id)).all()
+        existing_stats = sched.runs
         new_stats = xform.full2stats(item)
         sched, updated_stats, new_stats = xform.add_new_run(sched, list(existing_stats), new_stats)
         session.add(sched)
@@ -131,7 +139,7 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
     # TODO delete old stats???
     session.refresh(summary)
     return PlaylistRunResult(
-        summary=summary,
+        summary=PlayylistSumWithVids(**summary.dict()),
         schedule=sched if sched else None,
         new_stats=new_stats if sched else None
     )
@@ -139,7 +147,7 @@ def create_playlist_run(item: PlaylistFull, session: Session = Depends(get_sessi
 @app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumBase])
 def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
     # TODO fix below query
-    statement = select(PlaylistSum).where(PlaylistSum.entries.any(video_id))
+    statement = select(PlaylistSum).join(PlaylistVid).where(PlaylistVid.vid_id == video_id)
     result = session.exec(statement).all()
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")

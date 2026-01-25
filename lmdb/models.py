@@ -6,7 +6,7 @@ Includes DLP-compat and LM-native
 import datetime
 from typing import Optional, List
 from pydantic import BaseModel
-from sqlmodel import Column, Field, Session, SQLModel, create_engine, select, ARRAY, TEXT
+from sqlmodel import Field, Relationship, SQLModel
 
 class CommonDLP(BaseModel):
     """DLP: Elements fon in both playlists and entries thereof"""
@@ -132,28 +132,39 @@ class PlaylistSumBase(PlaylistCommon):
 class PlaylistSum(PlaylistSumBase, table=True):
     """LM-native summarized playlist"""
     __tablename__ = "playlist_sums"
-    # TODO consider int primary key instead of url
-    webpage_url: str = Field(primary_key=True)
-    # TODO fix array type
-    entries: List[str] = Field(sa_column=Column(ARRAY(TEXT)))
+    playlist_id: int = Field(primary_key=True)
+    entries: List['PlaylistVid'] = Relationship(back_populates="playlist")
 
-# TODO need a version with and without schedule relationship
-class PlaylistStats(SQLModel, table=True):
-    """Stats of a playlist run"""
+class PlaylistVid(SQLModel, table=True):
+    """Link between vids and playlists"""
+    vid_id: str = Field(primary_key=True)
+    playlist_id: int = Field(foreign_key="playlist_sums.playlist_id", primary_key=True)
+    playlist: PlaylistSum = Relationship(back_populates="entries")
+
+class PlayylistSumWithVids(PlaylistSumBase):
+    """Playlist summary with vids included"""
+    entries: list[str]
+
+class PlaylistStatsBase(SQLModel):
+    """Base stats of a playlist run"""
     modified_date: datetime.datetime
     playlist_count: int
     entries_hash: bytes
-    different: bool  # optional???
+    different: Optional[bool]
     success: bool
     download_count: int
     input_params: dict
     output_params: dict
     timestamp: datetime.datetime
     newest_item: datetime.datetime
-    interval: int  # optional???
-    sched_id: Optional[int] = Field(default=None, foreign_key="playlist_scheds.sched_id")
-    # TODO relationship
-    # schedule: PlaylistSched
+    interval: Optional[int]
+
+
+class PlaylistStats(PlaylistStatsBase, table=True):
+    """Stats of a playlist run"""
+    sched_id: int = Field(default=None, foreign_key="playlist_scheds.sched_id")
+    stat_id: int = Field(primary_key=True, autoincrement=True)
+    schedule: 'PlaylistSched' = Relationship(back_populates="runs")
 
 class PlaylistSchedBase(SQLModel):
     """A scedule of when to attempt a playlist"""
@@ -168,12 +179,13 @@ class PlaylistSched(PlaylistSchedBase, table=True):
     """A schedule of when to attempt a playlist"""
     __tablename__ = "playlist_scheds"
     sched_id: int = Field(primary_key=True, autoincrement=True)
-    # TODO relationship
-    runs: list[PlaylistStats]
+    runs: list[PlaylistStats] = Relationship(back_populates="schedule")
+    playlist_id: Optional[int] = Field(default=None, foreign_key="playlist_sums.playlist_id")
 
 class PlaylistSchedWithStats(PlaylistSched):
     """Playlist schedule with stats included"""
-    runs: list[PlaylistStats]
+    # TODO consider collapsing with PlaylistSched
+    pass
 
 class PlaylistSchedWithStatsAndSum(PlaylistSchedWithStats):
     """Playlist schedule with stats and summary included"""
@@ -185,6 +197,6 @@ class PlaylistSumWithSched(PlaylistSum):
 
 class PlaylistRunResult(BaseModel):
     """Result of a playlist run"""
-    summary: PlaylistSum
+    summary: PlayylistSumWithVids
     schedule: Optional[PlaylistSched]
     new_stats: Optional[PlaylistStats]

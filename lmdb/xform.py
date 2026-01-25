@@ -103,7 +103,6 @@ def pl2txt(entries: list[models.VidFull]) -> str:
 
 def pl_hash(entries: list[models.VidFull]) -> bytes:
     """Hash a playlist"""
-    # TODO consider using summary instead of full as input
     hash_object = hashlib.sha256()
     hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
@@ -113,7 +112,7 @@ def newest(entries: list[models.VidFull]) -> models.VidFull:
     # TODO handle empty list
     return sorted(entries, key=lambda x: x.upload_date, reverse=True)[0]
 
-def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.PlaylistStats:
+def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.PlaylistStatsBase:
     """Convert a 'full' LM-Native playlist into stats
     
     The stats can be easily stored in a DB and used for future analysis
@@ -121,7 +120,7 @@ def full2stats(inputpl: models.PlaylistFull, download_count: int) -> models.Play
     count = len(inputpl.entries)
     assert count == inputpl.playlist_count
     # TODO model rework based on below analysis
-    return models.PlaylistStats(modified_date=inputpl.modified_date,
+    return models.PlaylistStatsBase(modified_date=inputpl.modified_date,
                                 playlist_count=count,
                                 entries_hash=pl_hash(inputpl.entries),
                                 success=True,  # assuming True since we have a playlist (indiv vid retry seperate flow?)
@@ -141,12 +140,12 @@ def failed_stat() -> models.PlaylistStats:
                                 download_count=0,
                                 timestamp=datetime.datetime.now())
 
-def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSum:
+def full2sum(inputpl: models.PlaylistFull) -> models.PlayylistSumWithVids:
     """Summarize playlist"""
     # clener way to copy common fields?
     # validate count
     # TODO generate pseudo playlists for channels
-    return models.PlaylistSum(id=inputpl.id,
+    return models.PlayylistSumWithVids(id=inputpl.id,
                               title=inputpl.title,
                               modified_date=inputpl.modified_date,
                               webpage_url=inputpl.webpage_url,
