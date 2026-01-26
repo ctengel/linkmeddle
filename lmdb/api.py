@@ -3,6 +3,8 @@
 Impports FastAPI and SQLModel to provide a RESTful API for managing playlist schedules and summaries.
 """
 
+# TODO factor out complicated return logic into separate functions, sometimes xform.py
+
 from typing import List
 import os
 import datetime
@@ -41,8 +43,11 @@ def get_or_404(session: Session, model, item_id: int):
 
 def apply_update(instance, update_data: dict):
     """Apply update data to an instance"""
+    # TODO replace this with sqlmodel's built-in update mechanism if possible
     for key, value in update_data.items():
-        if key == "id":
+        if key == "sched_id":
+            continue
+        if value is None:
             continue
         setattr(instance, key, value)
     return instance
@@ -132,7 +137,11 @@ def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Sessio
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
-    return db_item
+    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == db_item.webpage_url)).one()
+    stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == db_item.sched_id)).all()
+    return PlaylistSchedWithStatsAndSum(**db_item.dict(),
+                                     runs=[PlaylistStatsStrHash.model_validate(s, update={"entries_hash": s.entries_hash.hex()}) for s in stats],
+                                     summary=summary)
 
 
 #@app.delete("/playlist_scheds/{item_id}", status_code=status.HTTP_204_NO_CONTENT)

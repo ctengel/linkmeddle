@@ -178,16 +178,16 @@ class PlaylistStats(PlaylistStatsBinHash, table=True):
     schedule: 'PlaylistSched' = Relationship(back_populates="runs")
 
 class PlaylistSchedBase(SQLModel):
-    """A scedule of when to attempt a playlist"""
-    extractor_id: str
-    id: str
-    next_run: datetime.date
-    freq_days: int
-    input_params: str  # TODO JSON-encoded dict
-    webpage_url: str
+    """A schedule of when to attempt a playlist"""
+    extractor_id: Optional[str] = None
+    id: Optional[str] = None
+    next_run: Optional[datetime.date] = None
+    freq_days: Optional[int] = None
+    input_params: Optional[str] = None  # TODO JSON-encoded dict
+    webpage_url: Optional[str] = None
     lpm_lib: Optional[str] = None
     oi_bucket: Optional[str] = None
-    use_cookies: bool = False
+    use_cookies: Optional[bool] = None
 
 class PlaylistSched(PlaylistSchedBase, table=True):
     """A schedule of when to attempt a playlist"""

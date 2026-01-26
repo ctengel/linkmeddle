@@ -91,6 +91,7 @@ def add_new_run(schedule: models.PlaylistSched,
         new.interval = 0
     existing.append(new)
     new_freq = rec_adjust_freq(existing[-3:])
+    assert schedule.freq_days is not None
     if new_freq and new_freq != schedule.freq_days:
         schedule.freq_days = next_fib(schedule.freq_days, new_freq > schedule.freq_days)
     schedule.next_run = next_run(existing[-3:], schedule.freq_days)
