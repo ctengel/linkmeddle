@@ -232,11 +232,14 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         session.refresh(new_stats_db)
     # TODO delete old stats???
     session.refresh(existing_pl)
-    assert new_stats_db is not None
+    if sched:
+        assert new_stats_db is not None
+    else:
+        assert new_stats_db is None
     return PlaylistRunResult(
         summary=PlaylistSumWithVids.model_validate(existing_pl, update={"entries": [pv.vid_id for pv in existing_pl.entries]}),
         schedule=sched if sched else None,
-        new_stats=PlaylistStatsStrHash.model_validate(new_stats_db, update={"entries_hash": new_stats_db.entries_hash.hex()}) if sched else None
+        new_stats=PlaylistStatsStrHash.model_validate(new_stats_db, update={"entries_hash": new_stats_db.entries_hash.hex()}) if new_stats_db else None
     )
 
 @app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumBase])

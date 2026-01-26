@@ -75,7 +75,6 @@ def test_create_and_get_playlist_sched(client):
     assert r.status_code == 201
     created = r.json()
     assert isinstance(created, dict)
-    print(created)
     assert created.get("webpage_url") == payload["webpage_url"]
     # Now GET by id
     sched_id = created.get("sched_id")
@@ -101,3 +100,51 @@ def test_get_video_not_found(client):
 def test_get_playlist_sched_not_found(client):
     r = client.get("/schedules/999999")
     assert r.status_code == 404
+
+def test_playlist_run(client):
+    pl_url = "http://example/playlist"
+    payload = models.PlaylistRunCreate(playlist=models.PlaylistFull(webpage_url=pl_url,
+                                                                    extractor=models.DLPIE(extractor_key="yt",
+                                                                                           extractor="yt"),
+                                                                    channel=models.UlChan(channel_id="test-channel",
+                                                                                          uploader_id="test-uploader",
+                                                                                          uploader="Test Uploader",
+                                                                                          channel_url="http://example/channel",
+                                                                                          uploader_url="http://example/uploader"),
+                                                                    entries=[],
+                                                                    playlist_count=0))
+    r = client.post("/playlist-run/", json=payload.model_dump())
+    assert r.status_code == 200
+    result = r.json()
+    assert "summary" in result
+    assert "schedule" in result
+    assert "new_stats" in result
+    assert result["summary"]["webpage_url"] == pl_url
+    assert result["schedule"] is None
+    assert result["new_stats"] is None
+    # Now try with a schedule
+    sched_payload = models.PlaylistSchedBase(extractor_id="yt",
+                                            id="test-playlist",
+                                            next_run=datetime.date.today(),
+                                            freq_days=7,
+                                            input_params="",
+                                            webpage_url=pl_url)
+    prep_sched_payload = sched_payload.model_dump()
+    prep_sched_payload['next_run'] = prep_sched_payload['next_run'].isoformat()
+    r2 = client.post("/schedules/", json=prep_sched_payload)
+    assert r2.status_code == 201
+    sched_created = r2.json()
+    sched_id = sched_created.get("sched_id")
+    assert sched_id is not None
+    payload.schedule_id = sched_id
+    r3 = client.post("/playlist-run/", json=payload.model_dump())
+    assert r3.status_code == 200
+    result2 = r3.json()
+    assert "summary" in result2
+    assert "schedule" in result2
+    assert "new_stats" in result2
+    assert result2["summary"]["webpage_url"] == pl_url
+    assert result2["schedule"] is not None
+    assert result2["schedule"]["sched_id"] == sched_id
+    assert result2["new_stats"] is not None
+

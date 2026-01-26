@@ -12,7 +12,8 @@ def compare_pl_runs(old: models.PlaylistStatsBinHash, new: models.PlaylistStatsB
     """Determine whether a playlist changed between runs"""
     assert new.timestamp >= old.timestamp
     assert new.timestamp >= new.modified_date
-    assert new.timestamp >= new.newest_item
+    if new.newest_item is not None:
+        assert new.timestamp >= new.newest_item
     for ck in ['modified_date', 'playlist_count', 'entries_hash', 'newest_item', 'success']:
         if getattr(new, ck) != getattr(old, ck):
             return True
@@ -20,7 +21,7 @@ def compare_pl_runs(old: models.PlaylistStatsBinHash, new: models.PlaylistStatsB
         return True
     if new.modified_date > old.timestamp:
         return True
-    if new.newest_item > old.timestamp:
+    if new.newest_item and new.newest_item > old.timestamp:
         return True
     return False
 
@@ -113,7 +114,6 @@ def pl_hash(entries: list[models.VidFull]) -> bytes:
 
 def newest(entries: list[models.VidFull]) -> models.VidFull:
     """Find newest playlist entry"""
-    # TODO handle empty list
     return sorted(entries, key=lambda x: x.upload_date, reverse=True)[0]
 
 def full2stats(inputpl: models.PlaylistFull,
@@ -135,7 +135,7 @@ def full2stats(inputpl: models.PlaylistFull,
                                 input_params='',  # allow arg override! optional?
                                 output_params='',  # new func arg??? optional?
                                 timestamp=datetime.datetime.now(),  # allow arg override?
-                                newest_item=newest(inputpl.entries).upload_date,
+                                newest_item=newest(inputpl.entries).upload_date if inputpl.entries else None,
                                 different=True,  # TODO feed it to him later
                                 interval=0)  # TODO feed it to him later
 

@@ -157,7 +157,7 @@ class PlaylistStatsBase(SQLModel):
     input_params: Optional[str]  # TODO JSON-encoded dict
     output_params: Optional[str]  # TODO JSON-encoded dict
     timestamp: datetime.datetime
-    newest_item: datetime.datetime
+    newest_item: Optional[datetime.datetime]
     interval: Optional[int]
 
 class PlaylistStatsBinHash(PlaylistStatsBase):
