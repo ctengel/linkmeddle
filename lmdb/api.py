@@ -71,7 +71,7 @@ def list_playlist_sums(extractor: str,
     return session.exec(statement).all()
 
 
-@app.get("/playlists/{url}", response_model=PlaylistSumWithSched)
+@app.get("/playlists/{url:path}", response_model=PlaylistSumWithSched)
 def get_playlist_sum(url: str, session: Session = Depends(get_session)):
     """Get a playlist summary by URL
     
@@ -84,7 +84,7 @@ def get_playlist_sum(url: str, session: Session = Depends(get_session)):
     if not pl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
-    pl_with_sched = PlaylistSumWithSched(**pl.dict(), schedules=list(sched))
+    pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [pv.vid_id for pv in pl.entries]})
     return pl_with_sched
 
 
