@@ -68,20 +68,17 @@ def test_list_playlist_scheds_empty(client):
 
 
 def test_create_and_get_playlist_sched(client):
-    payload = _make_payload_for(models.PlaylistSchedBase)
-    # Ensure minimal sensible values if generator left out likely-used names
-    if "webpage_url" not in payload:
-        payload["webpage_url"] = "http://example/playlist"
-    if "extractor_id" not in payload:
-        payload["extractor_id"] = "yt"
+    #payload = _make_payload_for(models.PlaylistSchedBase)
+    payload = models.PlaylistSchedBase(webpage_url="http://example/playlist").model_dump()
     # POST to create
     r = client.post("/schedules/", json=payload)
     assert r.status_code == 201
     created = r.json()
     assert isinstance(created, dict)
+    print(created)
     assert created.get("webpage_url") == payload["webpage_url"]
     # Now GET by id
-    sched_id = created.get("sched_id") or created.get("id")
+    sched_id = created.get("sched_id")
     assert sched_id is not None
     r2 = client.get(f"/schedules/{sched_id}")
     assert r2.status_code == 200

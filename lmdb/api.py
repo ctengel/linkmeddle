@@ -8,6 +8,7 @@ Impports FastAPI and SQLModel to provide a RESTful API for managing playlist sch
 from typing import List
 import os
 import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Session, create_engine, select
 from .models import PlaylistSchedBase, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash
@@ -16,7 +17,13 @@ from . import xform
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
 engine = create_engine(DATABASE_URL, echo=False)
 
-app = FastAPI(title="LinkMeddle LMDB API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Create DB tables on startup"""
+    SQLModel.metadata.create_all(engine)
+    yield
+
+app = FastAPI(title="LinkMeddle LMDB API", lifespan=lifespan)
 
 
 def get_session():
@@ -25,10 +32,7 @@ def get_session():
         yield session
 
 
-@app.on_event("startup")
-def on_startup():
-    """Create DB tables on startup"""
-    SQLModel.metadata.create_all(engine)
+
 
 
 # --- Generic helpers -----------------------------------------------------------------
@@ -102,8 +106,10 @@ def create_playlist_sched(item: PlaylistSchedBase,
     session.add(item)
     session.commit()
     session.refresh(item)
-    return item
-
+    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == item.webpage_url)).one_or_none()
+    return PlaylistSchedWithStatsAndSum(**item.model_dump(),
+                                     runs=[],
+                                     summary=summary)
 
 @app.get("/schedules/", response_model=List[PlaylistSchedBase])
 def list_playlist_scheds(next_run: datetime.date | None = None,
@@ -122,9 +128,9 @@ def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
     """Get a playlist schedule by ID, including stats and summary"""
     pl = get_or_404(session, PlaylistSched, item_id)
     #stats = session.exec(select(PlaylistStats).where(PlaylistStats.playlist_id == pl.id)).all()
-    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == pl.webpage_url)).one()
+    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == pl.webpage_url)).one_or_none()
     stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == pl.sched_id)).all()
-    return PlaylistSchedWithStatsAndSum(**pl.dict(),
+    return PlaylistSchedWithStatsAndSum(**pl.model_dump(),
                                      runs=[PlaylistStatsStrHash.model_validate(s, update={"entries_hash": s.entries_hash.hex()}) for s in stats],
                                      summary=summary)
 
@@ -133,13 +139,13 @@ def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
 def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Session = Depends(get_session)):
     """Update a playlist schedule by ID"""
     db_item = get_or_404(session, PlaylistSched, item_id)
-    apply_update(db_item, item.dict())
+    apply_update(db_item, item.model_dump())
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
-    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == db_item.webpage_url)).one()
+    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == db_item.webpage_url)).one_or_none()
     stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == db_item.sched_id)).all()
-    return PlaylistSchedWithStatsAndSum(**db_item.dict(),
+    return PlaylistSchedWithStatsAndSum(**db_item.model_dump(),
                                      runs=[PlaylistStatsStrHash.model_validate(s, update={"entries_hash": s.entries_hash.hex()}) for s in stats],
                                      summary=summary)
 
