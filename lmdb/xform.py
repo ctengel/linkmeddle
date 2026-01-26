@@ -8,7 +8,7 @@ from . import models
 
 FIB = [1, 2, 3, 5, 8, 13, 21, 34]
 
-def compare_pl_runs(old: models.PlaylistStatsBase, new: models.PlaylistStatsBase) -> bool:
+def compare_pl_runs(old: models.PlaylistStatsBinHash, new: models.PlaylistStatsBinHash) -> bool:
     """Determine whether a playlist changed between runs"""
     assert new.timestamp >= old.timestamp
     assert new.timestamp >= new.modified_date
@@ -43,7 +43,7 @@ def adjust(existing: list[int], up: bool) -> int:
     med = statistics.median(existing)
     return next_fib(med, up)
 
-def rec_adjust_freq(runs: list[models.PlaylistStatsBase]) -> Optional[int]:
+def rec_adjust_freq(runs: list[models.PlaylistStatsBinHash]) -> Optional[int]:
     """Recommend a different frequency"""
     intervals = [x.interval for x in runs if x.interval is not None]
     if all(not x.success for x in runs):
@@ -54,12 +54,12 @@ def rec_adjust_freq(runs: list[models.PlaylistStatsBase]) -> Optional[int]:
         return adjust(intervals, False)
     return None
 
-def sort_runs(runs: list[models.PlaylistStatsBase]) -> list[models.PlaylistStatsBase]:
+def sort_runs(runs: list[models.PlaylistStatsBinHash]) -> list[models.PlaylistStatsBinHash]:
     """Sort run stats"""
     runs.sort(key=lambda x: x.timestamp)
     return runs
 
-def next_run(runs: list[models.PlaylistStatsBase], interval: int) -> datetime.date:
+def next_run(runs: list[models.PlaylistStatsBinHash], interval: int) -> datetime.date:
     """Determine when next run should be based on recent runs and some stats"""
     runs = sort_runs(runs)
     last_date = runs[-1].timestamp.date()
@@ -69,8 +69,8 @@ def next_run(runs: list[models.PlaylistStatsBase], interval: int) -> datetime.da
         return last_date + datetime.timedelta(days=next_fib(runs[-1].interval, True))
     return last_date + datetime.timedelta(days=interval)
 
-def rum_deltas(old: models.PlaylistStatsBase,
-               new: models.PlaylistStatsBase) -> models.PlaylistStatsBase:
+def rum_deltas(old: models.PlaylistStatsBinHash,
+               new: models.PlaylistStatsBinHash) -> models.PlaylistStatsBinHash:
     """Determine difference between two runs and populate the new with stats"""
     assert new.timestamp >= old.timestamp
     new.interval = (new.timestamp.date() - old.timestamp.date()).days
@@ -78,10 +78,10 @@ def rum_deltas(old: models.PlaylistStatsBase,
     return new
 
 def add_new_run(schedule: models.PlaylistSched,
-                existing: list[models.PlaylistStatsBase],
-                new: models.PlaylistStatsBase) -> tuple[models.PlaylistSched,
-                                                    list[models.PlaylistStatsBase],
-                                                    models.PlaylistStatsBase]:
+                existing: list[models.PlaylistStatsBinHash],
+                new: models.PlaylistStatsBinHash) -> tuple[models.PlaylistSched,
+                                                    list[models.PlaylistStatsBinHash],
+                                                    models.PlaylistStatsBinHash]:
     """Go through motions of adding a new run stats summary"""
     existing = sort_runs(existing)
     if existing:
@@ -116,7 +116,7 @@ def newest(entries: list[models.VidFull]) -> models.VidFull:
     return sorted(entries, key=lambda x: x.upload_date, reverse=True)[0]
 
 def full2stats(inputpl: models.PlaylistFull,
-               download_count: int) -> models.PlaylistStatsBase:
+               download_count: int) -> models.PlaylistStatsBinHash:
     """Convert a 'full' LM-Native playlist into stats
     
     The stats can be easily stored in a DB and used for future analysis
@@ -124,7 +124,9 @@ def full2stats(inputpl: models.PlaylistFull,
     count = len(inputpl.entries)
     assert count == inputpl.playlist_count
     # TODO model rework based on below analysis
-    return models.PlaylistStatsBase(modified_date=inputpl.modified_date,
+    if not inputpl.modified_date:
+        inputpl.modified_date = datetime.datetime.now()
+    return models.PlaylistStatsBinHash(modified_date=inputpl.modified_date,
                                 playlist_count=count,
                                 entries_hash=pl_hash(inputpl.entries),
                                 success=True,  # assuming True since we have a playlist (indiv vid retry seperate flow?)
@@ -144,12 +146,12 @@ def full2stats(inputpl: models.PlaylistFull,
 #                                download_count=0,
 #                                timestamp=datetime.datetime.now())
 
-def full2sum(inputpl: models.PlaylistFull) -> models.PlayylistSumWithVids:
+def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
     """Summarize playlist"""
     # TODO use model_validate?
     # TODO validate count
     # TODO generate pseudo playlists for channels
-    return models.PlayylistSumWithVids(id=inputpl.id,
+    return models.PlaylistSumWithVids(id=inputpl.id,
                               title=inputpl.title,
                               modified_date=inputpl.modified_date,
                               webpage_url=inputpl.webpage_url,
@@ -197,3 +199,8 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
                                         for x in dlpin.entries],
                                extractor=models.DLPIE(extractor_key=dlpin.extractor_key,
                                                       extractor=dlpin.extractor))
+
+def vid_uploader_url(vid: models.VidFull) -> str:
+    """Get uploader URL from video"""
+    # TODO validate this vs channel_url
+    return vid.channel.uploader_url

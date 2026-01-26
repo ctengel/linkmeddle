@@ -111,11 +111,11 @@ class VidFull(BaseModel):
 
 class PlaylistCommon(SQLModel):
     """Common elements"""
-    id: str
-    title: str
-    modified_date: datetime.datetime
+    id: Optional[str] = None
+    title: Optional[str] = None
+    modified_date: Optional[datetime.datetime] = None
     webpage_url: str
-    playlist_count: int
+    playlist_count: Optional[int] = None
 
 class PlaylistFull(PlaylistCommon):
     """LM-native full playlist"""
@@ -125,7 +125,7 @@ class PlaylistFull(PlaylistCommon):
 
 class PlaylistSumBase(PlaylistCommon):
     """Suitable for simple pl lookup table"""
-    channel: str
+    channel: Optional[str] = None
     extractor_id: str
     pseudo_channel: bool = False
 
@@ -141,27 +141,36 @@ class PlaylistVid(SQLModel, table=True):
     playlist_id: int = Field(foreign_key="playlistsum.playlist_id", primary_key=True)
     playlist: PlaylistSum = Relationship(back_populates="entries")
 
-class PlayylistSumWithVids(PlaylistSumBase):
+class PlaylistSumWithVids(PlaylistSumBase):
     """Playlist summary with vids included"""
     entries: list[str]
+    playlist_id: Optional[int] = None
 
 class PlaylistStatsBase(SQLModel):
     """Base stats of a playlist run"""
-    # TODO failure or success count?
     modified_date: datetime.datetime
     playlist_count: int
-    entries_hash: bytes
     different: Optional[bool]
     success: bool
-    download_count: int
+    download_count: Optional[int] = None
+    failed_count: Optional[int] = None
     input_params: Optional[str]  # TODO JSON-encoded dict
     output_params: Optional[str]  # TODO JSON-encoded dict
     timestamp: datetime.datetime
     newest_item: datetime.datetime
     interval: Optional[int]
 
+class PlaylistStatsBinHash(PlaylistStatsBase):
+    """Playlist stats with binary hash"""
+    entries_hash: bytes
 
-class PlaylistStats(PlaylistStatsBase, table=True):
+class PlaylistStatsStrHash(PlaylistStatsBase):
+    """Playlist stats with string hash"""
+    entries_hash: str
+    sched_id: int
+    stat_id: int
+
+class PlaylistStats(PlaylistStatsBinHash, table=True):
     """Stats of a playlist run"""
     sched_id: int = Field(default=None, foreign_key="playlistsched.sched_id")
     # TODO consider composite key of sched_id + timestamp
@@ -176,6 +185,9 @@ class PlaylistSchedBase(SQLModel):
     freq_days: int
     input_params: str  # TODO JSON-encoded dict
     webpage_url: str
+    lpm_lib: Optional[str] = None
+    oi_bucket: Optional[str] = None
+    use_cookies: bool = False
 
 class PlaylistSched(PlaylistSchedBase, table=True):
     """A schedule of when to attempt a playlist"""
@@ -184,22 +196,25 @@ class PlaylistSched(PlaylistSchedBase, table=True):
     runs: list[PlaylistStats] = Relationship(back_populates="schedule")
     playlist_id: Optional[int] = Field(default=None, foreign_key="playlistsum.playlist_id")
 
-#class PlaylistSchedWithStats(PlaylistSched):
-#    """Playlist schedule with stats included"""
-#    # TODO consider collapsing with PlaylistSched
-
 class PlaylistSchedWithStatsAndSum(PlaylistSchedBase):
     """Playlist schedule with stats and summary included"""
     sched_id: int
-    runs: list[PlaylistStatsBase] = []
+    runs: list[PlaylistStatsStrHash] = []
     summary: PlaylistSumBase | None = None
 
-class PlaylistSumWithSched(PlayylistSumWithVids):
+class PlaylistSumWithSched(PlaylistSumWithVids):
     """Playlist summary with schedule included"""
     schedules: list[PlaylistSchedBase]
 
 class PlaylistRunResult(BaseModel):
     """Result of a playlist run"""
-    summary: PlayylistSumWithVids
+    summary: PlaylistSumWithVids
     schedule: Optional[PlaylistSched]
-    new_stats: Optional[PlaylistStats]
+    new_stats: Optional[PlaylistStatsStrHash]
+
+class PlaylistRunCreate(BaseModel):
+    """Info needed to create a playlist run"""
+    playlist: PlaylistFull
+    schedule_id: Optional[int] = None
+    download_count: int = 0
+    failed_count: int = 0

@@ -26,6 +26,8 @@ stats = xform.full2stats(native, 1)
 
 print(stats)
 
+assert summary.id is not None
+
 sched = models.PlaylistSched(extractor_id=summary.extractor_id,
                              id=summary.id,
                              next_run=datetime.date.today(),
