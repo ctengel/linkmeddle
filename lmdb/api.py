@@ -116,6 +116,7 @@ def list_playlist_scheds(next_run: datetime.date | None = None,
                          extractor: str | None = None,
                          session: Session = Depends(get_session)):
     """List of playlist schedules, optionally filtered by next_run date and/or extractor ID"""
+    # TODO add sched_id to output model?
     statement = select(PlaylistSched)
     if next_run is not None:
         statement = statement.where(PlaylistSched.next_run == next_run)

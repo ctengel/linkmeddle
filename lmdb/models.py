@@ -115,6 +115,7 @@ class PlaylistCommon(SQLModel):
     title: Optional[str] = None
     modified_date: Optional[datetime.datetime] = None
     webpage_url: str
+    # TODO do we ever update playlist count in DB?
     playlist_count: Optional[int] = None
 
 class PlaylistFull(PlaylistCommon):
@@ -178,6 +179,7 @@ class PlaylistStats(PlaylistStatsBinHash, table=True):
 
 class PlaylistSchedBase(SQLModel):
     """A schedule of when to attempt a playlist"""
+    # TODO add sched_id?
     extractor_id: Optional[str] = None
     id: Optional[str] = None
     next_run: Optional[datetime.date] = None
