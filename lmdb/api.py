@@ -176,6 +176,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
 
     Also enables user story #2
     """
+    # TODO allow specifying schedule ID to associate the run with a schedule
     # TODO rewrite this whole function to use upserts and relationships better
     item = run_info.playlist
     # TODO allow partial
