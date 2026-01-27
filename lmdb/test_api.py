@@ -1,10 +1,12 @@
+"""pytest-based tests for lmdb.api FastAPI endpoints."""
+
 import datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import create_engine, Session, SQLModel
 
-import lmdb.api as api
-import lmdb.models as models
+from lmdb import api
+from lmdb import models
 
 
 @pytest.fixture
@@ -148,3 +150,66 @@ def test_playlist_run(client):
     assert result2["schedule"]["sched_id"] == sched_id
     assert result2["new_stats"] is not None
 
+def test_playlist_with_entries(client):
+    pl_url = "http://example/playlist-with-entries"
+    entries = []
+    for i in range(3):
+        video = models.VidFull(
+            extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+            id=f"video-{i}",
+            title=f"Test Video {i}",
+            webpage_url=f"http://example/video-{i}",
+            upload_date=datetime.datetime.now(),
+            channel=models.UlChan(
+                channel_id="test-channel",
+                uploader_id="test-uploader",
+                uploader="Test Uploader",
+                channel_url="http://example/channel",
+                uploader_url="http://example/uploader"
+            ),
+            duration=300 + i * 60,
+            description=f"This is a description for Test Video {i}.",
+            categories=["Test", "Video"],
+            ext="mp4",
+            format="1080p",
+            height=1080,
+            is_live=False,
+            language="en",
+            thumbnail=f"http://example/video-{i}/thumbnail.jpg",
+            n_entries=i,
+            was_live=False,
+            width=1920
+        )
+        entries.append(video)
+    playlist = models.PlaylistFull(
+        webpage_url=pl_url,
+        extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+        channel=models.UlChan(
+            channel_id="test-channel",
+            uploader_id="test-uploader",
+            uploader="Test Uploader",
+            channel_url="http://example/channel",
+            uploader_url="http://example/uploader"
+        ),
+        entries=entries,
+        playlist_count=len(entries)
+    )
+    payload = models.PlaylistRunCreate(playlist=playlist)
+    payload_prep = payload.model_dump()
+    # Convert datetime fields to isoformat strings
+    for entry in payload_prep['playlist']['entries']:
+        if 'upload_date' in entry and isinstance(entry['upload_date'], datetime.datetime):
+            entry['upload_date'] = entry['upload_date'].isoformat()
+    r = client.post("/playlist-run/", json=payload_prep)
+    assert r.status_code == 200
+    result = r.json()
+    assert "summary" in result
+    assert result["summary"]["webpage_url"] == pl_url
+    assert len(result["summary"]["entries"]) == len(entries)
+    for i, entry in enumerate(result["summary"]["entries"]):
+        assert entry == entries[i].id
+    video_id_to_get = entries[1].id
+    r2 = client.get(f"/videos/yt/{video_id_to_get}")
+    assert r2.status_code == 200
+    video_got = r2.json()
+    assert any(x['webpage_url'] == pl_url for x in video_got)

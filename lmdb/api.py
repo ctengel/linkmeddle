@@ -189,7 +189,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         existing_pl = summary
     for vid in item.entries:
         assert existing_pl.playlist_id is not None
-        pl_vid = upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id)
+        upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id)
         # Also create pseudo-channel playlist if needed
         uploader_url = xform.vid_uploader_url(vid)
         ul_pseudo = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == uploader_url)).one_or_none()
@@ -211,7 +211,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         session.commit()
         session.refresh(ul_pseudo)
         assert ul_pseudo.playlist_id is not None
-        ul_vid = upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id)
+        upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id)
     session.commit()
     # TODO allow passing in schedule id and/or matching multiple schedules
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == existing_pl.webpage_url)).first()

@@ -173,7 +173,6 @@ class PlaylistStatsStrHash(PlaylistStatsBase):
 class PlaylistStats(PlaylistStatsBinHash, table=True):
     """Stats of a playlist run"""
     sched_id: int = Field(default=None, foreign_key="playlistsched.sched_id")
-    # TODO consider composite key of sched_id + timestamp
     stat_id: int | None = Field(primary_key=True, default=None)
     schedule: 'PlaylistSched' = Relationship(back_populates="runs")
 
