@@ -12,11 +12,9 @@ Runnable module that queries the LMDB API /schedules/ endpoint and runs jobs
 # TODO tell LMAPI when job is starting?
 
 import os
-import sys
 import logging
 import datetime
 import requests
-from typing import Any, Dict, List, Optional
 from . import models
 
 # Config via environment
@@ -84,7 +82,7 @@ def initiate_job(schedule: models.PlaylistSchedBase) -> None:
     """
     # Placeholder implementation: log what would be run.
     job_info = {
-        "schedule_id": schedule.scched_id,  # TODO add this to model
+        #"schedule_id": schedule.scched_id,  # TODO add this to model
         "next_run": schedule.next_run,
         "payload": schedule.webpage_url,
     }
@@ -92,8 +90,8 @@ def initiate_job(schedule: models.PlaylistSchedBase) -> None:
     # TODO: integrate with actual job executor, queue, or worker here.
 
 
-def main(argv=None):
-    #argv = argv or sys.argv[1:]
+def main():
+    """Job runner main loop"""
     today = datetime.date.today()
     try:
         schedules = fetch_schedules(today)
@@ -107,7 +105,9 @@ def main(argv=None):
         try:
             initiate_job(sched)
         except Exception:
-            logger.exception("Failed to initiate job for schedule id=%s", sched.sched_id)
+            logger.exception("Failed to initiate job for schedule id=%s",
+                             sched.webpage_url)  # TODO sched.sched_id)
+            # TODO return 1
 
     return 0
 
