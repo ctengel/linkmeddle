@@ -213,3 +213,75 @@ def test_playlist_with_entries(client):
     assert r2.status_code == 200
     video_got = r2.json()
     assert any(x['webpage_url'] == pl_url for x in video_got)
+
+def test_sched_id_round_trip(client):
+    # create two schedules with same playlist ID but different params
+    pl_url = "http://example/playlist-for-sched-id"
+    sched_payload1 = models.PlaylistSchedBase(
+        extractor_id="yt",
+        id="test-playlist-sched-id",
+        next_run=datetime.date.today(),
+        freq_days=3,
+        input_params="",
+        webpage_url=pl_url
+    )
+    prep_sched_payload1 = sched_payload1.model_dump()
+    prep_sched_payload1['next_run'] = prep_sched_payload1['next_run'].isoformat()
+    sched1 = client.post("/schedules/", json=prep_sched_payload1)
+    assert sched1.status_code == 201
+    sched_created = sched1.json()
+    sched_id = sched_created.get("sched_id")
+    assert sched_id is not None
+    sched_payload2 = sched_payload1.model_copy()
+    sched_payload2.use_cookies = True
+    prep_sched_payload2 = sched_payload2.model_dump()
+    prep_sched_payload2['next_run'] = prep_sched_payload2['next_run'].isoformat()
+    sched2 = client.post("/schedules/", json=prep_sched_payload2)
+    assert sched2.status_code == 201
+    sched_created2 = sched2.json()
+    sched_id2 = sched_created2.get("sched_id")
+    assert sched_id2 is not None
+    # get first schedule by id
+    get_sched = client.get(f"/schedules/{sched_id}")
+    assert get_sched.status_code == 200
+    assert get_sched.json()["sched_id"] == sched_id
+    assert get_sched.json()["webpage_url"] == pl_url
+    # get all scheduled runs for today and ensure first is there
+    get_all = client.get("/schedules/", params={"next_run": datetime.date.today().isoformat()})
+    assert get_all.status_code == 200
+    all_scheds = get_all.json()
+    # NOTE this is where it fails today - no sched_id in output model
+    filtered = [s for s in all_scheds if s['sched_id'] == sched_id]
+    assert len(filtered) == 1
+    # now let's simulate a run with the first schedule ID sent in
+    playlist = models.PlaylistFull(
+        webpage_url=pl_url,
+        extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+        channel=models.UlChan(
+            channel_id="test-channel",
+            uploader_id="test-uploader",
+            uploader="Test Uploader",
+            channel_url="http://example/channel",
+            uploader_url="http://example/uploader"
+        ),
+        entries=[],
+        playlist_count=0
+    )
+    run_payload = models.PlaylistRunCreate(playlist=playlist, schedule_id=sched_id)
+    r = client.post("/playlist-run/", json=run_payload.model_dump())
+    assert r.status_code == 200
+    result = r.json()
+    assert "summary" in result
+    assert "schedule" in result
+    assert result["schedule"] is not None
+    assert result["schedule"]["sched_id"] == sched_id
+    assert "new_stats" in result
+    assert result["new_stats"] is not None
+    stat_id = result["new_stats"]["stat_id"]
+    # now get the schedule again and ensure the run with stats is there
+    get_sched2 = client.get(f"/schedules/{sched_id}")
+    assert get_sched2.status_code == 200
+    sched2_got = get_sched2.json()
+    assert len(sched2_got["runs"]) == 1
+    run_got = sched2_got["runs"][0]
+    assert run_got["stat_id"] == stat_id
