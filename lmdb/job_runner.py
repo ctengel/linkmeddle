@@ -12,10 +12,11 @@ Runnable module that queries the LMDB API /schedules/ endpoint and runs jobs
 # TODO tell LMAPI when job is starting?
 
 import os
-import logging
+#import logging
+import warnings
 import datetime
 import requests
-from . import models
+from . import models, run_bknd
 
 # Config via environment
 LINKMEDDLE_PLAPI = os.environ.get("LMDB_API_BASE", "http://localhost:8000")
@@ -23,8 +24,8 @@ TIMEOUT = 5
 #LMDB_API_TOKEN = os.environ.get("LMDB_API_TOKEN")  # optional Bearer token
 
 
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-logger = logging.getLogger("job_runner")
+#logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+#logger = logging.getLogger("job_runner")
 
 
 #def _get_headers() -> Dict[str, str]:
@@ -75,41 +76,40 @@ def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedBase]:
 
 
 def initiate_job(schedule: models.PlaylistSchedBase) -> None:
-    """
-    Skeleton function that should initiate the actual job execution.
-    Currently a placeholder; replace implementation with real runner.
-    Receives the full schedule dict so caller can provide required info.
-    """
-    # Placeholder implementation: log what would be run.
-    job_info = {
-        #"schedule_id": schedule.scched_id,  # TODO add this to model
-        "next_run": schedule.next_run,
-        "payload": schedule.webpage_url,
-    }
-    logger.info("Initiating job: %s", job_info)
-    # TODO: integrate with actual job executor, queue, or worker here.
+    """Initiate a job for the given schedule."""
+    print("Initiating job:", schedule.webpage_url, schedule.oi_bucket, schedule.lpm_lib)
+    assert schedule.webpage_url is not None
+    run_bknd.init_download(schedule.webpage_url,
+                           oibucket=schedule.oi_bucket,
+                           lpmlib=schedule.lpm_lib)
+                           # TODO schedid=schedule.sched_id,
+                           # TODO use_cookies=schedule.use_cookies)
 
 
 def main():
     """Job runner main loop"""
     today = datetime.date.today()
-    try:
-        schedules = fetch_schedules(today)
-    except Exception as exc:
-        logger.exception("Failed to fetch schedules: %s", exc)
-        return 2
+    #try:
+    schedules = fetch_schedules(today)
+    #except Exception as exc:
+    #    logger.exception("Failed to fetch schedules: %s", exc)
+    #    return 2
 
-    logger.info("Found %d schedules to run today.", len(schedules))
+    #logger.info("Found %d schedules to run today.", len(schedules))
+    print(f"Found {len(schedules)} schedules to run today.")
+
+    status = 0
 
     for sched in schedules:
         try:
             initiate_job(sched)
         except Exception:
-            logger.exception("Failed to initiate job for schedule id=%s",
-                             sched.webpage_url)  # TODO sched.sched_id)
-            # TODO return 1
+            warnings.warn(f"Failed to initiate job for URL: {sched.webpage_url}")  # TODO sched.sched_id
+            #logger.exception("Failed to initiate job for schedule id=%s",
+            #                 sched.webpage_url)
+            status = 1
 
-    return 0
+    return status
 
 
 if __name__ == "__main__":
