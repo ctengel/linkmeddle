@@ -13,7 +13,7 @@ def oif2archive(oif: oic.File) -> Optional[str]:
         return None
     if oif.info['partial']:
         return None
-    return f"{oif.info['extra']['ytdl-extractor'].lower()} {oif.info['extra']['ytdl-id']}"
+    return oif.info['extra']['ytdl-id']
 
 
 class ObjIdxDlArch:
@@ -60,7 +60,7 @@ class ObjIdxDlArch:
             return True
         assert self.objidx is not None
         archive_set = {oif2archive(x)
-                       for x in self.objidx.search_files({'extra': f"ytdl-id={video_id}"})
+                       for x in self.objidx.search_files({'extra': f"ytdl-id={extractor.lower()} {video_id}"})
                        if x.info['extra']['ytdl-extractor'].lower() == extractor.lower()}
         archive_set.discard(None)
         return bool(archive_set)
