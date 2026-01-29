@@ -6,6 +6,8 @@ import warnings
 import os
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
+from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
+from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
 
 def _ydl(ignoreerrors=False, download_archive=None):
     # TODO user, password, cookiefile
@@ -77,17 +79,14 @@ def init_download(url: str,
         assert maybe_playlist, "maybe_playlist must be True to use schedid"
 
     # TODO download_archive support
-    # TODO objidx upload support: OBJIDX_URL= OBJIDX_AUTH= --use-postprocessor "ObjIdxUploadPP:oibucket=;lpmlib="
-    # TODO playlist postprocessor support; LINKMEDDLE_PLAPI= --use-postprocessor "LinkMeddlePlaylistPP:schedid="
-
-    #    'postprocessors': [{  # Extract audio using ffmpeg
-    #    'key': 'FFmpegExtractAudio',
-    #    'preferredcodec': 'm4a',
-    # oder
-    #        ydl.add_post_processor(MyCustomPP(), when='pre_process')
 
     with _ydl() as ydl:
         try:
+            # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
+            if oibucket:
+                ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
+            if maybe_playlist:
+                ydl.add_post_processor(LinkMeddlePlaylistPP(schedid=str(schedid)), when='playlist')
             info = ydl.extract_info(url)  #, download=True)
         except YoutubeDLError as e:
             # TODO callback failure to API?
