@@ -4,12 +4,15 @@ Minimal script to download a URL using yt_dlp programmatically (no subprocess).
 
 import warnings
 import os
+import argparse
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
-from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
+#from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
 from . import ytdl_arch_oi
+from .linkmeddle_playlist import LinkMeddlePlaylistPP
+# TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
 
 def _ydl(ignoreerrors=False, download_archive=None):
     # TODO user, password, cookiefile
@@ -99,3 +102,22 @@ def init_download(url: str,
     #    print(json.dumps(ydl.sanitize_info(info)))
     #retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
     _print_download_result(info)
+
+def cli():
+    parser = argparse.ArgumentParser(description="Download a URL using yt-dlp programmatically.")
+    parser.add_argument("url", help="The URL to download")
+    parser.add_argument("--oibucket", help="Object Index bucket for ObjIdx upload postprocessor", default=None)
+    parser.add_argument("--lpmlib", help="LinkMeddle library name for playlist postprocessor", default=None)
+    parser.add_argument("--schedid", type=int, help="Schedule ID for playlist postprocessor", default=None)
+    parser.add_argument("--no-playlist", action="store_true", help="Disable playlist postprocessor")
+    parser.add_argument("--use-cookies", action="store_true", help="Enable cookie usage (not yet implemented)")
+    init_download(url=parser.parse_args().url,
+                  oibucket=parser.parse_args().oibucket,
+                  lpmlib=parser.parse_args().lpmlib,
+                  schedid=parser.parse_args().schedid,
+                  maybe_playlist=not parser.parse_args().no_playlist,
+                  use_cookies=parser.parse_args().use_cookies)
+    return 0
+
+if __name__ == "__main__":
+    SystemExit(cli())
