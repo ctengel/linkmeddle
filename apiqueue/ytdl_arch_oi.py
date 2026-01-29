@@ -1,9 +1,10 @@
 """Use ObjectIndex as a yt-dlp 'download-archive'"""
 
+from typing import Optional
 from obj_idx import clilib as oic
 
 
-def oif2archive(oif: oic.File) -> str:
+def oif2archive(oif: oic.File) -> Optional[str]:
     """convert objectindex File object to a yt-dlp archive_id string
     
     Returns none if the file is not deemed complete and full
@@ -44,8 +45,9 @@ class ObjIdxDlArch:
             return self.archive_set
         assert extractor
         assert not bucket
+        assert self.objidx is not None
         self.archive_set = {oif2archive(x) for x
-                            in self.objidx.search_file({'extra': f"ytdl-extractor={extractor}"})} | self.archive_eph
+                            in self.objidx.search_files({'extra': f"ytdl-extractor={extractor}"})} | self.archive_eph
         self.archive_set.discard(None)
         return self.archive_set
 
@@ -56,8 +58,9 @@ class ObjIdxDlArch:
             return archive_key in self.archive_set
         if archive_key in self.archive_eph:
             return True
+        assert self.objidx is not None
         archive_set = {oif2archive(x)
-                       for x in self.objidx.search_file({'extra': f"ytdl-id={video_id}"})
+                       for x in self.objidx.search_files({'extra': f"ytdl-id={video_id}"})
                        if x.info['extra']['ytdl-extractor'].lower() == extractor.lower()}
         archive_set.discard(None)
         return bool(archive_set)
@@ -73,7 +76,8 @@ class ObjIdxDlArch:
 
     def url_in_download_archive(self, url: str) -> bool:
         """looks for a URL in OI"""
-        archive_set = {oif2archive(x) for x in self.objidx.search_file({'url': url})}
+        assert self.objidx is not None
+        archive_set = {oif2archive(x) for x in self.objidx.search_files({'url': url})}
         archive_set.discard(None)
         return bool(archive_set)
 
