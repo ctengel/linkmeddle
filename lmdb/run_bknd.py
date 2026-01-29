@@ -6,8 +6,10 @@ import warnings
 import os
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
+from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
 from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
+from . import ytdl_arch_oi
 
 def _ydl(ignoreerrors=False, download_archive=None):
     # TODO user, password, cookiefile
@@ -78,9 +80,10 @@ def init_download(url: str,
     if schedid:
         assert maybe_playlist, "maybe_playlist must be True to use schedid"
 
-    # TODO download_archive support
 
-    with _ydl() as ydl:
+    download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
+
+    with _ydl(download_archive=download_archive) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if oibucket:
