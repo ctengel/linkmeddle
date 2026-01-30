@@ -10,18 +10,18 @@ from sqlmodel import Field, Relationship, SQLModel
 
 class CommonDLP(BaseModel):
     """DLP: Elements fon in both playlists and entries thereof"""
-    channel_id: str
-    channel_url: str
-    description: str
+    channel_id: Optional[str] = None
+    channel_url: Optional[str] = None
+    description: Optional[str] = None
     extractor_key: str
     extractor: str
     id: str
     original_url: str
     playlist_count: int
     title: str
-    uploader_id: str
-    uploader: str
-    uploader_url: str
+    uploader_id: Optional[str] = None
+    uploader: Optional[str] = None
+    uploader_url: Optional[str] = None
     webpage_url_basename: str
     webpage_url_domain: str
     webpage_url: str
@@ -71,7 +71,7 @@ class PlaylistDLP(CommonDLP):
     """A DLP root playlist"""
     entries: list[PlVidDLP]
     epoch: int  # is this a timestamp of what?
-    modified_date: str  # YYYYMMDD
+    modified_date: Optional[str] = None  # YYYYMMDD
     _type: str  # "playlist
     _version: DLPVersion
 
