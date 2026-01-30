@@ -92,7 +92,7 @@ def init_download(url: str,
             if oibucket:
                 ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
             if maybe_playlist:
-                ydl.add_post_processor(LinkMeddlePlaylistPP(schedid=str(schedid)), when='playlist')
+                ydl.add_post_processor(LinkMeddlePlaylistPP(schedid=str(schedid) if schedid else None), when='playlist')
             info = ydl.extract_info(url)  #, download=True)
         except YoutubeDLError as e:
             # TODO callback failure to API?
