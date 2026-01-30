@@ -41,7 +41,8 @@ class LinkMeddlePlaylistPP(PostProcessor):
         for entry in body['entries']:
             entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
         # TODO add schedule_id to body if provided
-        resp = requests.post(url, json=body, timeout=TIMEOUT)
+        # TODO use PlaylistRunCreate model
+        resp = requests.post(url, json={'playlist': body}, timeout=TIMEOUT)
         resp.raise_for_status()
         result = models.PlaylistRunResult.model_validate(resp.json())
         return result
