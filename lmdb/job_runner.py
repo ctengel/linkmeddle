@@ -103,8 +103,8 @@ def main():
     for sched in schedules:
         try:
             initiate_job(sched)
-        except Exception:
-            warnings.warn(f"Failed to initiate job for URL: {sched.webpage_url}")  # TODO sched.sched_id
+        except Exception as exc:
+            warnings.warn(f"Failed to initiate job for URL: {sched.webpage_url}: {exc}")  # TODO sched.sched_id
             #logger.exception("Failed to initiate job for schedule id=%s",
             #                 sched.webpage_url)
             status = 1
