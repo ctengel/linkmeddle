@@ -77,11 +77,11 @@ class PlaylistDLP(CommonDLP):
 
 class UlChan(BaseModel):
     """Uploader/Channel description"""
-    channel_id: str
-    uploader_id: str
-    uploader: str
-    channel_url: str
-    uploader_url: str
+    channel_id: Optional[str] = None
+    uploader_id: Optional[str] = None
+    uploader: Optional[str] = None
+    channel_url: Optional[str] = None
+    uploader_url: Optional[str] = None
 
 class DLPIE(BaseModel):
     """DLP extractor used"""
@@ -91,7 +91,7 @@ class DLPIE(BaseModel):
 class VidFull(BaseModel):
     """LM-native full video"""
     channel: UlChan
-    description: str
+    description: Optional[str] = None
     extractor: DLPIE
     id: str
     title: str

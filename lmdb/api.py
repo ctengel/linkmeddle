@@ -8,6 +8,7 @@ Impports FastAPI and SQLModel to provide a RESTful API for managing playlist sch
 from typing import List
 import os
 import datetime
+import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -194,6 +195,9 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id)
         # Also create pseudo-channel playlist if needed
         uploader_url = xform.vid_uploader_url(vid)
+        if not uploader_url:
+            warnings.warn(f"Video {vid.id} has no uploader URL; skipping pseudo-channel playlist creation.")
+            continue
         ul_pseudo = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == uploader_url)).one_or_none()
         if not ul_pseudo:
             ul_pseudo = PlaylistSum(
