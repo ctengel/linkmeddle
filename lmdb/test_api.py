@@ -285,3 +285,36 @@ def test_sched_id_round_trip(client):
     assert len(sched2_got["runs"]) == 1
     run_got = sched2_got["runs"][0]
     assert run_got["stat_id"] == stat_id
+
+def test_count_mismatch(client):
+    pl_url = "http://example/playlist"
+    sched_payload = models.PlaylistSchedBase(
+        extractor_id="yt",
+        id="test-playlist-sched-id",
+        next_run=datetime.date.today(),
+        freq_days=3,
+        input_params="",
+        webpage_url=pl_url
+    )
+    prep_sched_payload = sched_payload.model_dump()
+    prep_sched_payload['next_run'] = prep_sched_payload['next_run'].isoformat()
+    sched = client.post("/schedules/", json=prep_sched_payload)
+    assert sched.status_code == 201
+    playlist = models.PlaylistFull(
+        webpage_url=pl_url,
+        extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+        channel=models.UlChan(
+            channel_id="test-channel",
+            uploader_id="test-uploader",
+            uploader="Test Uploader",
+            channel_url="http://example/channel",
+            uploader_url="http://example/uploader"
+        ),
+        entries=[],
+        playlist_count=1
+    )
+    payload = models.PlaylistRunCreate(playlist=playlist)
+    # TODO get more specific with warning
+    with pytest.warns():
+        r = client.post("/playlist-run/", json=payload.model_dump())
+    assert r.status_code == 200

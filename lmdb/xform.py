@@ -4,6 +4,7 @@ import statistics
 import datetime
 from typing import Optional
 import hashlib
+import warnings
 from . import models
 
 FIB = [1, 2, 3, 5, 8, 13, 21, 34]
@@ -123,7 +124,11 @@ def full2stats(inputpl: models.PlaylistFull,
     The stats can be easily stored in a DB and used for future analysis
     """
     count = len(inputpl.entries)
-    assert count == inputpl.playlist_count
+    if inputpl.playlist_count is None:
+        warnings.warn(f'No provided playlist_count; leveraging length of {count}.')
+    elif count != inputpl.playlist_count:
+        warnings.warn(f"Provided playlist count {inputpl.playlist_count} doesn't match actual length of {count}; will record provided.")
+        count = inputpl.playlist_count
     # TODO model rework based on below analysis
     if not inputpl.modified_date:
         inputpl.modified_date = datetime.datetime.now()
@@ -150,13 +155,13 @@ def full2stats(inputpl: models.PlaylistFull,
 def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
     """Summarize playlist"""
     # TODO use model_validate?
-    # TODO validate count
+    # TODO validate count, carefully
     # TODO generate pseudo playlists for channels
     return models.PlaylistSumWithVids(id=inputpl.id,
                               title=inputpl.title,
                               modified_date=inputpl.modified_date,
                               webpage_url=inputpl.webpage_url,
-                              playlist_count=inputpl.playlist_count,  # validate
+                              playlist_count=inputpl.playlist_count,  # validate, carefully
                               channel=inputpl.channel.channel_url,  # is this right?
                               entries=[entry2text(x) for x in inputpl.entries],
                               extractor_id=inputpl.extractor.extractor)  # is this right?
