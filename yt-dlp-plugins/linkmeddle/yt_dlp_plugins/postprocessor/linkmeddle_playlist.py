@@ -37,6 +37,9 @@ class LinkMeddlePlaylistPP(PostProcessor):
                            schedule_id: Optional[int] = None) -> models.PlaylistRunResult:
         url = f"{self.api_base}/playlist-run/"
         body = payload.model_dump()
+        body['modified_date'] = body['modified_date'].isoformat() if body['modified_date'] else None
+        for entry in body['entries']:
+            entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
         # TODO add schedule_id to body if provided
         resp = requests.post(url, json=body, timeout=TIMEOUT)
         resp.raise_for_status()
