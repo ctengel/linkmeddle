@@ -18,7 +18,7 @@ class LinkMeddlePlaylistPP(PostProcessor):
     Uses local `models` and `lmdb.xfrm` when available to shape/serialize the payload.
     """
 
-    def __init__(self, downloader, schedid = None, **kwargs):
+    def __init__(self, downloader=None, schedid=None, **kwargs):
         super().__init__(downloader)
         self._kwargs = kwargs
         self.api_base = os.getenv("LINKMEDDLE_PLAPI", "http://localhost:8000")
