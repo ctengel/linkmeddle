@@ -67,11 +67,14 @@ class ObjIdxDlArch:
 
     def str_in_download_archive(self, archive_key: str) -> bool:
         """similar to `in_download_archive` but accepts an archive key string"""
+        if not archive_key:
+            return False
         if self.archive_set:
             return archive_key in self.archive_set
         if archive_key in self.archive_eph:
             return True
         extractor, _, video_id = archive_key.partition(' ')
+        # TODO simplify
         return self.in_download_archive(extractor, video_id)
 
     def url_in_download_archive(self, url: str) -> bool:
