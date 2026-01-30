@@ -201,7 +201,11 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
                                extractor=models.DLPIE(extractor_key=dlpin.extractor_key,
                                                       extractor=dlpin.extractor))
 
-def vid_uploader_url(vid: models.VidFull) -> str:
+def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
     """Get uploader URL from video"""
     # TODO validate this vs channel_url
-    return vid.channel.uploader_url
+    if vid.channel.uploader_url:
+        return vid.channel.uploader_url
+    if vid.channel.channel_url:
+        return vid.channel.channel_url
+    return None
