@@ -41,7 +41,7 @@ class PlVidDLP(CommonDLP):
     _has_drm: bool  # or None
     height: int
     is_live: bool
-    language: str
+    language: Optional[str] = None
     live_status: str
     n_entries: int
     playlist_autonumber: int
@@ -102,7 +102,7 @@ class VidFull(BaseModel):
     format: str
     height: int
     is_live: bool
-    language: str
+    language: Optional[str] = None
     n_entries: int
     thumbnail: str
     upload_date:  datetime.datetime
