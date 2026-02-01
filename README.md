@@ -1,6 +1,31 @@
 # linkmeddle
 LINKed MEDia DL
 
+## lm v3-4
+
+### API/DB
+
+`fastapi`
+
+### CLI
+
+`python -m lmdb.cli --help`
+
+### job runner all-in-one
+
+v3 only
+
+- Install deno
+- setup venv?
+
+```
+pip install -U "yt-dlp[default]"
+pip install sqlmodel  https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip
+OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket bucket --no-playlist "https:/something.com/video"
+```
+
+## lm v1-2
+
 linkmeddle.py had core code; most should work via that.  Some others require the other scripts.
 
 ## Dependencies
