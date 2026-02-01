@@ -40,7 +40,7 @@ def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedBase]:
     url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
     # TODO next-run or next_run?
     resp = requests.get(url,
-                        params={"next-run": date.isoformat()},
+                        params={"next_run": date.isoformat()},
                         timeout=TIMEOUT)
     resp.raise_for_status()
     data = [models.PlaylistSchedBase.model_validate(x) for x in resp.json()]

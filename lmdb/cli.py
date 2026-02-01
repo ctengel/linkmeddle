@@ -1,43 +1,33 @@
-"""
-Docstring for lmdb.cli
-
-A script to test out xform functions
-"""
-
+import os
 import datetime
-from . import models, xform
+import requests
+import typer
+from .models import PlaylistSchedBase
 
-DOCO = ''
+LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI")
 
-with open(DOCO, encoding='utf-8') as f:
-    dlp = models.PlaylistDLP.model_validate_json(f.read())
+app = typer.Typer(help="CLI to POST /schedules/ to LinkMeddle API")
 
-print(dlp)
 
-native = xform.pl_dlp2lm(dlp)
+@app.command("schedule-playlist")
+def create(oibucket, webpage_url, use_cookies: bool = False, lpmlib=None) -> None:
+    """
+    Create a new playlist schedule by POSTing to /schedules/.
+    """
+    assert LINKMEDDLE_PLAPI is not None, "LINKMEDDLE_PLAPI env var must be set"
+    schedule = PlaylistSchedBase(
+        oi_bucket=oibucket,
+        webpage_url=webpage_url,
+        use_cookies=use_cookies,
+        lpm_lib=lpmlib,
+        next_run=datetime.date.today(),
+        freq_days=3
+    )
+    payload = schedule.model_dump()
+    payload['next_run'] = payload['next_run'].isoformat()
+    url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
+    resp = requests.post(url, json=payload, timeout=5)
+    resp.raise_for_status()
 
-print(native)
-
-summary = xform.full2sum(native)
-
-print(summary)
-
-stats = xform.full2stats(native, 1)
-
-print(stats)
-
-assert summary.id is not None
-
-sched = models.PlaylistSched(extractor_id=summary.extractor_id,
-                             id=summary.id,
-                             next_run=datetime.date.today(),
-                             freq_days=0,
-                             input_params='',
-                             webpage_url=summary.webpage_url,
-                             sched_id=1)
-
-sched, existing, stats = xform.add_new_run(sched, [], stats)
-
-print(sched)
-print(existing)
-print(stats)
+if __name__ == "__main__":
+    app()

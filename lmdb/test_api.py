@@ -318,3 +318,28 @@ def test_count_mismatch(client):
     with pytest.warns():
         r = client.post("/playlist-run/", json=payload.model_dump())
     assert r.status_code == 200
+
+def test_schedule_list_filter_by_next_run(client):
+    pl_url = "http://example/playlist"
+    sched_payload = models.PlaylistSchedBase(
+        extractor_id="yt",
+        id="test-playlist-sched-id",
+        next_run=datetime.date.today(),
+        freq_days=3,
+        input_params="",
+        webpage_url=pl_url
+    )
+    prep_sched_payload = sched_payload.model_dump()
+    prep_sched_payload['next_run'] = prep_sched_payload['next_run'].isoformat()
+    sched = client.post("/schedules/", json=prep_sched_payload)
+    assert sched.status_code == 201
+    prep_sched_payload['next_run'] = (datetime.date.today() + datetime.timedelta(days=5)).isoformat()
+    prep_sched_payload['webpage_url'] = "http://example/playlist2"
+    sched2 = client.post("/schedules/", json=prep_sched_payload)
+    assert sched2.status_code == 201
+    # now try to get schedules for today
+    r = client.get("/schedules/", params={"next_run": datetime.date.today().isoformat()})
+    assert r.status_code == 200
+    scheds = r.json()
+    assert len(scheds) == 1
+    assert scheds[0]['webpage_url'] == pl_url

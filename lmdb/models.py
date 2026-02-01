@@ -16,14 +16,14 @@ class CommonDLP(BaseModel):
     extractor_key: str
     extractor: str
     id: str
-    original_url: str
+    original_url: Optional[str] = None
     playlist_count: int
-    title: str
+    title: Optional[str] = None
     uploader_id: Optional[str] = None
     uploader: Optional[str] = None
     uploader_url: Optional[str] = None
-    webpage_url_basename: str
-    webpage_url_domain: str
+    webpage_url_basename: Optional[str] = None
+    webpage_url_domain: Optional[str] = None
     webpage_url: str
 
 
@@ -38,7 +38,7 @@ class PlVidDLP(CommonDLP):
     format_id: str
     format: str
     fulltitle: str
-    _has_drm: bool  # or None
+    _has_drm: Optional[bool] = False
     height: int
     is_live: bool
     language: Optional[str] = None
@@ -63,7 +63,7 @@ class PlVidDLP(CommonDLP):
 class DLPVersion(BaseModel):
     """DLP version info"""
     version: str
-    current_git_head: str  # optional
+    current_git_head: Optional[str] = None
     release_git_head: str
     repository: str
 
@@ -94,7 +94,7 @@ class VidFull(BaseModel):
     description: Optional[str] = None
     extractor: DLPIE
     id: str
-    title: str
+    title: Optional[str] = None
     webpage_url: str
     categories: list[str]
     duration: int
