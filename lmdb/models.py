@@ -29,8 +29,8 @@ class CommonDLP(BaseModel):
 
 class PlVidDLP(CommonDLP):
     """DLP: A vid as seen as a playlist entry"""
-    categories: list[str]
-    channel: str
+    categories: list[str] = []
+    channel: Optional[str] = None
     display_id: str
     duration: int
     epoch: int
@@ -45,12 +45,12 @@ class PlVidDLP(CommonDLP):
     live_status: str
     n_entries: int
     playlist_autonumber: int
-    playlist_channel_id: str
+    playlist_channel_id: Optional[str] = None
     playlist_id: str
     playlist_index: int
     playlist: str
-    playlist_uploader_id: str
-    playlist_uploader: str
+    playlist_uploader_id: Optional[str] = None
+    playlist_uploader: Optional[str] = None
     playlist_webpage_url: str
     protocol: str
     thumbnail: str
@@ -96,7 +96,7 @@ class VidFull(BaseModel):
     id: str
     title: Optional[str] = None
     webpage_url: str
-    categories: list[str]
+    categories: list[str] = []
     duration: int
     ext: str  # filename?
     format: str
