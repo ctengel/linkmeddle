@@ -81,9 +81,9 @@ def initiate_job(schedule: models.PlaylistSchedBase) -> None:
     assert schedule.webpage_url is not None
     run_bknd.init_download(schedule.webpage_url,
                            oibucket=schedule.oi_bucket,
-                           lpmlib=schedule.lpm_lib)
+                           lpmlib=schedule.lpm_lib,
+                           use_cookies=bool(schedule.use_cookies))
                            # TODO schedid=schedule.sched_id,
-                           # TODO use_cookies=schedule.use_cookies)
 
 
 def main():

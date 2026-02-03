@@ -47,7 +47,7 @@ def _print_download_result(info: dict):
     else:
         print("result:", info)
 
-def get_cookies9(url: str) -> str:
+def get_cookies(url: str) -> str:
     """Fetch cookies for the given URL from Crustula service.
 
     Returns cookies as a string suitable for yt-dlp 'cookiefile' option.
@@ -99,7 +99,8 @@ def init_download(url: str,
         assert maybe_playlist, "maybe_playlist must be True to use schedid"
     if use_cookies:
         assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
-        cookiestr = get_cookies9(url)
+        # TODO catch exceptions
+        cookiestr = get_cookies(url)
         print("got cookies:", cookiestr)
         cookies = io.StringIO(cookiestr)
 
