@@ -4,7 +4,9 @@ Minimal script to download a URL using yt_dlp programmatically (no subprocess).
 
 import warnings
 import os
+import io
 import argparse
+import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
@@ -14,8 +16,8 @@ from . import ytdl_arch_oi
 from .linkmeddle_playlist import LinkMeddlePlaylistPP
 # TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
 
-def _ydl(ignoreerrors=False, download_archive=None):
-    # TODO user, password, cookiefile
+def _ydl(ignoreerrors=False, download_archive=None, cookies: io.TextIOBase | str | None = None) -> YoutubeDL:
+    # TODO user, password
     # TODO extract_flat:in_playlist, simulate, skip_download
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
@@ -28,6 +30,8 @@ def _ydl(ignoreerrors=False, download_archive=None):
             'max_sleep_interval': 16,
             'ignoreerrors': ignoreerrors,
             'restrictfilenames': True}
+    if cookies is not None:
+        opts['cookiefile'] = cookies
     return YoutubeDL(opts)
 
 def _print_download_result(info: dict):
@@ -42,6 +46,17 @@ def _print_download_result(info: dict):
             print("id:", info.get("id"), "filename:", info.get("_filename"))
     else:
         print("result:", info)
+
+def get_cookies9(url: str) -> str:
+    """Fetch cookies for the given URL from Crustula service.
+
+    Returns cookies as a string suitable for yt-dlp 'cookiefile' option.
+    """
+    crustula_url = os.getenv("CRUSTULA_URL")
+    assert crustula_url, "CRUSTULA_URL must be set to use get_cookies9"
+    resp = requests.get(crustula_url + 'cookies/', params={'url': url}, timeout=5)
+    resp.raise_for_status()
+    return resp.json()['jar']['cookies']
 
 def init_download(url: str,
                   oibucket: str | None = None,
@@ -64,13 +79,13 @@ def init_download(url: str,
     OBJIDX_URL=
     OBJIDX_AUTH=
     LINKMEDDLE_PLAPI=
+    CRUSTULA_URL=
     """
 
     # TODO consider extractor_id and id (of playlist) instead of URL
     # TODO consider input_params for arbitrary download options
 
-    # TODO implement cookies
-    assert not use_cookies, "Cookie support not yet implemented"
+    cookies = None
 
     # check preconditions
     if oibucket:
@@ -82,11 +97,15 @@ def init_download(url: str,
         assert os.getenv("LINKMEDDLE_PLAPI"), "LINKMEDDLE_PLAPI must be set to use LinkMeddle playlist postprocessor"
     if schedid:
         assert maybe_playlist, "maybe_playlist must be True to use schedid"
-
+    if use_cookies:
+        assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
+        cookiestr = get_cookies9(url)
+        print("got cookies:", cookiestr)
+        cookies = io.StringIO(cookiestr)
 
     download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
 
-    with _ydl(download_archive=download_archive) as ydl:
+    with _ydl(download_archive=download_archive, cookies=cookies) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if oibucket:
@@ -98,6 +117,10 @@ def init_download(url: str,
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
             return
+    if cookies:
+        cookies.seek(0)
+        print("Final cookies:", cookies.read())
+        # TODO callback success to Crustula
     print("Download completed for URL:", url)
     #    print(json.dumps(ydl.sanitize_info(info)))
     #retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
@@ -106,9 +129,14 @@ def init_download(url: str,
 def cli():
     parser = argparse.ArgumentParser(description="Download a URL using yt-dlp programmatically.")
     parser.add_argument("url", help="The URL to download")
-    parser.add_argument("--oibucket", help="Object Index bucket for ObjIdx upload postprocessor", default=None)
+    parser.add_argument("--oibucket",
+                        help="Object Index bucket for ObjIdx upload postprocessor",
+                        default=None)
     parser.add_argument("--lpmlib", help="LinkMeddle library name for playlist postprocessor", default=None)
-    parser.add_argument("--schedid", type=int, help="Schedule ID for playlist postprocessor", default=None)
+    parser.add_argument("--schedid",
+                        type=int,
+                        help="Schedule ID for playlist postprocessor",
+                        default=None)
     parser.add_argument("--no-playlist", action="store_true", help="Disable playlist postprocessor")
     parser.add_argument("--use-cookies", action="store_true", help="Enable cookie usage (not yet implemented)")
     init_download(url=parser.parse_args().url,
