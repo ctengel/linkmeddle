@@ -13,6 +13,7 @@ Runnable module that queries the LMDB API /schedules/ endpoint and runs jobs
 
 import os
 #import logging
+import random
 import warnings
 import datetime
 import requests
@@ -97,6 +98,8 @@ def main():
 
     #logger.info("Found %d schedules to run today.", len(schedules))
     print(f"Found {len(schedules)} schedules to run today.")
+
+    random.shuffle(schedules)
 
     status = 0
 
