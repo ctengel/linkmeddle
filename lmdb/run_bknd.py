@@ -6,6 +6,7 @@ import warnings
 import os
 import io
 import argparse
+import time
 import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
@@ -16,20 +17,22 @@ from . import ytdl_arch_oi
 from .linkmeddle_playlist import LinkMeddlePlaylistPP
 # TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
 
-def _ydl(ignoreerrors=False, download_archive=None, cookies: io.TextIOBase | str | None = None) -> YoutubeDL:
+def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> YoutubeDL:
     # TODO user, password
     # TODO extract_flat:in_playlist, simulate, skip_download
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
     # TODO "format": "best", "noplaylist": True, "quiet": False, "no_warnings": True,
+    # TODO skip is_live somehow?
     opts = {'writeinfojson': True,
             'download_archive': download_archive,
             #'writethumbnail': True,
             #'writesubtitles': True,
             'sleep_interval': 4,
             'max_sleep_interval': 16,
-            'ignoreerrors': ignoreerrors,
-            'restrictfilenames': True}
+            'ignoreerrors': 'only_download',
+            'restrictfilenames': True,
+            'skip_playlist_after_errors': 3}
     if cookies is not None:
         opts['cookiefile'] = cookies
     return YoutubeDL(opts)
@@ -117,6 +120,7 @@ def init_download(url: str,
         except YoutubeDLError as e:
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
+            time.sleep(120)
             return
     if cookies:
         cookies.seek(0)
@@ -126,6 +130,7 @@ def init_download(url: str,
     #    print(json.dumps(ydl.sanitize_info(info)))
     #retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
     _print_download_result(info)
+    time.sleep(60)
 
 def cli():
     parser = argparse.ArgumentParser(description="Download a URL using yt-dlp programmatically.")
