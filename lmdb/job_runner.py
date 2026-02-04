@@ -19,7 +19,7 @@ import requests
 from . import models, run_bknd
 
 # Config via environment
-LINKMEDDLE_PLAPI = os.environ.get("LMDB_API_BASE", "http://localhost:8000")
+LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 TIMEOUT = 5
 #LMDB_API_TOKEN = os.environ.get("LMDB_API_TOKEN")  # optional Bearer token
 
