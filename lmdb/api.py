@@ -120,7 +120,7 @@ def list_playlist_scheds(next_run: datetime.date | None = None,
     # TODO add sched_id to output model?
     statement = select(PlaylistSched)
     if next_run is not None:
-        statement = statement.where(PlaylistSched.next_run == next_run)
+        statement = statement.where(PlaylistSched.next_run is not None and PlaylistSched.next_run <= next_run)
     if extractor is not None:
         statement = statement.where(PlaylistSched.extractor_id == extractor)
     return session.exec(statement).all()
