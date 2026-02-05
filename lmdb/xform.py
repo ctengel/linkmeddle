@@ -115,7 +115,7 @@ def pl_hash(entries: list[models.VidFull]) -> bytes:
 
 def newest(entries: list[models.VidFull]) -> models.VidFull:
     """Find newest playlist entry"""
-    return sorted(entries, key=lambda x: x.upload_date, reverse=True)[0]
+    return sorted(entries, key=lambda x: x.upload_date or datetime.datetime.min, reverse=True)[0]
 
 def full2stats(inputpl: models.PlaylistFull,
                download_count: int) -> models.PlaylistStatsBinHash:
@@ -157,6 +157,7 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
     # TODO use model_validate?
     # TODO validate count, carefully
     # TODO generate pseudo playlists for channels
+    assert inputpl.extractor.extractor is not None
     return models.PlaylistSumWithVids(id=inputpl.id,
                               title=inputpl.title,
                               modified_date=inputpl.modified_date,
@@ -168,8 +169,9 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
 
 def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
     """Raw DLP playlist to LM-native playlist"""
+    assert dlpin.webpage_url is not None  # we need this until we ger lmpl id
     # TODO use model_validate?
-    return models.PlaylistFull(id=dlpin.id,
+    retv = models.PlaylistFull(id=dlpin.id,
                                title=dlpin.title,
                                modified_date=datetime.datetime.fromtimestamp(dlpin.epoch),  # TODO
                                webpage_url=dlpin.webpage_url,
@@ -201,10 +203,42 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
                                                        language=x.language,
                                                        n_entries=x.n_entries,  # huh,
                                                        thumbnail=x.thumbnail,
-                                                       upload_date=datetime.datetime.fromtimestamp(x.timestamp))  # is this right
-                                        for x in dlpin.entries],
+                                                       upload_date=datetime.datetime.fromtimestamp(x.timestamp) if x.timestamp else None)  # is this right
+                                        for x in dlpin.entries if isinstance(x, models.PlVidDLP)],
                                extractor=models.DLPIE(extractor_key=dlpin.extractor_key,
                                                       extractor=dlpin.extractor))
+    for pl_entry in dlpin.entries:
+        if not isinstance(pl_entry, models.PlaylistDLP):
+            continue
+        for sub_entry in pl_entry.entries:
+            if sub_entry is None:
+                continue
+            assert isinstance(sub_entry, models.PlVidDLP)
+            retv.entries.append(models.VidFull(channel=models.UlChan(channel_id=sub_entry.channel_id,
+                                                                     uploader_id=sub_entry.uploader_id,
+                                                                     uploader=sub_entry.uploader,
+                                                                     channel_url=sub_entry.channel_url,
+                                                                     uploader_url=sub_entry.uploader_url),
+                                               description=sub_entry.description,
+                                               id=sub_entry.id,
+                                               title=sub_entry.title,
+                                               webpage_url=sub_entry.webpage_url,
+                                               duration=sub_entry.duration,
+                                               ext=sub_entry.ext,
+                                               format=sub_entry.format,
+                                               height=sub_entry.height,
+                                               width=sub_entry.width,
+                                               extractor=models.DLPIE(extractor_key=sub_entry.extractor_key,
+                                                                      extractor=sub_entry.extractor),
+                                               categories=sub_entry.categories,
+                                               is_live=sub_entry.is_live,
+                                               was_live=sub_entry.was_live,
+                                               language=sub_entry.language,
+                                               n_entries=sub_entry.n_entries,  # huh,
+                                               thumbnail=sub_entry.thumbnail,
+                                               upload_date=datetime.datetime.fromtimestamp(sub_entry.timestamp) if sub_entry.timestamp else None)  # is this right
+                             )            
+    return retv
 
 def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
     """Get uploader URL from video"""
