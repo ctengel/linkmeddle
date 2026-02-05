@@ -13,51 +13,51 @@ class CommonDLP(BaseModel):
     channel_id: Optional[str] = None
     channel_url: Optional[str] = None
     description: Optional[str] = None
-    extractor_key: str
-    extractor: str
-    id: str
+    extractor_key: Optional[str] = None
+    extractor: Optional[str] = None
+    id: str # TODO should this be Optional?
     original_url: Optional[str] = None
-    playlist_count: int
+    playlist_count: Optional[int] = None
     title: Optional[str] = None
     uploader_id: Optional[str] = None
     uploader: Optional[str] = None
     uploader_url: Optional[str] = None
     webpage_url_basename: Optional[str] = None
     webpage_url_domain: Optional[str] = None
-    webpage_url: str
+    webpage_url: Optional[str] = None
 
 
 class PlVidDLP(CommonDLP):
     """DLP: A vid as seen as a playlist entry"""
     categories: list[str] = []
     channel: Optional[str] = None
-    display_id: str
-    duration: int
-    epoch: int
-    ext: str  # filename?
-    format_id: str
-    format: str
-    fulltitle: str
+    display_id: Optional[str] = None
+    duration: Optional[int] = None
+    epoch: Optional[int] = None
+    ext: Optional[str] = None
+    format_id: Optional[str] = None
+    format: Optional[str] = None
+    fulltitle: Optional[str] = None
     _has_drm: Optional[bool] = False
-    height: int
-    is_live: bool
+    height: Optional[int] = None
+    is_live: Optional[bool] = None
     language: Optional[str] = None
-    live_status: str
-    n_entries: int
-    playlist_autonumber: int
+    live_status: Optional[str] = None
+    n_entries: Optional[int] = None
+    playlist_autonumber: Optional[int] = None
     playlist_channel_id: Optional[str] = None
-    playlist_id: str
-    playlist_index: int
-    playlist: str
+    playlist_id: Optional[str] = None
+    playlist_index: Optional[int] = None
+    playlist: Optional[str] = None
     playlist_uploader_id: Optional[str] = None
     playlist_uploader: Optional[str] = None
-    playlist_webpage_url: str
-    protocol: str
-    thumbnail: str
-    timestamp: int  # is this a timestamp of what?
-    upload_date: str  # YYYYMMDD
-    was_live: bool
-    width: int
+    playlist_webpage_url: Optional[str] = None
+    protocol: Optional[str] = None
+    thumbnail: Optional[str] = None
+    timestamp: Optional[int] = None
+    upload_date: Optional[str] = None  # YYYYMMDD
+    was_live: Optional[bool] = None
+    width: Optional[int] = None
 
 
 class DLPVersion(BaseModel):
@@ -69,7 +69,7 @@ class DLPVersion(BaseModel):
 
 class PlaylistDLP(CommonDLP):
     """A DLP root playlist"""
-    entries: list[PlVidDLP]
+    entries: list['PlVidDLP | PlaylistDLP | None'] = []
     epoch: int  # is this a timestamp of what?
     modified_date: Optional[str] = None  # YYYYMMDD
     _type: str  # "playlist
@@ -85,8 +85,8 @@ class UlChan(BaseModel):
 
 class DLPIE(BaseModel):
     """DLP extractor used"""
-    extractor_key: str
-    extractor: str
+    extractor_key: Optional[str] = None
+    extractor: Optional[str] = None
 
 class VidFull(BaseModel):
     """LM-native full video"""
@@ -95,19 +95,19 @@ class VidFull(BaseModel):
     extractor: DLPIE
     id: str
     title: Optional[str] = None
-    webpage_url: str
+    webpage_url: Optional[str] = None
     categories: list[str] = []
-    duration: int
-    ext: str  # filename?
-    format: str
-    height: int
-    is_live: bool
+    duration: Optional[int] = None
+    ext: Optional[str] = None
+    format: Optional[str] = None
+    height: Optional[int] = None
+    is_live: Optional[bool] = None
     language: Optional[str] = None
-    n_entries: int
-    thumbnail: str
-    upload_date:  datetime.datetime
-    was_live: bool
-    width: int
+    n_entries: Optional[int] = None
+    thumbnail: Optional[str] = None
+    upload_date:  Optional[datetime.datetime] = None
+    was_live: Optional[bool] = None
+    width: Optional[int] = None
 
 class PlaylistCommon(SQLModel):
     """Common elements"""
