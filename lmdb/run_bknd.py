@@ -28,11 +28,12 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> Y
             'download_archive': download_archive,
             #'writethumbnail': True,
             #'writesubtitles': True,
-            'sleep_interval': 4,
-            'max_sleep_interval': 16,
+            'sleep_interval': 8,
+            'max_sleep_interval': 32,
             'ignoreerrors': 'only_download',
             'restrictfilenames': True,
-            'skip_playlist_after_errors': 3}
+            'skip_playlist_after_errors': 3,
+            'playlistrandom': True}
     if cookies is not None:
         opts['cookiefile'] = cookies
     return YoutubeDL(opts)
@@ -120,7 +121,7 @@ def init_download(url: str,
         except YoutubeDLError as e:
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
-            time.sleep(120)
+            time.sleep(128)
             return
     if cookies:
         cookies.seek(0)
@@ -130,7 +131,7 @@ def init_download(url: str,
     #    print(json.dumps(ydl.sanitize_info(info)))
     #retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
     _print_download_result(info)
-    time.sleep(60)
+    time.sleep(64)
 
 def cli():
     parser = argparse.ArgumentParser(description="Download a URL using yt-dlp programmatically.")

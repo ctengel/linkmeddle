@@ -104,11 +104,17 @@ def entry2text(entry: models.VidFull) -> str:
     return entry.id
 
 def pl2txt(entries: list[models.VidFull]) -> str:
-    """Change playlist entries into a string"""
-    return "\n".join([entry2text(x) for x in entries])
+    """Change playlist entries into a string
+    
+    Note that we sort and uniq it
+    """
+    return "\n".join(sorted({entry2text(x) for x in entries}))
 
 def pl_hash(entries: list[models.VidFull]) -> bytes:
-    """Hash a playlist"""
+    """Hash a playlist
+    
+    Note that the order does not matter
+    """
     hash_object = hashlib.sha256()
     hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
