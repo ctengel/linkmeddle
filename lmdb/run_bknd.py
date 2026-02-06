@@ -134,6 +134,7 @@ def init_download(url: str,
     time.sleep(64)
 
 def cli():
+    """Command-line interface to download a URL using yt-dlp programmatically."""
     parser = argparse.ArgumentParser(description="Download a URL using yt-dlp programmatically.")
     parser.add_argument("url", help="The URL to download")
     parser.add_argument("--oibucket",

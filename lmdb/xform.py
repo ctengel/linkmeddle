@@ -243,7 +243,7 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
                                                n_entries=sub_entry.n_entries,  # huh,
                                                thumbnail=sub_entry.thumbnail,
                                                upload_date=datetime.datetime.fromtimestamp(sub_entry.timestamp) if sub_entry.timestamp else None)  # is this right
-                             )            
+                             )
     return retv
 
 def vid_uploader_url(vid: models.VidFull) -> Optional[str]:

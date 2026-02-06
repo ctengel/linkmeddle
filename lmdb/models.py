@@ -179,7 +179,6 @@ class PlaylistStats(PlaylistStatsBinHash, table=True):
 
 class PlaylistSchedBase(SQLModel):
     """A schedule of when to attempt a playlist"""
-    # TODO add sched_id?
     extractor_id: Optional[str] = None
     id: Optional[str] = None
     next_run: Optional[datetime.date] = None
@@ -197,15 +196,18 @@ class PlaylistSched(PlaylistSchedBase, table=True):
     runs: list[PlaylistStats] = Relationship(back_populates="schedule")
     playlist_id: Optional[int] = Field(default=None, foreign_key="playlistsum.playlist_id")
 
-class PlaylistSchedWithStatsAndSum(PlaylistSchedBase):
-    """Playlist schedule with stats and summary included"""
+class PlaylistSchedPublic(PlaylistSchedBase):
+    """Public view of a playlist schedule"""
     sched_id: int
+
+class PlaylistSchedWithStatsAndSum(PlaylistSchedPublic):
+    """Playlist schedule with stats and summary included"""
     runs: list[PlaylistStatsStrHash] = []
     summary: PlaylistSumBase | None = None
 
 class PlaylistSumWithSched(PlaylistSumWithVids):
     """Playlist summary with schedule included"""
-    schedules: list[PlaylistSchedBase]
+    schedules: list[PlaylistSchedPublic]
 
 class PlaylistRunResult(BaseModel):
     """Result of a playlist run"""

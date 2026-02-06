@@ -12,7 +12,7 @@ import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Session, create_engine, select
-from .models import PlaylistSchedBase, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash
+from .models import PlaylistSchedBase, PlaylistSchedPublic, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash
 from . import xform
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
@@ -112,7 +112,7 @@ def create_playlist_sched(item: PlaylistSchedBase,
                                      runs=[],
                                      summary=summary)
 
-@app.get("/schedules/", response_model=List[PlaylistSchedBase])
+@app.get("/schedules/", response_model=List[PlaylistSchedPublic])
 def list_playlist_scheds(next_run: datetime.date | None = None,
                          extractor: str | None = None,
                          session: Session = Depends(get_session)):
@@ -178,7 +178,6 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
 
     Also enables user story #2
     """
-    # TODO allow specifying schedule ID to associate the run with a schedule
     # TODO rewrite this whole function to use upserts and relationships better
     item = run_info.playlist
     # TODO allow partial
@@ -219,8 +218,19 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         assert ul_pseudo.playlist_id is not None
         upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id)
     session.commit()
-    # TODO allow passing in schedule id and/or matching multiple schedules
-    sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == existing_pl.webpage_url)).first()
+    if run_info.schedule_id is not None:
+        sched = session.exec(select(PlaylistSched).where(PlaylistSched.sched_id == run_info.schedule_id)).one_or_none()
+        assert sched is not None, f"Schedule with ID {run_info.schedule_id} not found"
+        if sched.webpage_url != existing_pl.webpage_url:
+            warnings.warn(f"Schedule webpage URL {sched.webpage_url} does not match playlist sum DB entry webpage URL {existing_pl.webpage_url}")
+        if sched.webpage_url != item.webpage_url:
+            warnings.warn(f"Schedule webpage URL {sched.webpage_url} does not match playlist submitted webpage URL {item.webpage_url}")
+    else:
+        sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == item.webpage_url)).first()
+        if sched:
+            warnings.warn(f"Found schedule with matching webpage URL {sched.webpage_url} for playlist run with no schedule ID; associating with this schedule. Consider providing schedule ID in future to avoid ambiguity.")
+        else:
+            warnings.warn(f"No schedule found with matching webpage URL {item.webpage_url} for playlist run with no schedule ID; playlist run will be recorded without association to a schedule.")
     new_stats = None
     new_stats_db = None
     if sched:

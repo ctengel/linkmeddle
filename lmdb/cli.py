@@ -1,3 +1,5 @@
+"""CLI to interact with LinkMeddle API for playlist scheduling."""
+
 import os
 import datetime
 import requests

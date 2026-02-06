@@ -115,7 +115,9 @@ def test_playlist_run(client):
                                                                                           uploader_url="http://example/uploader"),
                                                                     entries=[],
                                                                     playlist_count=0))
-    r = client.post("/playlist-run/", json=payload.model_dump())
+    with pytest.warns():
+        # TODO warn about missing schedule_id since we haven't created a schedule in this test yet
+        r = client.post("/playlist-run/", json=payload.model_dump())
     assert r.status_code == 200
     result = r.json()
     assert "summary" in result
@@ -200,7 +202,9 @@ def test_playlist_with_entries(client):
     for entry in payload_prep['playlist']['entries']:
         if 'upload_date' in entry and isinstance(entry['upload_date'], datetime.datetime):
             entry['upload_date'] = entry['upload_date'].isoformat()
-    r = client.post("/playlist-run/", json=payload_prep)
+    with pytest.warns():
+        # TODO warn about missing schedule_id since we're not creating a schedule in this test
+        r = client.post("/playlist-run/", json=payload_prep)
     assert r.status_code == 200
     result = r.json()
     assert "summary" in result
@@ -343,3 +347,80 @@ def test_schedule_list_filter_by_next_run(client):
     scheds = r.json()
     assert len(scheds) == 1
     assert scheds[0]['webpage_url'] == pl_url
+
+def test_match_special_chars_in_url(client):
+    # NOTE this was added to attempt to find issue #109 but could not reproduce it directly
+    #      leaving test here to prevent future regressions
+    special_url = "http://example.com/@playlist"
+    sched_payload = models.PlaylistSchedBase(
+        extractor_id="yt",
+        id="@special-chars-playlist",
+        next_run=datetime.date.today(),
+        freq_days=7,
+        input_params="",
+        webpage_url=special_url
+    )
+    prep_sched_payload = sched_payload.model_dump()
+    prep_sched_payload['next_run'] = prep_sched_payload['next_run'].isoformat()
+    r = client.post("/schedules/", json=prep_sched_payload)
+    assert r.status_code == 201
+    payload = models.PlaylistRunCreate(
+        playlist=models.PlaylistFull(
+            webpage_url=special_url,
+            extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+            channel=models.UlChan(
+                channel_id="@test-channel",
+                uploader_id="@test-uploader",
+                uploader="@Test Uploader",
+                channel_url=special_url,
+                uploader_url=special_url
+            ),
+            entries=[
+                models.VidFull(
+                    extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+                    id="video-1",
+                    title="Test Video 1",
+                    webpage_url="http://example.com/video-1",
+                    upload_date=datetime.datetime.now(),
+                    channel=models.UlChan(
+                        channel_id="@test-channel",
+                        uploader_id="@test-uploader",
+                        uploader="@Test Uploader",
+                        channel_url=special_url,
+                        uploader_url=special_url
+                    ),
+                    duration=300,
+                    description="This is a description for Test Video 1.",
+                    categories=["Test", "Video"],
+                    ext="mp4",
+                    format="1080p",
+                    height=1080,
+                    is_live=False,
+                    language="en",
+                    thumbnail="http://example.com/video-1/thumbnail.jpg",
+                    n_entries=1,
+                    was_live=False,
+                    width=1920
+                )
+            ],
+            playlist_count=1
+        )
+    )
+    payload_prep = payload.model_dump()
+    # Convert datetime fields to isoformat strings
+    for entry in payload_prep['playlist']['entries']:
+        if 'upload_date' in entry and isinstance(entry['upload_date'], datetime.datetime):
+            entry['upload_date'] = entry['upload_date'].isoformat()
+    with pytest.warns():
+        # TODO warn about missing schedule_id - which is intentionally not included in this test
+        r = client.post("/playlist-run/", json=payload_prep)
+    assert r.status_code == 200
+    result = r.json()
+    assert "summary" in result
+    assert result["summary"]["webpage_url"] == special_url
+    assert len(result["summary"]["entries"]) == 1
+    assert result["schedule"]["webpage_url"] == special_url
+    assert result["new_stats"] is not None
+    assert result["new_stats"]["sched_id"] is not None
+    assert result["new_stats"]["stat_id"] is not None
+    assert result["new_stats"]["entries_hash"] is not None

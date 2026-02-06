@@ -8,8 +8,8 @@ from yt_dlp.postprocessor.common import PostProcessor, PostProcessingError
 # TODO need to ensure lmdb is importable
 from lmdb import models, xform
 
-
-TIMEOUT = 10
+ 
+TIMEOUT = 32  # increased due to possible huge playlist (10 seconds was not enough for 1000 entries)
 
 
 class LinkMeddlePlaylistPP(PostProcessor):
@@ -42,7 +42,10 @@ class LinkMeddlePlaylistPP(PostProcessor):
             entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
         # TODO add schedule_id to body if provided
         # TODO use PlaylistRunCreate model
-        resp = requests.post(url, json={'playlist': body}, timeout=TIMEOUT)
+        resp = requests.post(url,
+                             json={'playlist': body,
+                                   'schedule_id': schedule_id},
+                             timeout=TIMEOUT)
         resp.raise_for_status()
         result = models.PlaylistRunResult.model_validate(resp.json())
         return result
