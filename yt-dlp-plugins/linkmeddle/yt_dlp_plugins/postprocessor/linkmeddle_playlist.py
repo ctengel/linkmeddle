@@ -58,7 +58,7 @@ class LinkMeddlePlaylistPP(PostProcessor):
         """
         is_playlist = information.get("_type") == "playlist" or bool(information.get("entries"))
         if is_playlist:
-            self.to_screen('Attempting LM playlist-run POST...')
+            self.to_screen(f'Attempting LM playlist-run POST for schedule ID: {self.schedid} URL: {information.get("webpage_url")}...')
             try:
                 # TODO do we need to sanitize information before building payload?
                 # TODO send schedule id if available

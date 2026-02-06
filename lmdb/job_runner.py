@@ -36,7 +36,7 @@ TIMEOUT = 5
 #    return headers
 
 
-def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedBase]:
+def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedPublic]:
     """Call GET /schedules/ and return a list of schedule objects (JSON)."""
     url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
     # TODO next-run or next_run?
@@ -44,7 +44,7 @@ def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedBase]:
                         params={"next_run": date.isoformat()},
                         timeout=TIMEOUT)
     resp.raise_for_status()
-    data = [models.PlaylistSchedBase.model_validate(x) for x in resp.json()]
+    data = [models.PlaylistSchedPublic.model_validate(x) for x in resp.json()]
     return data
 
 
@@ -76,15 +76,15 @@ def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedBase]:
 #    return dt.date() == today_utc
 
 
-def initiate_job(schedule: models.PlaylistSchedBase) -> None:
+def initiate_job(schedule: models.PlaylistSchedPublic) -> None:
     """Initiate a job for the given schedule."""
-    print("Initiating job:", schedule.webpage_url, schedule.oi_bucket, schedule.lpm_lib)
+    print("Initiating job:", schedule.sched_id,schedule.webpage_url, schedule.oi_bucket, schedule.lpm_lib)
     assert schedule.webpage_url is not None
     run_bknd.init_download(schedule.webpage_url,
                            oibucket=schedule.oi_bucket,
                            lpmlib=schedule.lpm_lib,
-                           use_cookies=bool(schedule.use_cookies))
-                           # TODO schedid=schedule.sched_id,
+                           use_cookies=bool(schedule.use_cookies),
+                           schedid=schedule.sched_id)
 
 
 def main():
