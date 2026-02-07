@@ -195,7 +195,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         # Also create pseudo-channel playlist if needed
         uploader_url = xform.vid_uploader_url(vid)
         if not uploader_url:
-            warnings.warn(f"Video {vid.id} has no uploader URL; skipping pseudo-channel playlist creation.")
+            warnings.warn(f"Video {vid.extractor.extractor_key}:{vid.id} ({vid.webpage_url}) has no uploader URL; skipping pseudo-channel playlist creation.")
             continue
         ul_pseudo = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == uploader_url)).one_or_none()
         if not ul_pseudo:
@@ -204,7 +204,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
                 id=None,
                 title=None,
                 webpage_url=uploader_url,
-                channel=vid.channel.uploader,
+                channel=uploader_url,
                 entries=[],
                 playlist_id=None,
                 pseudo_channel=True,

@@ -169,7 +169,7 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
                               modified_date=inputpl.modified_date,
                               webpage_url=inputpl.webpage_url,
                               playlist_count=inputpl.playlist_count,  # validate, carefully
-                              channel=inputpl.channel.channel_url,  # is this right?
+                              channel=inputpl.channel.uploader_url or inputpl.channel.channel_url,
                               entries=[entry2text(x) for x in inputpl.entries],
                               extractor_id=inputpl.extractor.extractor)  # is this right?
 
@@ -248,7 +248,6 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
 
 def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
     """Get uploader URL from video"""
-    # TODO validate this vs channel_url
     if vid.channel.uploader_url:
         return vid.channel.uploader_url
     if vid.channel.channel_url:

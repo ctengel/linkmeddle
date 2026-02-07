@@ -9,7 +9,7 @@ from yt_dlp.postprocessor.common import PostProcessor, PostProcessingError
 from lmdb import models, xform
 
  
-TIMEOUT = 32  # increased due to possible huge playlist (10 seconds was not enough for 1000 entries)
+TIMEOUT = 64  # increased due to possible huge playlist (10 seconds was not enough for 1000 entries)
 
 
 class LinkMeddlePlaylistPP(PostProcessor):
@@ -61,7 +61,6 @@ class LinkMeddlePlaylistPP(PostProcessor):
             self.to_screen(f'Attempting LM playlist-run POST for schedule ID: {self.schedid} URL: {information.get("webpage_url")}...')
             try:
                 # TODO do we need to sanitize information before building payload?
-                # TODO send schedule id if available
                 payload = self._build_payload(information)
                 # Do POST but avoid blocking downloader for long: do it synchronously but quick timeout.
                 result = self._post_playlist_run(payload,
