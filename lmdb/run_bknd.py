@@ -2,6 +2,7 @@
 Minimal script to download a URL using yt_dlp programmatically (no subprocess).
 """
 
+from typing import Optional
 import warnings
 import os
 import io
@@ -16,6 +17,13 @@ from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
 from . import ytdl_arch_oi
 from .linkmeddle_playlist import LinkMeddlePlaylistPP
 # TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
+
+def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
+    # Exclude live streams by checking 'is_live' key in info_dict
+    is_live = info_dict.get('is_live', False)
+    if is_live:
+        return f"live stream excluded: {info_dict.get('id', 'unknown')}"
+    return None
 
 def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> YoutubeDL:
     # TODO user, password
@@ -33,7 +41,8 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> Y
             'ignoreerrors': 'only_download',
             'restrictfilenames': True,
             'skip_playlist_after_errors': 3,
-            'playlistrandom': True}
+            'playlistrandom': True,
+            'match_filter': _exclude_live}
     if cookies is not None:
         opts['cookiefile'] = cookies
     return YoutubeDL(opts)
