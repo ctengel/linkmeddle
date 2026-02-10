@@ -179,7 +179,7 @@ def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
     # TODO use model_validate?
     retv = models.PlaylistFull(id=dlpin.id,
                                title=dlpin.title,
-                               modified_date=datetime.datetime.fromtimestamp(dlpin.epoch),  # TODO
+                               modified_date=datetime.datetime.strptime(dlpin.modified_date, "%Y%m%d") if dlpin.modified_date else None,
                                webpage_url=dlpin.webpage_url,
                                playlist_count=dlpin.playlist_count,  # TODO
                                channel=models.UlChan(channel_id=dlpin.channel_id,

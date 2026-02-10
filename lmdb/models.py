@@ -33,7 +33,7 @@ class PlVidDLP(CommonDLP):
     channel: Optional[str] = None
     display_id: Optional[str] = None
     duration: Optional[int] = None
-    epoch: Optional[int] = None
+    epoch: Optional[int] = None  # NOTE this is just NOW
     ext: Optional[str] = None
     format_id: Optional[str] = None
     format: Optional[str] = None
@@ -70,7 +70,7 @@ class DLPVersion(BaseModel):
 class PlaylistDLP(CommonDLP):
     """A DLP root playlist"""
     entries: list['PlVidDLP | PlaylistDLP | None'] = []
-    epoch: int  # is this a timestamp of what?
+    epoch: int  # NOTE this is just NOW
     modified_date: Optional[str] = None  # YYYYMMDD
     _type: str  # "playlist
     _version: DLPVersion
