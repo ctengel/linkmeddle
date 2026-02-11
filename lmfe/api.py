@@ -47,6 +47,7 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
 @app.get("/playlists/{playlist_id}", response_model=pl_models.PlaylistSumWithVids)
 async def get_playlist(playlist_id: str):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
+    #TODO add basic video info
     async with httpx.AsyncClient(timeout=5) as client:
         url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
         resp = await client.get(url)
@@ -75,20 +76,37 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             return [item for item in resp.json() if any(x.get("sched_id") == sched_id for x in item.get("schedules", []))]
         return []
 
-@app.get("/videos/{file_id}")
+@app.get("/videos/{file_id}", response_model=fe_models.Video)
 async def get_video(file_id: str):
     """Proxy GET /videos/{file_id}/ to ObjectIndex and add playlist info"""
     oic = oi_client.get_obj_idx_env()
     oi_file = oic.get_file(file_id)
-    oi_file['playlists'] = []
-    if file_str := oi_file.info.get('ytdl-id'):
+    extractor_id = None
+    dlp_id = None
+    playlists = []
+    # TODO add channel and title to video
+    if file_str := oi_file.info.get('extra', {}).get('ytdl-id'):
         extractor_id, dlp_id = file_str.split(" ", 1)
         async with httpx.AsyncClient(timeout=5) as client:
             url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/videos/{extractor_id}/{dlp_id}"
             resp = await client.get(url)
             resp.raise_for_status()
-            oi_file['playlists'] = resp.json().get('playlists', [])
-    return oi_file
+            playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
+                                                extractor_key=extractor_id,
+                                                title=x.get('title'),
+                                                url=x.get('webpage_url'),
+                                                channel=x.get('channel'),
+                                                is_channel=x.get('pseudo_channel', False)
+                                                ) for x in
+                         resp.json().get('playlists', [])]
+    return fe_models.Video(url=oi_file.info['url'],
+                           extractor_key=extractor_id,
+                           dlp_id=dlp_id,
+                           oi_file_uuid=oi_file.uuid,
+                           oi_obj_uuid=oi_file.object['uuid'],
+                           object_url=oi_file.get_s3_url(),
+                           playlists=playlists)
+
 
 @app.get("/videos/")
 async def list_videos(url: Optional[str] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None):
