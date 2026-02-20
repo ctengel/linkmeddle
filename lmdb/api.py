@@ -159,12 +159,13 @@ def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Sessio
 #    session.commit()
 #    return None
 
-def upsert_vid(session: Session, vid_id: str, playlist_id: int):
+def upsert_vid(session: Session, vid_id: str, playlist_id: int, extractor_id: str) -> PlaylistVid:
     """Upsert a PlaylistVid entry"""
     pl_vid = session.exec(select(PlaylistVid).where(PlaylistVid.vid_id == vid_id,
-                                                    PlaylistVid.playlist_id == playlist_id)).one_or_none()
+                                                    PlaylistVid.playlist_id == playlist_id,
+                                                    PlaylistVid.extractor_id == extractor_id)).one_or_none()
     if not pl_vid:
-        pl_vid = PlaylistVid(vid_id=vid_id, playlist_id=playlist_id)
+        pl_vid = PlaylistVid(vid_id=vid_id, playlist_id=playlist_id, extractor_id=extractor_id)
         session.add(pl_vid)
         session.commit()
         session.refresh(pl_vid)
@@ -191,7 +192,9 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         existing_pl = summary
     for vid in item.entries:
         assert existing_pl.playlist_id is not None
-        upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id)
+        assert vid.extractor is not None
+        assert vid.extractor.extractor is not None
+        upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id, vid.extractor.extractor)
         # Also create pseudo-channel playlist if needed
         uploader_url = xform.vid_uploader_url(vid)
         if not uploader_url:
@@ -216,7 +219,9 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         session.commit()
         session.refresh(ul_pseudo)
         assert ul_pseudo.playlist_id is not None
-        upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id)
+        assert vid.extractor is not None
+        assert vid.extractor.extractor is not None
+        upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id, vid.extractor.extractor)
     session.commit()
     if run_info.schedule_id is not None:
         sched = session.exec(select(PlaylistSched).where(PlaylistSched.sched_id == run_info.schedule_id)).one_or_none()
@@ -262,7 +267,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
 def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
     """Get playlists containing a given video ID for a specific extractor"""
     statement = select(PlaylistSum).join(PlaylistVid).where(PlaylistVid.vid_id == video_id,
-                                                            PlaylistSum.extractor_id == extractor)
+                                                            PlaylistVid.extractor_id == extractor)
     result = session.exec(statement).all()
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
