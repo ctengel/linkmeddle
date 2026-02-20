@@ -161,9 +161,9 @@ def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Sessio
 
 def upsert_vid(session: Session, vid_id: str, playlist_id: int, extractor_id: str) -> PlaylistVid:
     """Upsert a PlaylistVid entry"""
-    # TODO select on extractor_id too once that field is populated, to avoid potential conflicts between identical video IDs from different extractors
     pl_vid = session.exec(select(PlaylistVid).where(PlaylistVid.vid_id == vid_id,
-                                                    PlaylistVid.playlist_id == playlist_id)).one_or_none()
+                                                    PlaylistVid.playlist_id == playlist_id,
+                                                    PlaylistVid.extractor_id == extractor_id)).one_or_none()
     if not pl_vid:
         pl_vid = PlaylistVid(vid_id=vid_id, playlist_id=playlist_id, extractor_id=extractor_id)
         session.add(pl_vid)
@@ -262,9 +262,8 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
 @app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumBase])
 def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
     """Get playlists containing a given video ID for a specific extractor"""
-    # TODO update to use PlaylistVid.extractor_id once that field is populated
     statement = select(PlaylistSum).join(PlaylistVid).where(PlaylistVid.vid_id == video_id,
-                                                            PlaylistSum.extractor_id == extractor)
+                                                            PlaylistVid.extractor_id == extractor)
     result = session.exec(statement).all()
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")

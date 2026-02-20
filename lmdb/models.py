@@ -138,11 +138,10 @@ class PlaylistSum(PlaylistSumBase, table=True):
 
 class PlaylistVid(SQLModel, table=True):
     """Link between vids and playlists"""
-    # TODO make extractor_id non-optional and primary key once that field is populated
     vid_id: str = Field(primary_key=True)
     playlist_id: int = Field(foreign_key="playlistsum.playlist_id", primary_key=True)
     playlist: PlaylistSum = Relationship(back_populates="entries")
-    extractor_id: Optional[str] = None
+    extractor_id: str = Field(primary_key=True)
 
 class PlaylistSumWithVids(PlaylistSumBase):
     """Playlist summary with vids included"""
