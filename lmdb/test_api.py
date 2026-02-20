@@ -424,3 +424,60 @@ def test_match_special_chars_in_url(client):
     assert result["new_stats"]["sched_id"] is not None
     assert result["new_stats"]["stat_id"] is not None
     assert result["new_stats"]["entries_hash"] is not None
+
+def test_entry_without_extractor(client):
+    pl_url = "http://example/playlist"
+    payload = models.PlaylistRunCreate(
+        playlist=models.PlaylistFull(
+            webpage_url=pl_url,
+            extractor=models.DLPIE(extractor_key="yt", extractor="yt"),
+            channel=models.UlChan(
+                channel_id="test-channel",
+                uploader_id="test-uploader",
+                uploader="Test Uploader",
+                channel_url="http://example/channel",
+                uploader_url="http://example/uploader"
+            ),
+            entries=[
+                models.VidFull(
+                    extractor=models.DLPIE(extractor_key=None, extractor=None),  # missing extractor
+                    id="video-1",
+                    title="Test Video 1",
+                    webpage_url="http://example.com/video-1",
+                    upload_date=datetime.datetime.now(),
+                    channel=models.UlChan(
+                        channel_id="test-channel",
+                        uploader_id="test-uploader",
+                        uploader="Test Uploader",
+                        channel_url="http://example/channel",
+                        uploader_url="http://example/uploader"
+                    ),
+                    duration=300,
+                    description="This is a description for Test Video 1.",
+                    categories=["Test", "Video"],
+                    ext="mp4",
+                    format="1080p",
+                    height=1080,
+                    is_live=False,
+                    language="en",
+                    thumbnail="http://example.com/video-1/thumbnail.jpg",
+                    n_entries=1,
+                    was_live=False,
+                    width=1920
+                )
+            ],
+            playlist_count=1
+        )
+    )
+    payload_prep = payload.model_dump()
+    # Convert datetime fields to isoformat strings
+    for entry in payload_prep['playlist']['entries']:
+        if 'upload_date' in entry and isinstance(entry['upload_date'], datetime.datetime):
+            entry['upload_date'] = entry['upload_date'].isoformat()
+    with pytest.warns():
+        r = client.post("/playlist-run/", json=payload_prep)
+    assert r.status_code == 200
+    result = r.json()
+    assert "summary" in result
+    assert result["summary"]["webpage_url"] == pl_url
+    assert len(result["summary"]["entries"]) == 1
