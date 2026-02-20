@@ -63,8 +63,9 @@ def apply_update(instance, update_data: dict):
 
 
 @app.get("/playlists/", response_model=List[PlaylistSumBase])
-def list_playlist_sums(extractor: str,
-                       channel: str,
+def list_playlist_sums(extractor: str | None = None,
+                       channel: str | None = None,
+                       playlist_id: int | None = None,
                        session: Session = Depends(get_session)):
     """List of known playlists for a given channel
     
@@ -75,7 +76,9 @@ def list_playlist_sums(extractor: str,
     :param session: auto-injected DB session
     :type session: Session
     """
-    # TODO allow ID
+    if playlist_id is not None:
+        statement = select(PlaylistSum).where(PlaylistSum.playlist_id == playlist_id)
+        return session.exec(statement).all()
     assert extractor and channel, "extractor and channel are required"
     statement = select(PlaylistSum).where(PlaylistSum.extractor_id == extractor,
                                          PlaylistSum.channel == channel)

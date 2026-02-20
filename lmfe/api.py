@@ -15,7 +15,7 @@ app = fastapi.FastAPI()
 @app.get("/schedules/", response_model=list[pl_models.PlaylistSchedPublic])
 async def get_schedules():
     """Proxy GET /schedules/ from LinkMeddle API."""
-    # TODO consider merging with list_playlists and filtering by next_run date
+    # TODO merge with list_playlists and filtering by next_run date
     async with httpx.AsyncClient(timeout=5) as client:
         url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
         resp = await client.get(url)
@@ -26,7 +26,6 @@ async def get_schedules():
 @app.post("/playlists/", response_model=pl_models.PlaylistSumWithSched, status_code=201)
 async def create_schedule(schedule: fe_models.PlaylistCreate):
     """Simple upsert playlist schedule by URL. If a schedule for the URL already exists, update its next_run to today. Otherwise, create a new schedule."""
-    # TODO modify callsign???
     pl_by_url = await list_playlists(url=schedule.url)
     if pl_by_url and pl_by_url[0].schedules:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -47,22 +46,22 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
 @app.get("/playlists/{playlist_id}", response_model=pl_models.PlaylistSumWithVids)
 async def get_playlist(playlist_id: str):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
-    # TODO add basic video info - we want OI file UUID and URL at least, maybe also extractor and dlp_id if available
+    # TODO add basic video info - we want OI file UUID at least
     async with httpx.AsyncClient(timeout=5) as client:
-        # TODO this doesn't work - PLAPI needs extractor 
         url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
-        resp = await client.get(url)
+        resp = await client.get(url, params={"playlist_id": playlist_id})
         resp.raise_for_status()
         js = resp.json()
-        for item in js:
-            if item['playlist_id'] == playlist_id:
-                return item
+    if not js:
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
+    assert len(js) == 1, f"Expected exactly one playlist with ID {playlist_id}, got {len(js)}"
+    assert js[0]['playlist_id'] == playlist_id, f"Expected playlist ID {playlist_id}, got {js[0]['playlist_id']}"
+    return js[0]
 
 @app.get("/playlists/", response_model=list[pl_models.PlaylistSumWithVids])
 async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = None):
     """Proxy GET /playlists/ from LinkMeddle API."""
-    # TODO consider merging get_schedules and filtering by next_run date
+    # TODO merge get_schedules and filter by next_run date
     # TODO consider adding if 404
     # TODO consider better return type - we want ID but we don't need entries
     async with httpx.AsyncClient(timeout=5) as client:
@@ -71,7 +70,7 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             resp = await client.get(req_url)
             resp.raise_for_status()
             return [resp.json()]
-        # TODO this doesn't work - PLAPI needs extractor 
+        # TODO this doesn't work - PLAPI needs extractor - use GET /schedules/ and filter by sched_id instead
         req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
         resp = await client.get(req_url)
         resp.raise_for_status()
