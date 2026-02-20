@@ -133,7 +133,7 @@ class PlaylistSumBase(PlaylistCommon):
 class PlaylistSum(PlaylistSumBase, table=True):
     """LM-native summarized playlist"""
     #__tablename__ = "playlist_sums"
-    playlist_id: int | None =Field(primary_key=True, default=None)
+    playlist_id: int | None = Field(primary_key=True, default=None)
     entries: List['PlaylistVid'] = Relationship(back_populates="playlist")
 
 class PlaylistVid(SQLModel, table=True):

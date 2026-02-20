@@ -98,6 +98,7 @@ def get_playlist_sum(url: str, session: Session = Depends(get_session)):
     if not pl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
+    # TODO add in extractor ID
     pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [pv.vid_id for pv in pl.entries]})
     return pl_with_sched
 
