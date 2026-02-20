@@ -75,6 +75,7 @@ def list_playlist_sums(extractor: str,
     :param session: auto-injected DB session
     :type session: Session
     """
+    # TODO allow ID
     assert extractor and channel, "extractor and channel are required"
     statement = select(PlaylistSum).where(PlaylistSum.extractor_id == extractor,
                                          PlaylistSum.channel == channel)

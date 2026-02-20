@@ -47,8 +47,9 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
 @app.get("/playlists/{playlist_id}", response_model=pl_models.PlaylistSumWithVids)
 async def get_playlist(playlist_id: str):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
-    #TODO add basic video info
+    # TODO add basic video info - we want OI file UUID and URL at least, maybe also extractor and dlp_id if available
     async with httpx.AsyncClient(timeout=5) as client:
+        # TODO this doesn't work - PLAPI needs extractor 
         url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
         resp = await client.get(url)
         resp.raise_for_status()
@@ -58,17 +59,19 @@ async def get_playlist(playlist_id: str):
                 return item
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
 
-@app.get("/playlists/", response_model=list[pl_models.PlaylistSum])
+@app.get("/playlists/", response_model=list[pl_models.PlaylistSumWithVids])
 async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = None):
     """Proxy GET /playlists/ from LinkMeddle API."""
     # TODO consider merging get_schedules and filtering by next_run date
     # TODO consider adding if 404
+    # TODO consider better return type - we want ID but we don't need entries
     async with httpx.AsyncClient(timeout=5) as client:
         if url:
             req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{url}"
             resp = await client.get(req_url)
             resp.raise_for_status()
             return [resp.json()]
+        # TODO this doesn't work - PLAPI needs extractor 
         req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
         resp = await client.get(req_url)
         resp.raise_for_status()
@@ -98,7 +101,7 @@ async def get_video(file_id: str):
                                                 channel=x.get('channel'),
                                                 is_channel=x.get('pseudo_channel', False)
                                                 ) for x in
-                         resp.json().get('playlists', [])]
+                         resp.json()]
     return fe_models.Video(url=oi_file.info['url'],
                            extractor_key=extractor_id,
                            dlp_id=dlp_id,
@@ -111,20 +114,26 @@ async def get_video(file_id: str):
 @app.get("/videos/")
 async def list_videos(url: Optional[str] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None):
     """Proxy GET /videos/ to ObjectIndex search"""
+    # TODO return same video info as get_video
     oic = oi_client.get_obj_idx_env()
     params = {}
     if url:
         params['url'] = url
     if extractor_id:
-        params['ytdl-id'] = f"{extractor_id} {dlp_id}"
+        params['extra'] = f"ytdl-id={extractor_id} {dlp_id}"
     return oic.search_files(params=params)
 
 @app.get("/url")
 async def get_url(url: str):
     """Redirect to the appropriate playlist or video URL."""
     # TODO consider adding if 404
-    if pl := await list_playlists(url=url):
-        return RedirectResponse(url=f"/playlists/{pl[0]['playlist_id']}")
+    # TODO update this as we sanitize list_videos output
+    try:
+        if pl := await list_playlists(url=url):
+            return RedirectResponse(url=f"/playlists/{pl[0]['playlist_id']}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 404:
+            raise
     if vids := await list_videos(url=url):
-        return RedirectResponse(url=f"/videos/{vids[0]['file_id']}")
+        return RedirectResponse(url=f"/videos/{vids[0].uuid}")
     raise fastapi.HTTPException(status_code=404, detail="URL not found")
