@@ -143,10 +143,13 @@ class PlaylistVid(SQLModel, table=True):
     playlist: PlaylistSum = Relationship(back_populates="entries")
     extractor_id: str = Field(primary_key=True)
 
-class PlaylistSumWithVids(PlaylistSumBase):
+class PlaylistSumPublic(PlaylistSumBase):
+    """Public view of a playlist summary"""
+    playlist_id: Optional[int] = None
+
+class PlaylistSumWithVids(PlaylistSumPublic):
     """Playlist summary with vids included"""
     entries: list[str]
-    playlist_id: Optional[int] = None
 
 class PlaylistStatsBase(SQLModel):
     """Base stats of a playlist run"""
@@ -204,7 +207,7 @@ class PlaylistSchedPublic(PlaylistSchedBase):
 class PlaylistSchedWithStatsAndSum(PlaylistSchedPublic):
     """Playlist schedule with stats and summary included"""
     runs: list[PlaylistStatsStrHash] = []
-    summary: PlaylistSumBase | None = None
+    summary: PlaylistSumPublic | None = None
 
 class PlaylistSumWithSched(PlaylistSumWithVids):
     """Playlist summary with schedule included"""

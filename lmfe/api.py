@@ -90,8 +90,9 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             resp = await client.get(req_url)
             resp.raise_for_status()
             sched_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
+            # TODO retest after PLAPI updated to include playlist_id in schedule response
             return [fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
-                                           extractor_key=sched_resp.summary.extractor_id
+                                           extractor_key=sched_resp.summary.extractor_id,
                                            url=sched_resp.webpage_url,
                                            lm_id=sched_resp.summary.playlist_id)]
     raise fastapi.HTTPException(status_code=400, detail="Need URL or schedule ID")
@@ -111,6 +112,7 @@ async def get_video(file_id: str):
             url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/videos/{extractor_id}/{dlp_id}"
             resp = await client.get(url)
             resp.raise_for_status()
+            # TODO retest after PLAPI updated to return playlist_id in video response
             playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
                                                 extractor_key=x.get('extractor_id'),
                                                 title=x.get('title'),

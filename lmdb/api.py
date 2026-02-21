@@ -12,7 +12,7 @@ import warnings
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlmodel import SQLModel, Session, create_engine, select
-from .models import PlaylistSchedBase, PlaylistSchedPublic, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash
+from .models import PlaylistSchedBase, PlaylistSchedPublic, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash, PlaylistSumPublic
 from . import xform
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
@@ -270,7 +270,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         new_stats=PlaylistStatsStrHash.model_validate(new_stats_db, update={"entries_hash": new_stats_db.entries_hash.hex()}) if new_stats_db else None
     )
 
-@app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumBase])
+@app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumPublic])
 def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
     """Get playlists containing a given video ID for a specific extractor"""
     statement = select(PlaylistSum).join(PlaylistVid).where(PlaylistVid.vid_id == video_id,
