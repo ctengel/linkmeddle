@@ -23,8 +23,8 @@ class PlaylistBase(ThingBase):
 
 
 class VideoBase(ThingBase):
-    url: str
-    oi_file_uuid: uuid.UUID
+    url: Optional[str] = None
+    oi_file_uuid: Optional[uuid.UUID] = None
     oi_obj_uuid: Optional[uuid.UUID] = None
     object_url: Optional[str] = None
     type: str = 'video'
