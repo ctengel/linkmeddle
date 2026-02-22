@@ -62,7 +62,7 @@ def apply_update(instance, update_data: dict):
 
 
 
-@app.get("/playlists/", response_model=List[PlaylistSumBase])
+@app.get("/playlists/", response_model=List[PlaylistSumPublic])
 def list_playlist_sums(extractor: str | None = None,
                        channel: str | None = None,
                        playlist_id: int | None = None,
