@@ -211,7 +211,8 @@ def test_playlist_with_entries(client):
     assert result["summary"]["webpage_url"] == pl_url
     assert len(result["summary"]["entries"]) == len(entries)
     for i, entry in enumerate(result["summary"]["entries"]):
-        assert entry == entries[i].id
+        assert entry[0] == entries[i].id
+        assert entry[1] == entries[i].extractor.extractor
     video_id_to_get = entries[1].id
     r2 = client.get(f"/videos/yt/{video_id_to_get}")
     assert r2.status_code == 200

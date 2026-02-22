@@ -46,7 +46,6 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
 @app.get("/playlists/{playlist_id}", response_model=fe_models.Playlist)
 async def get_playlist(playlist_id: int):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
-    # TODO add basic video info - we want OI file UUID at least
     async with httpx.AsyncClient(timeout=5) as client:
         url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
         resp = await client.get(url, params={"playlist_id": playlist_id})
@@ -57,12 +56,27 @@ async def get_playlist(playlist_id: int):
     assert len(js) == 1, f"Expected exactly one playlist with ID {playlist_id}, got {len(js)}"
     assert js[0]['playlist_id'] == playlist_id, f"Expected playlist ID {playlist_id}, got {js[0]['playlist_id']}"
     playlist_url = js[0].get('webpage_url')
-    async with httpx.AsyncClient(timeout=5) as client:
+    async with httpx.AsyncClient(timeout=5) as client2:
         url2 = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{playlist_url}"
-        resp2 = await client.get(url2)
+        resp2 = await client2.get(url2)
         resp2.raise_for_status()
         js2 = resp2.json()    
     my_playlist = pl_models.PlaylistSumWithVids.model_validate(js2)
+    videos = []
+    # TODO async
+    oic = oi_client.get_obj_idx_env()
+    for entry in my_playlist.entries:
+        extractor_id = entry[1]
+        dlp_id = entry[0]
+        oic_files = oic.search_files(params={"extra": f"ytdl-id={extractor_id} {dlp_id}"})
+        # TODO if multiple, find the best
+        oi_file_uuid = oic_files[0].uuid if oic_files else None
+        file_url = oic_files[0].url if oic_files else None
+        videos.append(fe_models.VideoBase(dlp_id=dlp_id,
+                                         extractor_key=extractor_id,
+                                         url=file_url,
+                                         oi_file_uuid=oi_file_uuid,
+                                         ))
     # TODO need to pull in OI file UUID from OI - right now limited in that PLAPI doesn't return extractor ID per-video...
     return fe_models.Playlist(url=my_playlist.webpage_url,
                               dlp_id=my_playlist.id,
@@ -71,7 +85,7 @@ async def get_playlist(playlist_id: int):
                               channel=my_playlist.channel,
                               is_channel=my_playlist.pseudo_channel,
                               lm_id=my_playlist.playlist_id,
-                              videos=[fe_models.VideoBase(dlp_id=x) for x in my_playlist.entries])
+                              videos=videos)
 
 @app.get("/playlists/", response_model=list[fe_models.PlaylistBase])
 async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = None):
@@ -96,7 +110,6 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             resp = await client.get(req_url)
             resp.raise_for_status()
             sched_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
-            # TODO retest after PLAPI updated to include playlist_id in schedule response
             return [fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
                                            extractor_key=sched_resp.summary.extractor_id,
                                            url=sched_resp.webpage_url,

@@ -99,7 +99,7 @@ def get_playlist_sum(url: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
     # TODO add in extractor ID
-    pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [pv.vid_id for pv in pl.entries]})
+    pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [(pv.vid_id, pv.extractor_id) for pv in pl.entries]})
     return pl_with_sched
 
 
@@ -265,7 +265,7 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
     else:
         assert new_stats_db is None
     return PlaylistRunResult(
-        summary=PlaylistSumWithVids.model_validate(existing_pl, update={"entries": [pv.vid_id for pv in existing_pl.entries]}),
+        summary=PlaylistSumWithVids.model_validate(existing_pl, update={"entries": [(pv.vid_id, pv.extractor_id) for pv in existing_pl.entries]}),
         schedule=sched if sched else None,
         new_stats=PlaylistStatsStrHash.model_validate(new_stats_db, update={"entries_hash": new_stats_db.entries_hash.hex()}) if new_stats_db else None
     )

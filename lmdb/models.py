@@ -149,7 +149,7 @@ class PlaylistSumPublic(PlaylistSumBase):
 
 class PlaylistSumWithVids(PlaylistSumPublic):
     """Playlist summary with vids included"""
-    entries: list[str]
+    entries: list[tuple[str, str | None]]
 
 class PlaylistStatsBase(SQLModel):
     """Base stats of a playlist run"""
