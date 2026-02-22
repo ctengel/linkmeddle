@@ -44,7 +44,7 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
         resp.raise_for_status()
         return fastapi.Response(status_code=201)
 
-def oi_file_to_video(oi_file: Optional[oi_client.File] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None) -> fe_models.VideoBase:
+def oi_file_to_video(oi_file: Optional[oi_client.clilib.File] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None) -> fe_models.VideoBase:
     if not extractor_id or not dlp_id:
         if oi_file and (file_str := oi_file.info.get('extra', {}).get('ytdl-id')):
             extractor_id, dlp_id = file_str.split(" ", 1)
@@ -55,7 +55,9 @@ def oi_file_to_video(oi_file: Optional[oi_client.File] = None, extractor_id: Opt
                                oi_file_uuid=oi_file.uuid if oi_file else None,
                                oi_obj_uuid=oi_file.object['uuid'] if oi_file else None,
                                object_url=oi_file.get_s3_url() if oi_file else None,
-                               file_available=bool(oi_file))
+                               file_available=bool(oi_file),
+                               title=oi_file.info.get('extra', {}).get('ytdl-info', {}).get('title') if oi_file else None,
+                               channel=(oi_file.info.get('extra', {}).get('ytdl-info', {}).get('channel_url') or oi_file.info.get('extra', {}).get('ytdl-info', {}).get('uploader_id')) if oi_file else None)
 
 @app.get("/playlists/{playlist_id}", response_model=fe_models.Playlist)
 async def get_playlist(playlist_id: int):
@@ -124,6 +126,8 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             sched_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
             if not sched_resp.summary:
                 raise fastapi.HTTPException(status_code=503, detail="Playlist summary not available for this schedule yet")
+            assert sched_resp.summary.playlist_id is not None, f"Expected playlist_id in schedule summary for schedule ID {sched_id}, got {sched_resp.summary.playlist_id}"
+            assert sched_resp.webpage_url is not None, f"Expected webpage_url in schedule summary for schedule ID {sched_id}, got {sched_resp.webpage_url}"
             return [fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
                                            extractor_key=sched_resp.summary.extractor_id,
                                            url=sched_resp.webpage_url,
@@ -138,14 +142,12 @@ async def get_video(file_id: str):
     extractor_id = None
     dlp_id = None
     playlists = []
-    # TODO add channel and title to video
     if file_str := oi_file.info.get('extra', {}).get('ytdl-id'):
         extractor_id, dlp_id = file_str.split(" ", 1)
         async with httpx.AsyncClient(timeout=5) as client:
             url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/videos/{extractor_id}/{dlp_id}"
             resp = await client.get(url)
             resp.raise_for_status()
-            # TODO retest after PLAPI updated to return playlist_id in video response
             playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
                                                 extractor_key=x.get('extractor_id'),
                                                 title=x.get('title'),
@@ -168,7 +170,6 @@ async def list_videos(url: Optional[str] = None, extractor_id: Optional[str] = N
         params['url'] = url
     if extractor_id:
         params['extra'] = f"ytdl-id={extractor_id} {dlp_id}"
-    # TODO refactor all 3 places that do OI lookup
     search_result = oic.search_files(params=params)
     return [oi_file_to_video(oi_file=oi_file) for oi_file in search_result]
 
@@ -179,7 +180,7 @@ async def get_url(url: str):
     # TODO consider "Thing" response model
     try:
         if pl := await list_playlists(url=url):
-            return RedirectResponse(url=f"/playlists/{pl[0]['playlist_id']}")
+            return RedirectResponse(url=f"/playlists/{pl[0].lm_id}")
     except httpx.HTTPStatusError as e:
         if e.response.status_code != 404:
             raise

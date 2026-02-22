@@ -9,6 +9,7 @@ class ThingBase(pydantic.BaseModel):
     extractor_key: Optional[str] = None
     title: Optional[str] = None
     type: str
+    # TODO consider making channel be a playlist ID instead of a URL
     channel: Optional[str] = None
 
 
