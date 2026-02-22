@@ -1,5 +1,6 @@
 import uuid
 from typing import Optional
+import datetime
 import pydantic
 
 class ThingBase(pydantic.BaseModel):
@@ -15,12 +16,12 @@ class PlaylistCreate(pydantic.BaseModel):
     url: str
 
 class PlaylistBase(ThingBase):
+    # TODO in pydantic how is one supposed to have a child make a field required that is optional in the parent?
     url: str
     extractor_key: str
     type: str = 'playlist'
     is_channel: bool = False
     lm_id: int
-
 
 class VideoBase(ThingBase):
     url: Optional[str] = None
@@ -28,10 +29,13 @@ class VideoBase(ThingBase):
     oi_obj_uuid: Optional[uuid.UUID] = None
     object_url: Optional[str] = None
     type: str = 'video'
+    file_available: bool = False
 
 class Playlist(PlaylistBase):
     videos: list[VideoBase]
-
+    total_videos: int
+    next_run: Optional[datetime.date] = None
+    lm_sched_id: Optional[int] = None
 
 class Video(VideoBase):
     playlists: list[PlaylistBase] = []
