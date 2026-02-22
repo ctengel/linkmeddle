@@ -44,7 +44,7 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
         return fastapi.Response(status_code=201)
 
 @app.get("/playlists/{playlist_id}", response_model=fe_models.Playlist)
-async def get_playlist(playlist_id: str):
+async def get_playlist(playlist_id: int):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
     # TODO add basic video info - we want OI file UUID at least
     async with httpx.AsyncClient(timeout=5) as client:
@@ -56,7 +56,13 @@ async def get_playlist(playlist_id: str):
         raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
     assert len(js) == 1, f"Expected exactly one playlist with ID {playlist_id}, got {len(js)}"
     assert js[0]['playlist_id'] == playlist_id, f"Expected playlist ID {playlist_id}, got {js[0]['playlist_id']}"
-    my_playlist = pl_models.PlaylistSumWithVids.model_validate(js[0])
+    playlist_url = js[0].get('webpage_url')
+    async with httpx.AsyncClient(timeout=5) as client:
+        url2 = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{playlist_url}"
+        resp2 = await client.get(url2)
+        resp2.raise_for_status()
+        js2 = resp2.json()    
+    my_playlist = pl_models.PlaylistSumWithVids.model_validate(js2)
     # TODO need to pull in OI file UUID from OI - right now limited in that PLAPI doesn't return extractor ID per-video...
     return fe_models.Playlist(url=my_playlist.webpage_url,
                               dlp_id=my_playlist.id,
