@@ -36,9 +36,16 @@ class Playlist(PlaylistBase):
     videos: list[VideoBase]
     total_videos: int
     next_run: Optional[datetime.date] = None
+    last_run: Optional[datetime.date] = None
     lm_sched_id: Optional[int] = None
 
 class Video(VideoBase):
     playlists: list[PlaylistBase] = []
     oi_obj_uuid: uuid.UUID
     object_url: str
+
+class PlaylistCreateResult(pydantic.BaseModel):
+    url: str
+    type: str = 'playlist'
+    lm_id: Optional[int] = None
+    lm_sched_id: int
