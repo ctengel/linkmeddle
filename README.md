@@ -5,7 +5,7 @@ LINKed MEDia DL
 
 ### API/DB
 
-`fastapi`
+`fastapi dev --port 29072`
 
 ### CLI
 
@@ -23,6 +23,10 @@ pip install -U "yt-dlp[default]"
 pip install sqlmodel  https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip
 OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket bucket --no-playlist "https:/something.com/video"
 ```
+
+### lmfe
+
+`fastapi --port 29062`
 
 ## lm v1-2
 
