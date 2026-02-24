@@ -47,6 +47,8 @@ let currentVideoId = null;
 let autoPlayEnabled = true;
 let helpOverlayVisible = false;
 let playlistCache = {};
+let currentPlaylistData = null;
+let videoDataCache = {};
 
 /* =========================
    ROUTER
@@ -108,6 +110,16 @@ async function getPlaylistCached(id) {
   const playlist = await apiGet(`/playlists/${id}`);
   playlistCache[id] = playlist;
   return playlist;
+}
+
+async function getVideoCached(id) {
+  if (videoDataCache[id]) {
+    return videoDataCache[id];
+  }
+
+  const video = await apiGet(`/videos/${id}`);
+  videoDataCache[id] = video;
+  return video;
 }
 
 /* =========================
@@ -225,28 +237,38 @@ async function renderPlaylistPage(id) {
 ========================= */
 
 async function renderVideoPage(fileId, playlistId) {
-  const app = document.getElementById("app");
-  const video = await apiGet(`/videos/${fileId}`);
 
-  let sidebarHTML = "";
+  // If already on video page and same playlist → update in place
+  if (
+    currentPlaylistData &&
+    playlistId &&
+    currentPlaylistData.lm_id == playlistId &&
+    document.getElementById("videoPlayer")
+  ) {
+    await updateVideoInPlace(fileId);
+    return;
+  }
+
+  // Otherwise full render
+  const app = document.getElementById("app");
+
+  const video = await getVideoCached(fileId);
+
+  currentVideoId = fileId;
+  activePlaylistId = playlistId || null;
+
   if (playlistId) {
-    const playlist = await getPlaylistCached(playlistId);
-    sidebarHTML = `
-      <div class="card sidebar">
-        <h3>Active Playlist</h3>
-        ${playlist.videos.map(v => `
-          <div class="video-row ${v.oi_file_uuid === fileId ? "active" : ""}"
-               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${playlist.lm_id}'">
-            ${v.title || "Untitled"}
-          </div>
-        `).join("")}
-      </div>
-    `;
+    currentPlaylistData = await getPlaylistCached(playlistId);
+    activePlaylistVideos = currentPlaylistData.videos.map(v => v.oi_file_uuid);
+  } else {
+    currentPlaylistData = null;
+    activePlaylistVideos = [];
   }
 
   app.innerHTML = `
     <div class="row">
       <div class="main">
+
         <div class="card">
           ${video.file_available
             ? `<video id="videoPlayer" controls src="${video.object_url}"></video>`
@@ -255,8 +277,8 @@ async function renderVideoPage(fileId, playlistId) {
         </div>
 
         <div class="card">
-          <h2>${video.title || "Untitled Video"}</h2>
-          <div class="muted">
+          <h2 id="videoTitle">${video.title || "Untitled Video"}</h2>
+          <div class="muted" id="videoChannel">
             Channel: ${video.channel || "Unknown"}
           </div>
         </div>
@@ -268,42 +290,94 @@ async function renderVideoPage(fileId, playlistId) {
 
         <div class="card">
           <h3>Related Playlists</h3>
-          ${video.playlists.map(p => `
-            <div class="video-row"
-                 onclick="location.hash='#/playlist/${p.lm_id}'">
-              ${p.title || "Untitled"}
-            </div>
-          `).join("")}
+          <div id="relatedPlaylists">
+            ${video.playlists.map(p => `
+              <div class="video-row"
+                   onclick="location.hash='#/playlist/${p.lm_id}'">
+                ${p.title || "Untitled"}
+              </div>
+            `).join("")}
+          </div>
         </div>
+
       </div>
 
-      ${sidebarHTML}
+      ${renderSidebarHTML(fileId)}
     </div>
   `;
-  // Register current video
-  currentVideoId = fileId;
-  activePlaylistId = playlistId || null;
 
-  // Grab video element
+  registerVideoPlayer();
+}
+
+function renderSidebarHTML(activeId) {
+  if (!currentPlaylistData) return "";
+
+  return `
+    <div class="card sidebar">
+      <h3>Active Playlist</h3>
+      <div id="playlistSidebar">
+        ${currentPlaylistData.videos.map(v => `
+          <div class="video-row ${v.oi_file_uuid === activeId ? "active" : ""}"
+               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${currentPlaylistData.lm_id}'">
+            ${v.title || "Untitled"}
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+async function updateVideoInPlace(newVideoId) {
+
+  const video = await getVideoCached(newVideoId);
+
+  currentVideoId = newVideoId;
+
+  const videoEl = document.getElementById("videoPlayer");
+  const titleEl = document.getElementById("videoTitle");
+  const channelEl = document.getElementById("videoChannel");
+
+  if (videoEl && video.file_available) {
+    videoEl.src = video.object_url;
+    videoEl.load();
+    videoEl.play();
+  }
+
+  if (titleEl) titleEl.textContent = video.title || "Untitled Video";
+  if (channelEl) channelEl.textContent = "Channel: " + (video.channel || "Unknown");
+
+  // Update active highlight
+  const sidebar = document.getElementById("playlistSidebar");
+  if (sidebar) {
+    Array.from(sidebar.children).forEach(el => {
+      el.classList.remove("active");
+    });
+
+    const activeIndex = activePlaylistVideos.indexOf(newVideoId);
+    if (activeIndex !== -1) {
+      sidebar.children[activeIndex].classList.add("active");
+    }
+  }
+
+  registerVideoPlayer();
+}
+
+function registerVideoPlayer() {
   currentVideoElement = document.getElementById("videoPlayer");
 
-  // Auto-play next video when current one ends
   if (currentVideoElement && activePlaylistVideos.length) {
-    currentVideoElement.addEventListener("ended", () => {
+    currentVideoElement.onended = () => {
       if (autoPlayEnabled) {
         navigatePlaylist(1);
       }
-    });
+    };
   }
+} 
 
-  // Load active playlist videos for navigation
-  if (playlistId) {
-    const playlist = await apiGet(`/playlists/${playlistId}`);
-    activePlaylistVideos = playlist.videos.map(v => v.oi_file_uuid);
-  } else {
-    activePlaylistVideos = [];
-  }
-}
+/* =========================
+   KEYBOARD SHORTCUTS & HELP OVERLAY
+========================= */
+
 
 document.addEventListener("keydown", (e) => {
   // Don't trigger shortcuts when typing in input fields
