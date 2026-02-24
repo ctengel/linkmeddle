@@ -37,11 +37,24 @@
 const API_BASE = "http://localhost:8000";
 
 /* =========================
+   STATE
+========================= */
+
+let currentVideoElement = null;
+let activePlaylistVideos = [];
+let activePlaylistId = null;
+let currentVideoId = null;
+let autoPlayEnabled = true;
+let helpOverlayVisible = false;
+let playlistCache = {};
+
+/* =========================
    ROUTER
 ========================= */
 
 window.addEventListener("hashchange", router);
 window.addEventListener("load", router);
+renderHelpOverlay();  // is this the right place for this?
 
 function router() {
   const hash = location.hash || "#/";
@@ -83,6 +96,18 @@ async function apiPost(path, body) {
     body: JSON.stringify(body)
   });
   return res.json();
+}
+
+async function getPlaylistCached(id) {
+  if (!id) return null;
+
+  if (playlistCache[id]) {
+    return playlistCache[id];
+  }
+
+  const playlist = await apiGet(`/playlists/${id}`);
+  playlistCache[id] = playlist;
+  return playlist;
 }
 
 /* =========================
@@ -164,7 +189,7 @@ async function loadPlaylists() {
 
 async function renderPlaylistPage(id) {
   const app = document.getElementById("app");
-  const playlist = await apiGet(`/playlists/${id}`);
+  const playlist = await getPlaylistCached(id);
 
   app.innerHTML = `
     <div class="card">
@@ -205,7 +230,7 @@ async function renderVideoPage(fileId, playlistId) {
 
   let sidebarHTML = "";
   if (playlistId) {
-    const playlist = await apiGet(`/playlists/${playlistId}`);
+    const playlist = await getPlaylistCached(playlistId);
     sidebarHTML = `
       <div class="card sidebar">
         <h3>Active Playlist</h3>
@@ -224,7 +249,7 @@ async function renderVideoPage(fileId, playlistId) {
       <div class="main">
         <div class="card">
           ${video.file_available
-            ? `<video controls src="${video.object_url}"></video>`
+            ? `<video id="videoPlayer" controls src="${video.object_url}"></video>`
             : `<div class="placeholder">File not downloaded yet</div>`
           }
         </div>
@@ -255,7 +280,174 @@ async function renderVideoPage(fileId, playlistId) {
       ${sidebarHTML}
     </div>
   `;
+  // Register current video
+  currentVideoId = fileId;
+  activePlaylistId = playlistId || null;
+
+  // Grab video element
+  currentVideoElement = document.getElementById("videoPlayer");
+
+  // Auto-play next video when current one ends
+  if (currentVideoElement && activePlaylistVideos.length) {
+    currentVideoElement.addEventListener("ended", () => {
+      if (autoPlayEnabled) {
+        navigatePlaylist(1);
+      }
+    });
+  }
+
+  // Load active playlist videos for navigation
+  if (playlistId) {
+    const playlist = await apiGet(`/playlists/${playlistId}`);
+    activePlaylistVideos = playlist.videos.map(v => v.oi_file_uuid);
+  } else {
+    activePlaylistVideos = [];
+  }
 }
+
+document.addEventListener("keydown", (e) => {
+  // Don't trigger shortcuts when typing in input fields
+  if (
+    ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) &&
+    e.key !== "?"
+  ) return;
+  const video = currentVideoElement;
+
+  switch (e.key.toLowerCase()) {
+
+    // Play / Pause
+    case " ":
+    case "k":
+      if (video) {
+        e.preventDefault();
+        video.paused ? video.play() : video.pause();
+      }
+      break;
+
+    // Back 10 seconds
+    case "j":
+      if (video) {
+        video.currentTime = Math.max(0, video.currentTime - 10);
+      }
+      break;
+
+    // Forward 10 seconds
+    case "l":
+      if (video) {
+        video.currentTime = Math.min(video.duration, video.currentTime + 10);
+      }
+      break;
+
+    // Previous video
+    case "arrowleft":
+      navigatePlaylist(-1);
+      break;
+
+    // Next video
+    case "arrowright":
+      navigatePlaylist(1);
+      break;
+
+    // Fullscreen
+    case "f":
+      if (video) {
+        if (!document.fullscreenElement) {
+          video.requestFullscreen();
+        } else {
+          document.exitFullscreen();
+        }
+      }
+      break;
+
+    // Mute
+    case "m":
+      if (video) {
+        video.muted = !video.muted;
+      }
+      break;
+
+    // Go Home
+    case "home":
+      goHome();
+      break;
+    
+    case "?":
+      toggleHelpOverlay();
+      break;
+  }
+});
+
+function navigatePlaylist(direction) {
+  if (!activePlaylistVideos.length || !currentVideoId) return;
+
+  const index = activePlaylistVideos.indexOf(currentVideoId);
+  if (index === -1) return;
+
+  const nextIndex = index + direction;
+
+  if (nextIndex >= 0 && nextIndex < activePlaylistVideos.length) {
+    const nextVideoId = activePlaylistVideos[nextIndex];
+    location.hash = `#/video/${nextVideoId}?playlist=${activePlaylistId}`;
+  }
+}
+
+function renderHelpOverlay() {
+  if (document.getElementById("shortcutOverlay")) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "shortcutOverlay";
+  overlay.style.position = "fixed";
+  overlay.style.top = "0";
+  overlay.style.left = "0";
+  overlay.style.width = "100%";
+  overlay.style.height = "100%";
+  overlay.style.background = "rgba(0,0,0,0.85)";
+  overlay.style.color = "white";
+  overlay.style.display = "none";
+  overlay.style.zIndex = "9999";
+  overlay.style.padding = "40px";
+  overlay.style.overflow = "auto";
+
+  overlay.innerHTML = `
+    <h2>Keyboard Shortcuts</h2>
+    <table style="width:100%; max-width:600px;">
+      <tr><td>Space / K</td><td>Play / Pause</td></tr>
+      <tr><td>J</td><td>Back 10 seconds</td></tr>
+      <tr><td>L</td><td>Forward 10 seconds</td></tr>
+      <tr><td>←</td><td>Previous video</td></tr>
+      <tr><td>→</td><td>Next video</td></tr>
+      <tr><td>F</td><td>Fullscreen</td></tr>
+      <tr><td>M</td><td>Mute</td></tr>
+      <tr><td>Home</td><td>Go to homepage</td></tr>
+      <tr><td>?</td><td>Toggle this help</td></tr>
+    </table>
+
+    <br/>
+
+    <label>
+      <input type="checkbox" id="autoPlayToggle" ${autoPlayEnabled ? "checked" : ""}/>
+      Auto-play next video
+    </label>
+
+    <br/><br/>
+    <button onclick="toggleHelpOverlay()">Close</button>
+  `;
+
+  document.body.appendChild(overlay);
+
+  document.getElementById("autoPlayToggle").addEventListener("change", (e) => {
+    autoPlayEnabled = e.target.checked;
+  });
+}
+
+function toggleHelpOverlay() {
+  const overlay = document.getElementById("shortcutOverlay");
+  if (!overlay) return;
+
+  helpOverlayVisible = !helpOverlayVisible;
+  overlay.style.display = helpOverlayVisible ? "block" : "none";
+}
+
 </script>
 
 </body>
