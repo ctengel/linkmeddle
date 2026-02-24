@@ -34,7 +34,7 @@
 /* =========================
    CONFIG
 ========================= */
-const API_BASE = "http://localhost:8000";
+const API_BASE = "";
 
 /* =========================
    STATE
@@ -62,13 +62,21 @@ function router() {
   const hash = location.hash || "#/";
   const app = document.getElementById("app");
 
+    // Prefill route
+  if (hash.startsWith("#/prefill/")) {
+    const encoded = hash.replace("#/prefill/", "");
+    const decoded = decodeURIComponent(encoded);
+    renderHome(decoded);
+    return;
+  }
+
   if (hash.startsWith("#/playlist/")) {
     const id = hash.split("/")[2];
     renderPlaylistPage(id);
   } 
   else if (hash.startsWith("#/video/")) {
     const parts = hash.split("/");
-    const fileId = parts[2];
+    const fileId = parts[2].split("?")[0];
     const params = new URLSearchParams(location.hash.split("?")[1]);
     const playlistId = params.get("playlist");
     renderVideoPage(fileId, playlistId);
@@ -122,18 +130,47 @@ async function getVideoCached(id) {
   return video;
 }
 
+async function schedulePlaylist(url) {
+  try {
+    const result = await apiPost("/playlists/", { url });
+
+    alert("Scheduled successfully.");
+
+    if (playlistCache[result.lm_id]) {
+      delete playlistCache[result.lm_id];
+    }
+
+    if (result.lm_id) {
+      location.hash = `#/playlist/${result.lm_id}`;
+    } else {
+      goHome();
+    }
+
+  } catch (err) {
+    alert("Failed to schedule playlist.");
+  }
+}
+
 /* =========================
    HOME PAGE
 ========================= */
 
-async function renderHome() {
+async function renderHome(prefillUrl = "") {
   const app = document.getElementById("app");
 
   app.innerHTML = `
     <div class="card">
       <h2>Search / Add Playlist</h2>
-      <input id="searchInput" placeholder="Paste playlist or video URL"/>
+      <input id="searchInput"
+        placeholder="Paste playlist or video URL"
+        value="${prefillUrl || ""}"/>
       <button onclick="handleSearch()">Go</button>
+    </div>
+
+    <div class="card">
+      <h2>Bookmarklet</h2>
+      <p>Drag this to your bookmarks bar:</p>
+      <a id="bookmarkletLink" href="#">📌 Schedule in Video App</a>
     </div>
 
     <div class="card">
@@ -141,28 +178,56 @@ async function renderHome() {
       <div id="currentJobs">Loading...</div>
     </div>
 
-    <div class="card">
+    <!--<div class="card">
       <h2>All Playlists</h2>
       <div id="playlistList">Loading...</div>
-    </div>
+    </div>-->
   `;
 
   loadCurrentJobs();
-  loadPlaylists();
+  //loadPlaylists();
+
+  // Generate bookmarklet code
+  const baseURL = window.location.origin + window.location.pathname;
+
+  const bookmarkletCode = `
+  javascript:(function(){
+    var target='${baseURL}';
+    var current=encodeURIComponent(window.location.href);
+    window.location.href = target + '#/prefill/' + current;
+  })();
+  `;
+
+  document.getElementById("bookmarkletLink").href =
+    bookmarkletCode.replace(/\n/g,'');
+
 }
 
 async function handleSearch() {
-  const url = document.getElementById("searchInput").value;
+  const url = document.getElementById("searchInput").value.trim();
   if (!url) return;
 
-  const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
+  try {
+    const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
 
-  if (result.lm_id) {
-    location.hash = `#/playlist/${result.lm_id}`;
-  } else if (result.oi_file_uuid) {
-    location.hash = `#/video/${result.oi_file_uuid}`;
-  } else {
-    alert("Unknown response");
+    // Playlist detected
+    if (result.lm_id) {
+      location.hash = `#/playlist/${result.lm_id}`;
+      return;
+    }
+
+    // Video detected
+    if (result.oi_obj_uuid) {
+      location.hash = `#/video/${result.oi_obj_uuid}`;
+      return;
+    }
+
+    // If response is empty → fallback to POST
+    await schedulePlaylist(url);
+
+  } catch (err) {
+    // If 404 or error → fallback to POST
+    await schedulePlaylist(url);
   }
 }
 
@@ -178,7 +243,7 @@ async function loadCurrentJobs() {
   container.innerHTML = data.map(p => `
     <div onclick="location.hash='#/playlist/${p.lm_id}'" class="video-row">
       <b>${p.title || "Untitled"}</b><br/>
-      <span class="muted">Next Run: ${p.next_run || "N/A"}</span>
+      <span class="muted">URL: ${p.url}</span>
     </div>
   `).join("");
 }
@@ -210,8 +275,12 @@ async function renderPlaylistPage(id) {
         Channel: ${playlist.channel || "Unknown"}<br/>
         Total Videos: ${playlist.total_videos}<br/>
         Last Run: ${playlist.last_run || "N/A"}<br/>
-        Next Run: ${playlist.next_run || "N/A"}
+        Next Run: ${playlist.next_run || "N/A"}<br/>
+        URL: <a href="${playlist.url}" target="_blank">${playlist.url}</a>
       </div>
+        <button onclick="schedulePlaylist('${playlist.url}')">
+          Schedule Today
+        </button>
     </div>
 
     <div class="card">
@@ -224,7 +293,8 @@ async function renderPlaylistPage(id) {
             <span class="muted">
               ${v.channel || ""} 
               ${v.file_available ? "" : "(Not Downloaded)"}
-            </span>
+            </span><br />
+            <span class="muted">URL: ${v.url}</span>
           </div>
         `).join("")}
       </div>
@@ -367,6 +437,7 @@ function registerVideoPlayer() {
 
   if (currentVideoElement && activePlaylistVideos.length) {
     currentVideoElement.onended = () => {
+      console.log("Video ended");
       if (autoPlayEnabled) {
         navigatePlaylist(1);
       }
@@ -386,6 +457,8 @@ document.addEventListener("keydown", (e) => {
     e.key !== "?"
   ) return;
   const video = currentVideoElement;
+ 
+  console.log("Key pressed:", e.key);
 
   switch (e.key.toLowerCase()) {
 
@@ -452,6 +525,9 @@ document.addEventListener("keydown", (e) => {
 });
 
 function navigatePlaylist(direction) {
+
+  console.log("Navigating playlist, direction:", direction, currentVideoId);
+
   if (!activePlaylistVideos.length || !currentVideoId) return;
 
   const index = activePlaylistVideos.indexOf(currentVideoId);
