@@ -161,9 +161,22 @@ async function renderHome(prefillUrl = "") {
   app.innerHTML = `
     <div class="card">
       <h2>Search / Add Playlist</h2>
-      <input id="searchInput"
-        placeholder="Paste playlist or video URL"
-        value="${prefillUrl || ""}"/>
+
+      <label>
+        <input type="checkbox" id="batchToggle"
+              onchange="toggleBatchMode(this.checked)">
+        Batch Mode
+      </label>
+
+      <br/><br/>
+
+      <div id="searchContainer">
+        <input id="searchInput"
+              placeholder="Paste playlist or video URL"
+              value="${prefillUrl || ""}"/>
+      </div>
+
+      <br/>
       <button onclick="handleSearch()">Go</button>
     </div>
 
@@ -203,31 +216,64 @@ async function renderHome(prefillUrl = "") {
 
 }
 
-async function handleSearch() {
-  const url = document.getElementById("searchInput").value.trim();
-  if (!url) return;
-
+async function handleSingleURL(url) {
   try {
     const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
 
-    // Playlist detected
     if (result.lm_id) {
       location.hash = `#/playlist/${result.lm_id}`;
       return;
     }
 
-    // Video detected
     if (result.oi_obj_uuid) {
       location.hash = `#/video/${result.oi_obj_uuid}`;
       return;
     }
 
-    // If response is empty → fallback to POST
     await schedulePlaylist(url);
 
-  } catch (err) {
-    // If 404 or error → fallback to POST
+  } catch {
     await schedulePlaylist(url);
+  }
+}
+
+async function handleSingleURL(url) {
+  try {
+    const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
+
+    if (result.lm_id) {
+      location.hash = `#/playlist/${result.lm_id}`;
+      return;
+    }
+
+    if (result.oi_obj_uuid) {
+      location.hash = `#/video/${result.oi_obj_uuid}`;
+      return;
+    }
+
+    await schedulePlaylist(url);
+
+  } catch {
+    await schedulePlaylist(url);
+  }
+}
+
+async function handleSearch() {
+  const input = document.getElementById("searchInput").value.trim();
+  if (!input) return;
+
+  const batchEnabled =
+    document.getElementById("batchToggle")?.checked;
+
+  if (!batchEnabled) {
+    await handleSingleURL(input);
+  } else {
+    const urls = input
+      .split("\n")
+      .map(u => u.trim())
+      .filter(Boolean);
+
+    await handleBatch(urls);
   }
 }
 
@@ -596,6 +642,24 @@ function toggleHelpOverlay() {
 
   helpOverlayVisible = !helpOverlayVisible;
   overlay.style.display = helpOverlayVisible ? "block" : "none";
+}
+
+function toggleBatchMode(enabled) {
+  const container = document.getElementById("searchContainer");
+
+  if (enabled) {
+    container.innerHTML = `
+      <textarea id="searchInput"
+                rows="6"
+                style="width:100%;"
+                placeholder="Enter one URL per line"></textarea>
+    `;
+  } else {
+    container.innerHTML = `
+      <input id="searchInput"
+             placeholder="Paste playlist or video URL"/>
+    `;
+  }
 }
 
 </script>
