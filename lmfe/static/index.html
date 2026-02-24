@@ -122,8 +122,8 @@ async function handleSearch() {
 
   if (result.lm_id) {
     location.hash = `#/playlist/${result.lm_id}`;
-  } else if (result.oi_obj_uuid) {
-    location.hash = `#/video/${result.oi_obj_uuid}`;
+  } else if (result.oi_file_uuid) {
+    location.hash = `#/video/${result.oi_file_uuid}`;
   } else {
     alert("Unknown response");
   }
@@ -139,7 +139,7 @@ async function loadCurrentJobs() {
   }
 
   container.innerHTML = data.map(p => `
-    <div>
+    <div onclick="location.hash='#/playlist/${p.lm_id}'" class="video-row">
       <b>${p.title || "Untitled"}</b><br/>
       <span class="muted">Next Run: ${p.next_run || "N/A"}</span>
     </div>
@@ -182,7 +182,7 @@ async function renderPlaylistPage(id) {
       <div>
         ${playlist.videos.map(v => `
           <div class="video-row"
-               onclick="location.hash='#/video/${v.oi_obj_uuid}?playlist=${playlist.lm_id}'">
+               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${playlist.lm_id}'">
             ${v.title || "Untitled"}
             <span class="muted">
               ${v.channel || ""} 
@@ -210,8 +210,8 @@ async function renderVideoPage(fileId, playlistId) {
       <div class="card sidebar">
         <h3>Active Playlist</h3>
         ${playlist.videos.map(v => `
-          <div class="video-row ${v.oi_obj_uuid === fileId ? "active" : ""}"
-               onclick="location.hash='#/video/${v.oi_obj_uuid}?playlist=${playlist.lm_id}'">
+          <div class="video-row ${v.oi_file_uuid === fileId ? "active" : ""}"
+               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${playlist.lm_id}'">
             ${v.title || "Untitled"}
           </div>
         `).join("")}

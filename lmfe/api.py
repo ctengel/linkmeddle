@@ -165,7 +165,10 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
                 playlists.append(fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
                                                        extractor_key=sched_resp.summary.extractor_id,
                                                        url=sched_resp.webpage_url,
-                                                       lm_id=sched_resp.summary.playlist_id))
+                                                       lm_id=sched_resp.summary.playlist_id,
+                                                       title=sched_resp.summary.title,
+                                                       channel=sched_resp.summary.channel,
+                                                       is_channel=sched_resp.summary.pseudo_channel))
             return playlists
     raise fastapi.HTTPException(status_code=400, detail="Need URL or schedule ID")
 
