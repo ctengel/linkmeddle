@@ -3,6 +3,7 @@ import datetime
 from typing import Optional
 import fastapi
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 from obj_idx import client as oi_client
 from lmdb import models as pl_models
@@ -12,6 +13,8 @@ LINKMEDDLE_PLAPI = os.getenv("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 OI_BUCKET = os.getenv("OBJIDX_BUCKET_DEFAULT")
 
 app = fastapi.FastAPI()
+
+app.mount("/static", StaticFiles(directory="lmfe/static"), name="static")
     
 @app.post("/playlists/", response_model=fe_models.PlaylistCreateResult)
 async def create_schedule(schedule: fe_models.PlaylistCreate):

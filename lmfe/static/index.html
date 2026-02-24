@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Video Playlist GUI</title>
+  <style>
+    body { font-family: Arial; margin: 0; background:#f5f5f5; }
+    header { background:#111; color:white; padding:10px 20px; }
+    header h1 { margin:0; cursor:pointer; }
+    .container { padding:20px; }
+    .card { background:white; padding:15px; margin-bottom:15px; border-radius:6px; }
+    .row { display:flex; gap:20px; }
+    .sidebar { width:300px; }
+    .main { flex:1; }
+    .video-row { padding:8px 0; border-bottom:1px solid #eee; cursor:pointer; }
+    .video-row:hover { background:#fafafa; }
+    button { padding:6px 12px; cursor:pointer; }
+    input { padding:6px; width:300px; }
+    .muted { color:#777; font-size:12px; }
+    .placeholder { opacity:0.5; }
+    .active { font-weight:bold; }
+    video { width:100%; max-height:500px; background:black; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1 onclick="goHome()">Video GUI</h1>
+</header>
+
+<div id="app" class="container"></div>
+
+<script>
+/* =========================
+   CONFIG
+========================= */
+const API_BASE = "http://localhost:8000";
+
+/* =========================
+   ROUTER
+========================= */
+
+window.addEventListener("hashchange", router);
+window.addEventListener("load", router);
+
+function router() {
+  const hash = location.hash || "#/";
+  const app = document.getElementById("app");
+
+  if (hash.startsWith("#/playlist/")) {
+    const id = hash.split("/")[2];
+    renderPlaylistPage(id);
+  } 
+  else if (hash.startsWith("#/video/")) {
+    const parts = hash.split("/");
+    const fileId = parts[2];
+    const params = new URLSearchParams(location.hash.split("?")[1]);
+    const playlistId = params.get("playlist");
+    renderVideoPage(fileId, playlistId);
+  } 
+  else {
+    renderHome();
+  }
+}
+
+function goHome() {
+  location.hash = "#/";
+}
+
+/* =========================
+   API HELPERS
+========================= */
+
+async function apiGet(path) {
+  const res = await fetch(API_BASE + path);
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(API_BASE + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+/* =========================
+   HOME PAGE
+========================= */
+
+async function renderHome() {
+  const app = document.getElementById("app");
+
+  app.innerHTML = `
+    <div class="card">
+      <h2>Search / Add Playlist</h2>
+      <input id="searchInput" placeholder="Paste playlist or video URL"/>
+      <button onclick="handleSearch()">Go</button>
+    </div>
+
+    <div class="card">
+      <h2>Current Jobs</h2>
+      <div id="currentJobs">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>All Playlists</h2>
+      <div id="playlistList">Loading...</div>
+    </div>
+  `;
+
+  loadCurrentJobs();
+  loadPlaylists();
+}
+
+async function handleSearch() {
+  const url = document.getElementById("searchInput").value;
+  if (!url) return;
+
+  const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
+
+  if (result.lm_id) {
+    location.hash = `#/playlist/${result.lm_id}`;
+  } else if (result.oi_obj_uuid) {
+    location.hash = `#/video/${result.oi_obj_uuid}`;
+  } else {
+    alert("Unknown response");
+  }
+}
+
+async function loadCurrentJobs() {
+  const data = await apiGet("/playlists/?current=true");
+  const container = document.getElementById("currentJobs");
+
+  if (!data.length) {
+    container.innerHTML = "<div class='muted'>No active jobs</div>";
+    return;
+  }
+
+  container.innerHTML = data.map(p => `
+    <div>
+      <b>${p.title || "Untitled"}</b><br/>
+      <span class="muted">Next Run: ${p.next_run || "N/A"}</span>
+    </div>
+  `).join("");
+}
+
+async function loadPlaylists() {
+  const data = await apiGet("/playlists/");
+  const container = document.getElementById("playlistList");
+
+  container.innerHTML = data.map(p => `
+    <div class="video-row" onclick="location.hash='#/playlist/${p.lm_id}'">
+      ${p.title || "Untitled"} 
+      <span class="muted">(${p.channel || "Unknown"})</span>
+    </div>
+  `).join("");
+}
+
+/* =========================
+   PLAYLIST PAGE
+========================= */
+
+async function renderPlaylistPage(id) {
+  const app = document.getElementById("app");
+  const playlist = await apiGet(`/playlists/${id}`);
+
+  app.innerHTML = `
+    <div class="card">
+      <h2>${playlist.title || "Untitled Playlist"}</h2>
+      <div class="muted">
+        Channel: ${playlist.channel || "Unknown"}<br/>
+        Total Videos: ${playlist.total_videos}<br/>
+        Last Run: ${playlist.last_run || "N/A"}<br/>
+        Next Run: ${playlist.next_run || "N/A"}
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Videos</h3>
+      <div>
+        ${playlist.videos.map(v => `
+          <div class="video-row"
+               onclick="location.hash='#/video/${v.oi_obj_uuid}?playlist=${playlist.lm_id}'">
+            ${v.title || "Untitled"}
+            <span class="muted">
+              ${v.channel || ""} 
+              ${v.file_available ? "" : "(Not Downloaded)"}
+            </span>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+/* =========================
+   VIDEO PAGE
+========================= */
+
+async function renderVideoPage(fileId, playlistId) {
+  const app = document.getElementById("app");
+  const video = await apiGet(`/videos/${fileId}`);
+
+  let sidebarHTML = "";
+  if (playlistId) {
+    const playlist = await apiGet(`/playlists/${playlistId}`);
+    sidebarHTML = `
+      <div class="card sidebar">
+        <h3>Active Playlist</h3>
+        ${playlist.videos.map(v => `
+          <div class="video-row ${v.oi_obj_uuid === fileId ? "active" : ""}"
+               onclick="location.hash='#/video/${v.oi_obj_uuid}?playlist=${playlist.lm_id}'">
+            ${v.title || "Untitled"}
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  app.innerHTML = `
+    <div class="row">
+      <div class="main">
+        <div class="card">
+          ${video.file_available
+            ? `<video controls src="${video.object_url}"></video>`
+            : `<div class="placeholder">File not downloaded yet</div>`
+          }
+        </div>
+
+        <div class="card">
+          <h2>${video.title || "Untitled Video"}</h2>
+          <div class="muted">
+            Channel: ${video.channel || "Unknown"}
+          </div>
+        </div>
+
+        <div class="card placeholder">
+          <h3>⭐ Rating (Coming Soon)</h3>
+          ☆ ☆ ☆ ☆ ☆
+        </div>
+
+        <div class="card">
+          <h3>Related Playlists</h3>
+          ${video.playlists.map(p => `
+            <div class="video-row"
+                 onclick="location.hash='#/playlist/${p.lm_id}'">
+              ${p.title || "Untitled"}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+
+      ${sidebarHTML}
+    </div>
+  `;
+}
+</script>
+
+</body>
+</html>
