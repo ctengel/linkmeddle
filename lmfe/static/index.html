@@ -237,25 +237,44 @@ async function handleSingleURL(url) {
   }
 }
 
-async function handleSingleURL(url) {
-  try {
-    const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
+async function handleBatch(urls) {
 
-    if (result.lm_id) {
-      location.hash = `#/playlist/${result.lm_id}`;
-      return;
+  const app = document.getElementById("app");
+
+  const resultsDiv = document.createElement("div");
+  resultsDiv.className = "card";
+  resultsDiv.innerHTML = `<h3>Batch Scheduling Progress</h3>`;
+  app.prepend(resultsDiv);
+
+  let success = 0;
+  let failed = 0;
+
+  for (const url of urls) {
+
+    const row = document.createElement("div");
+    row.textContent = `Scheduling: ${url}`;
+    resultsDiv.appendChild(row);
+
+    try {
+      await apiPost("/playlists/", { url });
+      row.textContent = `✅ Scheduled: ${url}`;
+      success++;
+    } catch {
+      row.textContent = `❌ Failed: ${url}`;
+      failed++;
     }
-
-    if (result.oi_obj_uuid) {
-      location.hash = `#/video/${result.oi_obj_uuid}`;
-      return;
-    }
-
-    await schedulePlaylist(url);
-
-  } catch {
-    await schedulePlaylist(url);
   }
+
+  const summary = document.createElement("div");
+  summary.innerHTML = `
+    <br/>
+    <b>Done.</b><br/>
+    Success: ${success}<br/>
+    Failed: ${failed}
+  `;
+  resultsDiv.appendChild(summary);
+
+  loadPlaylists(); // refresh list
 }
 
 async function handleSearch() {

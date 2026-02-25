@@ -26,7 +26,7 @@ OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket
 
 ### lmfe
 
-`fastapi --port 29062`
+`OBJIDX_URL= OBJIDX_AUTH= LINKMEDDLE_PLAPI= ~/venv/bin/fastapi dev lmfe/api.py fastapi --port 29062`
 
 ## lm v1-2
 
