@@ -225,8 +225,8 @@ async function handleSingleURL(url) {
       return;
     }
 
-    if (result.oi_obj_uuid) {
-      location.hash = `#/video/${result.oi_obj_uuid}`;
+    if (result.oi_file_uuid) {
+      location.hash = `#/video/${result.oi_file_uuid}`;
       return;
     }
 

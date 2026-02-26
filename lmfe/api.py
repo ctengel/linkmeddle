@@ -185,16 +185,21 @@ async def get_video(file_id: str):
         async with httpx.AsyncClient(timeout=5) as client:
             url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/videos/{extractor_id}/{dlp_id}"
             resp = await client.get(url)
-            resp.raise_for_status()
-            playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
-                                                extractor_key=x.get('extractor_id'),
-                                                title=x.get('title'),
-                                                url=x.get('webpage_url'),
-                                                channel=x.get('channel'),
-                                                is_channel=x.get('pseudo_channel', False),
-                                                lm_id=x.get('playlist_id')
-                                                ) for x in
-                         resp.json()]
+            try:
+                resp.raise_for_status()
+                playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
+                                                    extractor_key=x.get('extractor_id'),
+                                                    title=x.get('title'),
+                                                    url=x.get('webpage_url'),
+                                                    channel=x.get('channel'),
+                                                    is_channel=x.get('pseudo_channel', False),
+                                                    lm_id=x.get('playlist_id')
+                                                    ) for x in
+                            resp.json()]
+            except httpx.HTTPStatusError as e:
+                # If video isn't in any playlists, LinkMeddle API returns 404. In that case, we can just return the video info without playlist info.
+                if e.response.status_code != 404:
+                    raise
     base_video = oi_file_to_video(oi_file=oi_file, extractor_id=extractor_id, dlp_id=dlp_id)
     return fe_models.Video(**base_video.model_dump(), playlists=playlists)
 
