@@ -64,6 +64,24 @@ def oi_file_to_video(oi_file: Optional[oi_client.clilib.File] = None, extractor_
                                title=oi_file.info.get('extra', {}).get('ytdl-info', {}).get('title') if oi_file else None,
                                channel=(oi_file.info.get('extra', {}).get('ytdl-info', {}).get('channel_url') or oi_file.info.get('extra', {}).get('ytdl-info', {}).get('uploader_id')) if oi_file else None)
 
+async def get_sched_info(schedules: list[pl_models.PlaylistSchedPublic]) -> tuple[Optional[int], Optional[datetime.date], Optional[datetime.date]]:
+    """Get schedule ID, next run date, and last run date for a playlist based on its schedules. If multiple schedules, return the one with the soonest next run date."""
+    if not schedules:
+        return None, None, None
+    soonest_sched = min(schedules, key=lambda s: s.next_run or datetime.date.max)
+    async with httpx.AsyncClient(timeout=5) as client:
+        per_sched_runs = [(x, (await client.get(f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{x.sched_id}")).json()['runs']) for x in schedules]
+        latest_runs = [(x[0],
+                        max(datetime.datetime.fromisoformat(y['timestamp']) for y in x[1]))
+                       for x in per_sched_runs if x[1]]
+    returned_sched = soonest_sched
+    latest_sched = None
+    if latest_runs:
+        latest_sched = max(latest_runs, key=lambda x: x[1])
+        if latest_sched[1].date() >= datetime.date.today() - datetime.timedelta(days=1):
+            returned_sched = latest_sched[0]
+    return returned_sched.sched_id, soonest_sched.next_run, latest_sched[1].date() if latest_sched else None
+
 @app.get("/playlists/{playlist_id}", response_model=fe_models.Playlist)
 async def get_playlist(playlist_id: int, random_videos: Optional[int] = None):
     """Proxy GET /playlists/{id}/ from LinkMeddle API."""
@@ -95,14 +113,7 @@ async def get_playlist(playlist_id: int, random_videos: Optional[int] = None):
         videos.append(oi_file_to_video(oi_file=oic_files[0] if oic_files else None,
                                        extractor_id=extractor_id,
                                        dlp_id=dlp_id))
-    sched_id = None
-    next_run = None
-    last_run = None
-    if my_playlist.schedules:
-        sched_id = my_playlist.schedules[0].sched_id
-        next_run = my_playlist.schedules[0].next_run
-        # TODO actual last_run #125
-        last_run = datetime.date.today() - datetime.timedelta(days=1)
+    sched_id, next_run, last_run = await get_sched_info(my_playlist.schedules)
     return fe_models.Playlist(url=my_playlist.webpage_url,
                               dlp_id=my_playlist.id,
                               extractor_key=my_playlist.extractor_id,
@@ -151,9 +162,11 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
             resp = await client.get(url)
             resp.raise_for_status()
             data = [pl_models.PlaylistSchedPublic.model_validate(x) for x in resp.json()]
-            current_schedules = [x for x in data if x.next_run and x.next_run <= (datetime.date.today() + datetime.timedelta(days=1))]
+            scheds_with_runs = [(x, await get_sched_info([x])) for x in data]
+            current_schedules = [x for x in scheds_with_runs if (x[1][1] and x[1][1] <= (datetime.date.today() + datetime.timedelta(days=1))) or (x[1][2] and x[1][2] >= datetime.date.today() - datetime.timedelta(days=1))]  # scheds with next run within a day or last run within a day
             playlists = []
-            for sched in current_schedules:
+            for sched_xtra in current_schedules:
+                sched = sched_xtra[0]
                 full_schedule_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{sched.sched_id}"
                 resp = await client.get(full_schedule_url)
                 resp.raise_for_status()
