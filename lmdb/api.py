@@ -146,7 +146,8 @@ def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
 def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Session = Depends(get_session)):
     """Update a playlist schedule by ID"""
     db_item = get_or_404(session, PlaylistSched, item_id)
-    apply_update(db_item, item.model_dump())
+    hero_data = item.model_dump(exclude_unset=True)    
+    db_item.sqlmodel_update(hero_data)
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
@@ -157,12 +158,14 @@ def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Sessio
                                      summary=summary)
 
 
-#@app.delete("/playlist_scheds/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-#def delete_playlist_sched(item_id: int, session: Session = Depends(get_session)):
-#    db_item = get_or_404(session, PlaylistSched, item_id)
-#    session.delete(db_item)
-#    session.commit()
-#    return None
+@app.delete("/schedules/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_playlist_sched(item_id: int, session: Session = Depends(get_session)):
+    db_item = get_or_404(session, PlaylistSched, item_id)
+    for run in db_item.runs:
+        session.delete(run)
+    session.delete(db_item)
+    session.commit()
+    return None
 
 def upsert_vid(session: Session, vid_id: str, playlist_id: int, extractor_id: str) -> PlaylistVid:
     """Upsert a PlaylistVid entry"""

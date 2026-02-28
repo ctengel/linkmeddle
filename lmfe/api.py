@@ -21,7 +21,7 @@ async def create_schedule(schedule: fe_models.PlaylistCreate):
     """Simple upsert playlist schedule by URL. If a schedule for the URL already exists, update its next_run to today. Otherwise, create a new schedule."""
     pl_by_url = None
     async with httpx.AsyncClient(timeout=5) as client:
-        # TODO technically this is a race condition; allows multiple schedules to be created #125
+        # TODO technically this is a race condition; allows multiple schedules to be created #125 and #142
         req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{schedule.url}"
         resp = await client.get(req_url)
         if resp.status_code != 404:
@@ -157,7 +157,7 @@ async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = No
                                            url=sched_resp.webpage_url,
                                            lm_id=sched_resp.summary.playlist_id)]
         if current:
-            # TODO also show recent runs in addition to next runs #125
+            # TODO also show recent runs from non-schedules (sorta like #125)
             url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
             resp = await client.get(url)
             resp.raise_for_status()
