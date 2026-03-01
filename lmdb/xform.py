@@ -12,7 +12,8 @@ FIB = [1, 2, 3, 5, 8, 13, 21, 34]
 def compare_pl_runs(old: models.PlaylistStatsBinHash, new: models.PlaylistStatsBinHash) -> bool:
     """Determine whether a playlist changed between runs"""
     assert new.timestamp >= old.timestamp
-    assert new.timestamp >= new.modified_date
+    if new.modified_date is not None:
+        assert new.timestamp >= new.modified_date
     if new.newest_item is not None:
         assert new.timestamp >= new.newest_item
     for ck in ['modified_date', 'playlist_count', 'entries_hash', 'newest_item', 'success']:
@@ -20,7 +21,7 @@ def compare_pl_runs(old: models.PlaylistStatsBinHash, new: models.PlaylistStatsB
             return True
     if new.download_count:
         return True
-    if new.modified_date > old.timestamp:
+    if new.modified_date is not None and new.modified_date > old.timestamp:
         return True
     if new.newest_item and new.newest_item > old.timestamp:
         return True
@@ -135,9 +136,10 @@ def full2stats(inputpl: models.PlaylistFull,
     elif count != inputpl.playlist_count:
         warnings.warn(f"Provided playlist count {inputpl.playlist_count} doesn't match actual length of {count}; will record provided.")
         count = inputpl.playlist_count
-    # TODO model rework based on below analysis
+    newest_date = newest(inputpl.entries).upload_date if inputpl.entries else None
     if not inputpl.modified_date:
-        inputpl.modified_date = datetime.datetime.now()
+        inputpl.modified_date = newest_date
+    # TODO model rework based on below analysis
     return models.PlaylistStatsBinHash(modified_date=inputpl.modified_date,
                                 playlist_count=count,
                                 entries_hash=pl_hash(inputpl.entries),
@@ -146,7 +148,7 @@ def full2stats(inputpl: models.PlaylistFull,
                                 input_params='',  # allow arg override! optional?
                                 output_params='',  # new func arg??? optional?
                                 timestamp=datetime.datetime.now(),  # allow arg override?
-                                newest_item=newest(inputpl.entries).upload_date if inputpl.entries else None,
+                                newest_item=newest_date,
                                 different=True,  # TODO feed it to him later
                                 interval=0)  # TODO feed it to him later
 

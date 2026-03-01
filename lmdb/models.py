@@ -153,7 +153,7 @@ class PlaylistSumWithVids(PlaylistSumPublic):
 
 class PlaylistStatsBase(SQLModel):
     """Base stats of a playlist run"""
-    modified_date: datetime.datetime
+    modified_date: Optional[datetime.datetime]
     playlist_count: int
     different: Optional[bool]
     success: bool
