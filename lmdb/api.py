@@ -98,7 +98,6 @@ def get_playlist_sum(url: str, session: Session = Depends(get_session)):
     if not pl:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
     sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
-    # TODO add in extractor ID
     pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [(pv.vid_id, pv.extractor_id) for pv in pl.entries]})
     return pl_with_sched
 
@@ -201,16 +200,16 @@ def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(
         existing_pl = summary
     for vid in item.entries:
         assert vid.extractor is not None
-        my_vid_extractor = vid.extractor.extractor
+        my_vid_extractor = vid.extractor.extractor_key.lower() if vid.extractor.extractor_key else None
         if not my_vid_extractor:
-            warnings.warn(f"Video {vid.extractor.extractor_key}:{vid.id} ({vid.webpage_url}) has no extractor; fallback to playlist extractor {existing_pl.extractor_id}.")
+            warnings.warn(f"Video {vid.id} ({vid.webpage_url}) has no extractor; fallback to playlist extractor {existing_pl.extractor_id}.")
             my_vid_extractor = existing_pl.extractor_id
         assert existing_pl.playlist_id is not None
         upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id, my_vid_extractor)
         # Also create pseudo-channel playlist if needed
         uploader_url = xform.vid_uploader_url(vid)
         if not uploader_url:
-            warnings.warn(f"Video {vid.extractor.extractor_key}:{vid.id} ({vid.webpage_url}) has no uploader URL; skipping pseudo-channel playlist creation.")
+            warnings.warn(f"Video {my_vid_extractor}:{vid.id} ({vid.webpage_url}) has no uploader URL; skipping pseudo-channel playlist creation.")
             continue
         ul_pseudo = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == uploader_url)).one_or_none()
         if not ul_pseudo:

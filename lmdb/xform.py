@@ -172,7 +172,7 @@ def full2sum(inputpl: models.PlaylistFull) -> models.PlaylistSumWithVids:
                               webpage_url=inputpl.webpage_url,
                               playlist_count=inputpl.playlist_count,  # validate, carefully
                               channel=inputpl.channel.uploader_url or inputpl.channel.channel_url,
-                              entries=[(entry2text(x), x.extractor.extractor) for x in inputpl.entries],
+                              entries=[(entry2text(x), x.extractor.extractor_key.lower() if x.extractor.extractor_key else None) for x in inputpl.entries],
                               extractor_id=inputpl.extractor.extractor)  # is this right?
 
 def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:

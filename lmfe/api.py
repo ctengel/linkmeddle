@@ -1,6 +1,7 @@
 import os
 import datetime
 from typing import Optional
+import urllib.parse
 import fastapi
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -97,7 +98,7 @@ async def get_playlist(playlist_id: int, random_videos: Optional[int] = None):
     assert js[0]['playlist_id'] == playlist_id, f"Expected playlist ID {playlist_id}, got {js[0]['playlist_id']}"
     playlist_url = js[0].get('webpage_url')
     async with httpx.AsyncClient(timeout=5) as client2:
-        url2 = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{playlist_url}"
+        url2 = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{urllib.parse.quote(playlist_url)}"
         resp2 = await client2.get(url2)
         resp2.raise_for_status()
         js2 = resp2.json()    
