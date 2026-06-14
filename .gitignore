@@ -135,6 +135,8 @@ dmypy.json
 cookies.json
 
 # custom addtions
+# V4 design notes: kept local only, not tracked
+lm-v4-design/
 apiqueue/celeryconfig.py
 apiqueue/tempweb.sh
 *.csv
