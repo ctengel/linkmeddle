@@ -1,8 +1,9 @@
-"""LMDB API (V4): thing/rel/run CRUD + add-a-thing-by-URL.
+"""LMDB API (V4): thing/rel/run CRUD + add-a-thing-by-URL + job dispatch/ingest.
 
 The thing-centric surface from LM-V4-DESIGN.md §3.3. Everything is a `thing`
-(playlist / video / channel). Job dispatch + result-ingest endpoints (`/jobs/...`)
-are Phase 1, not here. URL-classify is deferred to 4.x: `POST /things/` just records
+(playlist / video / channel). The `/jobs/...` endpoints are the Phase-1 fan-out core:
+`POST /jobs/claim` is the prioritized dispatch (§4.2/§4.5) and `POST /jobs/{run_id}/result`
+is the Stage-1 ingest (§3.3). URL-classify is deferred to 4.x: `POST /things/` just records
 the URL; the worker fills extractor/native_id/real type on result ingest later.
 
 Note the SQLModel select gotcha (LM-V4-DESIGN.md §6.4): filters on nullable columns
@@ -14,12 +15,17 @@ import uuid
 import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
+import sqlalchemy as sa
+from sqlalchemy import func, or_
 from fastapi import FastAPI, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
 from . import models, xform
 from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
-                     RunRead, ThingAdd, ThingPatch, JobCreate, RunResultIn)
+                     RunRead, ThingAdd, ThingPatch, ClaimRequest, JobClaim, RunResultIn)
+
+# What the worker should do with a claimed thing, by its type (§4.5 dispatch result).
+ACTION_BY_TYPE = {"playlist": "pull", "video": "download"}
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -249,21 +255,45 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
         setattr(existing, key, value)
 
 
-@app.post("/jobs/", response_model=RunRead, status_code=status.HTTP_201_CREATED)
-def create_job(item: JobCreate, session: Session = Depends(get_session)):
-    """Create an in-progress run (success=NULL) for a thing.
+@app.post("/jobs/claim", response_model=JobClaim,
+          responses={204: {"description": "Nothing due"}})
+def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
+    """Prioritized dispatch: claim the single highest-priority due job (§4.2/§4.5).
 
-    TEMPORARY (Task 1.1): lets the result-ingest endpoint be exercised before dispatch
-    exists. Task 1.2's dispatcher creates the run itself and returns the run_id.
-    # TODO(1.2): delete; dispatch creates the run.
+    The API owns ordering (the runner never queries `thing`): one ordering spans both job
+    types — playlist-before-video, then rating DESC, then `try_on` ASC. The row is claimed
+    with `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent workers never get the same thing
+    (correct the day a 2nd worker appears; single worker in 4.0). On a hit the run is created
+    here (`success=NULL` in-progress marker, `worker` set) and its id returned; 204 if
+    nothing is due.
+
+    Machine rating is read from the stored column via COALESCE; compute-on-read is Task 2.2.
     """
-    get_thing_or_404(session, item.thing_id)
-    run = Run(thing_id=item.thing_id, worker=item.worker, input_json=item.input_json,
+    rating = func.coalesce(Thing.human_rating, Thing.machine_rating)
+    today = _today()
+    # Stage-1 playlist pull: grade >= C band, due, not already succeeded today.
+    playlist_branch = sa.and_(
+        Thing.type == "playlist", rating >= -0.5, Thing.try_on <= today,
+        or_(Thing.last_success_dt == None,  # noqa: E711  (SQL IS NULL)
+            func.date(Thing.last_success_dt) < today))
+    # Stage-2 video download: grade >= B band, never acquired, due.
+    video_branch = sa.and_(
+        Thing.type == "video", rating >= 0.5,
+        Thing.best_oi == None, Thing.try_on <= today)  # noqa: E711
+    stmt = (select(Thing)
+            .where(or_(playlist_branch, video_branch))
+            .order_by(sa.desc(Thing.type == "playlist"), rating.desc(), Thing.try_on.asc())
+            .limit(1).with_for_update(skip_locked=True))
+    thing = session.exec(stmt).first()
+    if thing is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    run = Run(thing_id=thing.id, worker=item.worker,
               starttime=models.naive_utcnow(), success=None)
     session.add(run)
     session.commit()
     session.refresh(run)
-    return _run_read(run)
+    return JobClaim(run_id=run.id, thing=ThingRead.model_validate(thing),
+                    action=ACTION_BY_TYPE[thing.type])
 
 
 @app.post("/jobs/{run_id}/result", response_model=RunRead)

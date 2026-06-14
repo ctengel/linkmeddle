@@ -30,21 +30,6 @@ def _playlist_full_json(pl: models.PlaylistFull) -> dict:
     return body
 
 
-def create_run(api_base: str, thing_id: str,
-               worker: str | None = None, input_json: dict | None = None) -> str:
-    """Mint an in-progress run for a thing; returns its run_id.
-
-    Worker-side helper for the Task 1.1 ingest flow. TEMPORARY: once Task 1.2's dispatcher
-    creates the run and returns the run_id, this round-trip goes away.
-    """
-    resp = requests.post(f"{api_base.rstrip('/')}/jobs/",
-                         json={'thing_id': thing_id, 'worker': worker,
-                               'input_json': input_json},
-                         timeout=RESULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()['id']
-
-
 def post_run_result(api_base: str, run_id: str, info: dict | None,
                     success: bool = True, worker: str | None = None) -> dict:
     """Push a run's result to POST /jobs/{run_id}/result (replaces the in-plugin POST).
@@ -85,7 +70,8 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> Y
             'ignoreerrors': 'only_download',
             'restrictfilenames': True,
             'skip_playlist_after_errors': 3,
-            'playlistrandom': True,
+            # NOTE: no 'playlistrandom' (§4.6) — deterministic natural order is the
+            # prerequisite for 4.x lazy-load/partial-resume of huge playlists.
             'match_filter': _exclude_live}
     if cookies is not None:
         opts['cookiefile'] = cookies
@@ -114,6 +100,22 @@ def get_cookies(url: str) -> str:
     resp = requests.get(crustula_url + 'cookies/', params={'url': url}, timeout=5)
     resp.raise_for_status()
     return resp.json()['jar']['cookies']
+
+def pull_playlist(url: str, use_cookies: bool = False) -> dict:
+    """Stage-1 metadata-only playlist pull (§3.3): extract info, download nothing.
+
+    Returns the sanitized yt-dlp info dict for the worker to push via `post_run_result`
+    (which converts it DLP -> PlaylistFull). No OI upload and no in-plugin POST — the
+    worker owns the metadata push now. Per-site enrich depth stays a game-day call.
+    """
+    cookies = None
+    if use_cookies:
+        assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
+        cookies = io.StringIO(get_cookies(url))
+    with _ydl(cookies=cookies) as ydl:
+        info = ydl.extract_info(url, download=False)
+        return ydl.sanitize_info(info)
+
 
 def init_download(url: str,
                   oibucket: str | None = None,

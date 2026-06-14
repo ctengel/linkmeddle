@@ -1,117 +1,70 @@
 #!/usr/bin/env python3
-# TODO do we allow running like this?
+"""Thin job runner (V4): pull one prioritized job, run it, report, loop (§4.5).
 
+Replaces V3's "fetch all due schedules, random.shuffle, run in arbitrary order". The API
+owns prioritization: the runner just asks `POST /jobs/claim` for the single top job, runs
+it, pushes the result to `POST /jobs/{run_id}/result`, and asks again until nothing is due.
+Single worker in 4.0; the claim endpoint's SKIP LOCKED makes it safe once a 2nd appears.
 """
-Runnable module that queries the LMDB API /schedules/ endpoint and runs jobs
-"""
-
-# TODO allow running n jobs or a % of due jobs
-# TODO allow specifying a given extractor
-# TODO allow just running a URL
-# TODO use models from lmdb.models where appropriate
-# TODO tell LMAPI when job is starting?
 
 import os
-#import logging
-import random
+import socket
 import warnings
-import datetime
 import requests
-from . import models, run_bknd
+from yt_dlp.utils import YoutubeDLError
+from . import run_bknd
 
-# Config via environment
 LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
-TIMEOUT = 5
-#LMDB_API_TOKEN = os.environ.get("LMDB_API_TOKEN")  # optional Bearer token
+WORKER = os.environ.get("LM_WORKER", socket.gethostname())
+CLAIM_TIMEOUT = 30
 
 
-#logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-#logger = logging.getLogger("job_runner")
-
-
-#def _get_headers() -> Dict[str, str]:
-#    headers = {"Accept": "application/json"}
-#    if LMDB_API_TOKEN:
-#        headers["Authorization"] = f"Bearer {LMDB_API_TOKEN}"
-#    return headers
-
-
-def fetch_schedules(date: datetime.date) -> list[models.PlaylistSchedPublic]:
-    """Call GET /schedules/ and return a list of schedule objects (JSON)."""
-    url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
-    # TODO next-run or next_run?
-    resp = requests.get(url,
-                        params={"next_run": date.isoformat()},
-                        timeout=TIMEOUT)
+def claim_job(api_base: str, worker: str) -> dict | None:
+    """Claim the single highest-priority due job, or None when nothing is due (204)."""
+    resp = requests.post(f"{api_base.rstrip('/')}/jobs/claim",
+                         json={"worker": worker}, timeout=CLAIM_TIMEOUT)
     resp.raise_for_status()
-    data = [models.PlaylistSchedPublic.model_validate(x) for x in resp.json()]
-    return data
+    if resp.status_code == 204:
+        return None
+    return resp.json()
 
 
-#def _parse_iso_datetime(s: Optional[str]) -> Optional[datetime.datetime]:
-#    """Parse an ISO datetime string into an aware datetime in UTC."""
-#    if not s:
-#        return None
-#    # TODO consider this???
-#    # Handle trailing Z (UTC) and naive offsets
-#    if s.endswith("Z"):
-#        s = s[:-1] + "+00:00"
-#    try:
-#        dt = datetime.fromisoformat(s)
-#    except ValueError:
-#        # fallback: try to parse common format
-#        return None
-#    if dt.tzinfo is None:
-#        # treat naive as UTC
-#        dt = dt.replace(tzinfo=timezone.utc)
-#    return dt.astimezone(timezone.utc)
-
-
-#def needs_run_today(schedule: models.PlaylistSchedBase, today_utc: datetime.date) -> bool:
-#    """Return True if schedule.next_run falls on today_utc."""
-#    next_run_raw = schedule.get("next_run") or schedule.get("nextRun")  # support both keys
-#    dt = _parse_iso_datetime(next_run_raw)
-#    if not dt:
-#        return False
-#    return dt.date() == today_utc
-
-
-def initiate_job(schedule: models.PlaylistSchedPublic) -> None:
-    """Initiate a job for the given schedule."""
-    print("Initiating job:", schedule.sched_id,schedule.webpage_url, schedule.oi_bucket, schedule.lpm_lib)
-    assert schedule.webpage_url is not None
-    run_bknd.init_download(schedule.webpage_url,
-                           oibucket=schedule.oi_bucket,
-                           lpmlib=schedule.lpm_lib,
-                           use_cookies=bool(schedule.use_cookies),
-                           schedid=schedule.sched_id)
-
-
-def main():
-    """Job runner main loop"""
-    today = datetime.date.today()
-    #try:
-    schedules = fetch_schedules(today)
-    #except Exception as exc:
-    #    logger.exception("Failed to fetch schedules: %s", exc)
-    #    return 2
-
-    #logger.info("Found %d schedules to run today.", len(schedules))
-    print(f"Found {len(schedules)} schedules to run today.")
-
-    random.shuffle(schedules)
-
-    status = 0
-
-    for sched in schedules:
+def run_job(api_base: str, job: dict, worker: str) -> None:
+    """Run one claimed job and report its result back to the API."""
+    run_id, thing, action = job["run_id"], job["thing"], job["action"]
+    if action == "pull":
+        # Stage-1 playlist metadata pull; fail whole on any error (§4.7).
         try:
-            initiate_job(sched)
-        except Exception as exc:
-            warnings.warn(f"Failed to initiate job for URL: {sched.webpage_url}: {exc}")  # TODO sched.sched_id
-            #logger.exception("Failed to initiate job for schedule id=%s",
-            #                 sched.webpage_url)
-            status = 1
+            info = run_bknd.pull_playlist(thing["url"])
+        except YoutubeDLError as exc:
+            warnings.warn(f"Stage-1 pull failed for {thing['url']}: {exc}")
+            run_bknd.post_run_result(api_base, run_id, None, success=False, worker=worker)
+            return
+        run_bknd.post_run_result(api_base, run_id, info, success=True, worker=worker)
+    elif action == "download":
+        # TODO(1.3): Stage-2 per-video download (init_download(maybe_playlist=False) + OI
+        # upload; result sets best_oi, try_on=NULL). Until then, don't crash the loop.
+        warnings.warn(f"Stage-2 download not implemented yet (1.3); skipping {thing['url']}")
+        run_bknd.post_run_result(api_base, run_id, None, success=False, worker=worker)
+    else:
+        warnings.warn(f"Unknown job action {action!r}; skipping {thing.get('url')}")
 
+
+def main() -> int:
+    """Pull-one-and-loop: claim -> run -> report, until nothing is due."""
+    status = 0
+    count = 0
+    while True:
+        job = claim_job(LINKMEDDLE_PLAPI, WORKER)
+        if job is None:
+            break
+        count += 1
+        try:
+            run_job(LINKMEDDLE_PLAPI, job, WORKER)
+        except Exception as exc:  # never let one job kill the loop
+            warnings.warn(f"Job {job.get('run_id')} failed: {exc}")
+            status = 1
+    print(f"Ran {count} job(s); worker={WORKER}.")
     return status
 
 

@@ -291,16 +291,17 @@ class ThingPatch(BaseModel):
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
 
 
-class JobCreate(BaseModel):
-    """Create an in-progress run (success=NULL) for a thing.
-
-    TEMPORARY (Task 1.1): exists only so the result-ingest endpoint can be exercised
-    standalone. Task 1.2's dispatcher creates the run itself and returns the run_id, at
-    which point POST /jobs/ is deleted.
-    """
-    thing_id: uuid.UUID
+class ClaimRequest(BaseModel):
+    """Body for POST /jobs/claim. 4.x adds self-selection filters (type/extractor/site/
+    backend — §4.5); 4.0 only records which worker claimed the job."""
     worker: Optional[str] = None
-    input_json: Optional[dict] = None
+
+
+class JobClaim(BaseModel):
+    """Prioritized dispatch result: the single highest-priority due job (§4.5)."""
+    run_id: uuid.UUID
+    thing: ThingRead
+    action: str          # 'pull' (Stage-1 playlist) | 'download' (Stage-2 video)
 
 
 class RunResultIn(BaseModel):

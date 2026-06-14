@@ -208,7 +208,95 @@ def test_patch_404(client):
     assert r.status_code == 404
 
 
-# --- jobs / Stage-1 ingest (Task 1.1) --------------------------------------------------
+# --- jobs: dispatch (Task 1.2) + Stage-1 ingest (Task 1.1) ------------------------------
+
+def _seed_thing(**kw) -> str:
+    """Insert a thing directly with explicit fields; returns its id (str).
+
+    try_on is re-applied after insert so an explicit value (incl. None for permafail)
+    overrides the column's server_default.
+    """
+    with _session() as s:
+        t = models.Thing(**kw)
+        s.add(t)
+        s.commit()
+        if "try_on" in kw:
+            t.try_on = kw["try_on"]
+            s.add(t)
+            s.commit()
+        s.refresh(t)
+        return str(t.id)
+
+
+def _claim(client, worker=None):
+    """Claim the top job; returns the JobClaim json, or None on 204 (nothing due)."""
+    r = client.post("/jobs/claim", json={"worker": worker} if worker else {})
+    if r.status_code == 204:
+        return None
+    assert r.status_code == 200
+    return r.json()
+
+
+def _claimed_run(client, url):
+    """Add a B-rated playlist by url and claim it; returns (thing_id, run_id)."""
+    tid = client.post("/things/", json={"url": url}).json()["id"]
+    job = _claim(client)
+    assert job and job["thing"]["id"] == tid and job["action"] == "pull"
+    return tid, job["run_id"]
+
+
+_TODAY = datetime.date.today()
+_FUTURE = _TODAY + datetime.timedelta(days=5)
+
+
+def test_claim_nothing_due(client):
+    assert client.post("/jobs/claim", json={}).status_code == 204
+
+
+def test_claim_rating_order(client):
+    a = _seed_thing(type="playlist", url="http://e/a", human_rating=2.0, try_on=_TODAY)
+    _seed_thing(type="playlist", url="http://e/b", human_rating=1.0, try_on=_TODAY)
+    assert _claim(client)["thing"]["id"] == a       # A before B
+
+
+def test_claim_playlist_before_video(client):
+    _seed_thing(type="video", url="http://e/v", human_rating=2.0, try_on=_TODAY)     # A video
+    p = _seed_thing(type="playlist", url="http://e/p", human_rating=0.0, try_on=_TODAY)  # C pl
+    job = _claim(client)
+    assert job["thing"]["id"] == p and job["action"] == "pull"  # playlist wins regardless
+
+
+def test_claim_video_when_no_playlist(client):
+    v = _seed_thing(type="video", url="http://e/v2", human_rating=1.0, try_on=_TODAY)
+    job = _claim(client)
+    assert job["thing"]["id"] == v and job["action"] == "download"
+
+
+def test_claim_skips_ineligible_videos(client):
+    _seed_thing(type="video", url="http://e/vc", human_rating=0.0, try_on=_TODAY)   # C < B
+    _seed_thing(type="video", url="http://e/vacq", human_rating=2.0, try_on=_TODAY,
+                best_oi="oi:1")                                                     # acquired
+    _seed_thing(type="video", url="http://e/vfut", human_rating=2.0, try_on=_FUTURE)  # not due
+    assert _claim(client) is None
+
+
+def test_claim_skips_ineligible_playlists(client):
+    _seed_thing(type="playlist", url="http://e/done", human_rating=1.0, try_on=_TODAY,
+                last_success_dt=models.naive_utcnow())                       # succeeded today
+    _seed_thing(type="playlist", url="http://e/fut", human_rating=1.0, try_on=_FUTURE)
+    _seed_thing(type="playlist", url="http://e/perma", human_rating=1.0, try_on=None)
+    _seed_thing(type="playlist", url="http://e/d", human_rating=-1.0, try_on=_TODAY)  # D
+    assert _claim(client) is None
+
+
+def test_claim_creates_in_progress_run(client):
+    p = _seed_thing(type="playlist", url="http://e/run", human_rating=1.0, try_on=_TODAY)
+    job = _claim(client, worker="w1")
+    assert job["thing"]["id"] == p and job["action"] == "pull" and job["run_id"]
+    runs = client.get(f"/things/{p}/runs").json()
+    assert len(runs) == 1 and runs[0]["id"] == job["run_id"]
+    assert runs[0]["success"] is None and runs[0]["worker"] == "w1"   # in-progress marker
+
 
 def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest") -> dict:
     """A JSON-ready LM-native PlaylistFull body for the ingest endpoint."""
@@ -230,26 +318,24 @@ def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest") -> dict:
     return pl.model_dump(mode="json")
 
 
-def test_create_job_in_progress(client):
-    tid = client.post("/things/", json={"url": "http://example/pl/job"}).json()["id"]
-    r = client.post("/jobs/", json={"thing_id": tid})
-    assert r.status_code == 201
-    j = r.json()
-    assert j["thing_id"] == tid
-    assert j["success"] is None      # in-progress marker
-    assert j["endtime"] is None
-    assert j["id"]
+def _seed_run(thing_id: str) -> str:
+    """Insert an in-progress run for a thing directly; returns run_id (str).
 
-
-def test_create_job_404(client):
-    r = client.post("/jobs/", json={"thing_id": str(uuid.uuid4())})
-    assert r.status_code == 404
+    Used where claim can't mint a second run (e.g. re-ingesting a playlist that already
+    succeeded today, which the dispatch predicate would now skip).
+    """
+    with _session() as s:
+        run = models.Run(thing_id=uuid.UUID(thing_id), success=None,
+                         starttime=models.naive_utcnow())
+        s.add(run)
+        s.commit()
+        s.refresh(run)
+        return str(run.id)
 
 
 def test_ingest_fans_out(client):
     url = "http://example/pl/fan"
-    tid = client.post("/things/", json={"url": url}).json()["id"]   # url-only stub
-    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    tid, rid = _claimed_run(client, url)   # url-only stub, claimed -> in-progress run
     r = client.post(f"/jobs/{rid}/result",
                     json={"playlist": _pl_payload(3, url=url, native="plfan"),
                           "data_json": {"raw": 1}})
@@ -285,11 +371,12 @@ def test_ingest_fans_out(client):
 
 def test_ingest_idempotent(client):
     url = "http://example/pl/idem"
-    tid = client.post("/things/", json={"url": url}).json()["id"]
+    tid, rid = _claimed_run(client, url)
     payload = _pl_payload(3, url=url, native="plidem")
-    for _ in range(2):
-        rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
-        assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    # second pull the same day: claim would skip it, so seed the run directly
+    rid2 = _seed_run(tid)
+    assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload}).status_code == 200
     assert len(client.get("/things/", params={"type": "video"}).json()) == 3   # no dup things
     assert len(client.get("/things/", params={"type": "channel"}).json()) == 1
     assert len(client.get(f"/things/{tid}/runs").json()) == 2                   # but two runs
@@ -299,9 +386,7 @@ def test_ingest_idempotent(client):
 
 
 def test_ingest_failure_records_only(client):
-    url = "http://example/pl/fail"
-    tid = client.post("/things/", json={"url": url}).json()["id"]
-    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    tid, rid = _claimed_run(client, "http://example/pl/fail")
     r = client.post(f"/jobs/{rid}/result", json={"success": False})
     assert r.status_code == 200 and r.json()["success"] is False
     pl = client.get(f"/things/{tid}").json()
@@ -310,8 +395,7 @@ def test_ingest_failure_records_only(client):
 
 
 def test_ingest_success_requires_playlist(client):
-    tid = client.post("/things/", json={"url": "http://example/pl/req"}).json()["id"]
-    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    _, rid = _claimed_run(client, "http://example/pl/req")
     r = client.post(f"/jobs/{rid}/result", json={"success": True})
     assert r.status_code == 422
 
