@@ -6,8 +6,9 @@ import uuid
 import json
 from celery import Celery
 import ytdl
+import vi
 
-BACKENDS = {'ytdl': ytdl.backends()}
+BACKENDS = {'ytdl': ytdl.backends(), 'vi': vi.backends()}
 
 os.environ.setdefault('CELERY_CONFIG_MODULE', 'celeryconfig')
 
