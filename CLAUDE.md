@@ -7,7 +7,7 @@ LinkMeddle (LM = "LINKed MEDia DL") downloads media via yt-dlp into Object Index
 ## Commands
 
 ```bash
-# Backend API + DB (SQLite by default)
+# Backend API + DB (V4: PostgreSQL; set DATABASE_URL=postgresql+psycopg:///lmdb or your own)
 fastapi dev lmdb/api.py --port 29072
 
 # Frontend (needs env vars set; talks to backend over HTTP)
@@ -27,7 +27,7 @@ pytest lmdb/test_api.py                       # all
 pytest lmdb/test_api.py::test_name            # single test
 ```
 
-Install for development (deps not vendored): `pip install -U "yt-dlp[default]" sqlmodel fastapi typer https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip` plus `requirements.txt` (the latter is mostly V1/V2 legacy: flask/celery/redis). Also needs `ffmpeg`.
+Install for development (deps not vendored): `pip install -U "yt-dlp[default]" sqlmodel fastapi typer "psycopg[binary]" pytest-postgresql https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip` plus `requirements.txt` (the latter is mostly V1/V2 legacy: flask/celery/redis). Also needs `ffmpeg`. V4 requires **PostgreSQL** (`psycopg`); the test suite spins up a throwaway cluster via `pytest-postgresql` (uses the system `initdb`/`pg_ctl`).
 
 ## Architecture (lmdb + lmfe)
 
@@ -58,7 +58,7 @@ Several files are symlinks that share code across components — edit the real f
 
 ## Environment variables
 
-`DATABASE_URL` (defaults to `sqlite:///./lmdb.db`), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`).
+`DATABASE_URL` (V4 defaults to `postgresql+psycopg:///lmdb`; PostgreSQL required), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`).
 
 ## V4 work
 

@@ -63,7 +63,7 @@ From the unified DoD (DESIGN-SUMMARY §"V4 Definition of Done"):
 
 ## Part 2 — Data Model (the 4.0 schema, frozen)
 
-All three tables live in **PostgreSQL**; raw yt-dlp metadata is stored in `JSONB` columns — there is no separate document store. `[F1]` The database starts **greenfield**: there is no V3→V4 data migration (no populated V3 instance exists to migrate from). `[F3]`
+All three tables live in **PostgreSQL**; raw yt-dlp metadata is stored in `JSONB` columns — there is no separate document store. `[F1]` The database starts **greenfield**: there is no V3→V4 data migration (no populated V3 instance exists to migrate from). `[F3]` **All datetime columns are naive UTC (`timestamp`, not `timestamptz`); the application works in UTC everywhere** (matching V3's existing naive `datetime.now()`), keeping timezone handling out of the data layer entirely. The canonical DDL is mirrored in `lmdb/schema/v4.0.sql`.
 
 ### 2.1 `thing`
 
@@ -81,15 +81,15 @@ CREATE TABLE thing (
   title           text,                         -- denormalized display    [A2-A]
   channel         text,                         -- denormalized display    [A2-A]
   thumbnail_url   text,                         -- nullable; populated when available (4.x UI)
-  modified        timestamptz,                  -- content modified/upload time; playlist = derived from items, video = site-reported; nullable [A2-A]
+  modified        timestamp,                    -- naive UTC; content modified/upload time; playlist = derived from items, video = site-reported; nullable [A2-A]
   human_rating    double precision,             -- -2.0..+2.0, user-set; authoritative [B1,B2]
   machine_rating  double precision,             -- nullable; computed-on-read in 4.0   [B3,B4]
-  last_success_dt timestamptz,
-  last_failure_dt timestamptz,                  -- nulled on success        [C3-A]
-  try_on          date DEFAULT CURRENT_DATE,    -- backoff oracle, see §2.5; defaults to today so the date-gate is open from creation [C1,C2]
+  last_success_dt timestamp,                    -- naive UTC
+  last_failure_dt timestamp,                    -- naive UTC; nulled on success [C3-A]
+  try_on          date DEFAULT (now() at time zone 'utc')::date,  -- backoff oracle, see §2.5; defaults to today (UTC) so the date-gate is open from creation [C1,C2]
   best_oi         text,                         -- pointer to best OI object; set on download; never cleared (4.x scrubber repoints it to the OI tombstone when it deletes media) [A5-A]
   attrs           jsonb,                        -- 4.x escape hatch (no migration needed)
-  created_dt      timestamptz NOT NULL DEFAULT now()  -- backs "new things" dashboard query
+  created_dt      timestamp NOT NULL DEFAULT (now() at time zone 'utc')  -- naive UTC; backs "new things" dashboard query
 );
 
 CREATE UNIQUE INDEX thing_native ON thing (backend, extractor_key, native_id)
@@ -148,8 +148,8 @@ CREATE TABLE run (
   data_json  jsonb,                 -- raw yt-dlp output + computed stats (see below)
   entries_hash bytea,               -- nullable; membership fingerprint of a playlist run; change-detection key
   playlist_count integer,           -- nullable; entry count the playlist reports (resume progress + sanity)
-  starttime  timestamptz NOT NULL,  -- assignment/start instant (worker starts immediately on assignment)
-  endtime    timestamptz,
+  starttime  timestamp NOT NULL,    -- naive UTC; assignment/start instant (worker starts immediately on assignment)
+  endtime    timestamp,             -- naive UTC
   success    boolean                -- T = success, F = failure, NULL = assigned/in-progress  [F2]
 );
 CREATE INDEX run_thing ON run (thing_id, starttime DESC);

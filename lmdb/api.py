@@ -15,7 +15,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from .models import PlaylistSchedBase, PlaylistSchedPublic, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash, PlaylistSumPublic
 from . import xform
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./lmdb.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
 
 @asynccontextmanager

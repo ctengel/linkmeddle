@@ -4,8 +4,12 @@ Includes DLP-compat and LM-native
 """
 
 import datetime
+import uuid
 from typing import Optional, List
 from pydantic import BaseModel
+import sqlalchemy as sa
+from sqlalchemy import Column, ForeignKey, Index, text
+from sqlalchemy.dialects import postgresql
 from sqlmodel import Field, Relationship, SQLModel
 
 class CommonDLP(BaseModel):
@@ -225,3 +229,95 @@ class PlaylistRunCreate(BaseModel):
     schedule_id: Optional[int] = None
     download_count: int = 0
     failed_count: int = 0
+
+
+# --- V4 schema (thing / rel / run) -----------------------------------------------------
+# Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
+# (`timestamp`, not `timestamptz`); the app uses UTC everywhere. The canonical DDL is
+# mirrored in lmdb/schema/v4.0.sql. 4.x changes must be additive (nullable cols / new
+# tables), never migrations.
+
+# UTC server defaults yield naive `timestamp` values (timezone('utc', now())).
+_UTC_NOW = text("(now() at time zone 'utc')")
+_UTC_TODAY = text("(now() at time zone 'utc')::date")
+
+
+class Thing(SQLModel, table=True):
+    """The universal entity: playlist, video, or channel [A1, A2, A6, A7]"""
+    __table_args__ = (
+        Index("thing_native", "backend", "extractor_key", "native_id",
+              unique=True, postgresql_where=text("native_id IS NOT NULL")),
+        Index("thing_url", "url", unique=True,
+              postgresql_where=text("url IS NOT NULL")),
+        Index("thing_try_on", "type", "try_on"),
+    )
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(postgresql.UUID(as_uuid=True), primary_key=True))
+    url: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    backend: int = Field(
+        default=0, sa_column=Column(sa.SmallInteger, nullable=False, server_default=text("0")))
+    site: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    extractor_key: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    native_id: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    type: str = Field(sa_column=Column(sa.Text, nullable=False))
+    title: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    channel: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    thumbnail_url: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    modified: Optional[datetime.datetime] = Field(
+        default=None, sa_column=Column(sa.DateTime, nullable=True))
+    human_rating: Optional[float] = Field(
+        default=None, sa_column=Column(sa.Float, nullable=True))
+    machine_rating: Optional[float] = Field(
+        default=None, sa_column=Column(sa.Float, nullable=True))
+    last_success_dt: Optional[datetime.datetime] = Field(
+        default=None, sa_column=Column(sa.DateTime, nullable=True))
+    last_failure_dt: Optional[datetime.datetime] = Field(
+        default=None, sa_column=Column(sa.DateTime, nullable=True))
+    try_on: Optional[datetime.date] = Field(
+        default=None, sa_column=Column(sa.Date, nullable=True, server_default=_UTC_TODAY))
+    best_oi: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    attrs: Optional[dict] = Field(
+        default=None, sa_column=Column(postgresql.JSONB, nullable=True))
+    created_dt: Optional[datetime.datetime] = Field(
+        default=None,
+        sa_column=Column(sa.DateTime, nullable=False, server_default=_UTC_NOW))
+
+
+class Rel(SQLModel, table=True):
+    """Graph edge between things (playlist<->video, channel<->playlist) [A4]"""
+    __table_args__ = (Index("rel_child", "child"),)
+    parent: uuid.UUID = Field(
+        sa_column=Column(postgresql.UUID(as_uuid=True),
+                         ForeignKey("thing.id"), primary_key=True))
+    child: uuid.UUID = Field(
+        sa_column=Column(postgresql.UUID(as_uuid=True),
+                         ForeignKey("thing.id"), primary_key=True))
+    type: str = Field(sa_column=Column(sa.Text, primary_key=True))
+
+
+class Run(SQLModel, table=True):
+    """Append-only history of every pull/download attempt + raw yt-dlp JSONB [A9, F2]"""
+    __table_args__ = (Index("run_thing", "thing_id", text("starttime DESC")),)
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(postgresql.UUID(as_uuid=True), primary_key=True))
+    thing_id: uuid.UUID = Field(
+        sa_column=Column(postgresql.UUID(as_uuid=True),
+                         ForeignKey("thing.id"), nullable=False))
+    worker: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    input_json: Optional[dict] = Field(
+        default=None, sa_column=Column(postgresql.JSONB, nullable=True))
+    data_json: Optional[dict] = Field(
+        default=None, sa_column=Column(postgresql.JSONB, nullable=True))
+    entries_hash: Optional[bytes] = Field(
+        default=None, sa_column=Column(sa.LargeBinary, nullable=True))
+    playlist_count: Optional[int] = Field(
+        default=None, sa_column=Column(sa.Integer, nullable=True))
+    starttime: datetime.datetime = Field(
+        default_factory=datetime.datetime.utcnow,
+        sa_column=Column(sa.DateTime, nullable=False))
+    endtime: Optional[datetime.datetime] = Field(
+        default=None, sa_column=Column(sa.DateTime, nullable=True))
+    success: Optional[bool] = Field(
+        default=None, sa_column=Column(sa.Boolean, nullable=True))

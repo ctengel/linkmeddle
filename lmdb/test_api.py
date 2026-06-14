@@ -1,20 +1,29 @@
-"""pytest-based tests for lmdb.api FastAPI endpoints."""
+"""pytest-based tests for lmdb.api FastAPI endpoints.
+
+Runs against a throwaway PostgreSQL instance spun up by pytest-postgresql (using the
+system pg binaries). The V4 schema is Postgres+JSONB, so SQLite is no longer usable.
+"""
 
 import datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import create_engine, Session, SQLModel
+from pytest_postgresql import factories
 
 from lmdb import api
 from lmdb import models
 
+# Fedora keeps pg_ctl in /usr/bin (pytest-postgresql's default assumes a Debian path).
+postgresql_proc = factories.postgresql_proc(executable="/usr/bin/pg_ctl")
+postgresql = factories.postgresql("postgresql_proc")
+
 
 @pytest.fixture
-def client(tmp_path):
-    # create a fresh sqlite database for tests (shared across threads)
-    db_file = tmp_path / "test.db"
-    url = f"sqlite:///{db_file}"
-    engine = create_engine(url, connect_args={"check_same_thread": False})
+def client(postgresql):
+    info = postgresql.info
+    auth = f"{info.user}:{info.password}@" if info.password else f"{info.user}@"
+    url = f"postgresql+psycopg://{auth}{info.host}:{info.port}/{info.dbname}"
+    engine = create_engine(url)
     # replace api engine and recreate tables
     api.engine = engine
     SQLModel.metadata.create_all(engine)
@@ -26,6 +35,7 @@ def client(tmp_path):
     api.app.dependency_overrides[api.get_session] = get_session_override
     with TestClient(api.app) as c:
         yield c
+    api.app.dependency_overrides.clear()
 
 
 def _make_payload_for(model_cls):
