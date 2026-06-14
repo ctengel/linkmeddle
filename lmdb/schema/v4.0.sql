@@ -22,6 +22,7 @@ CREATE TABLE thing (
   last_success_dt timestamp,                    -- naive UTC
   last_failure_dt timestamp,                    -- naive UTC; nulled on success [C3-A]
   try_on          date DEFAULT (now() at time zone 'utc')::date,  -- backoff oracle [C1,C2]
+  bucket          text NOT NULL,                -- OI storage bucket; required, inherited on fan-out, immutable [A10]
   best_oi         text,                         -- pointer to best OI object; set on download [A5-A]
   attrs           jsonb,                        -- 4.x escape hatch (no migration needed)
   created_dt      timestamp NOT NULL DEFAULT (now() at time zone 'utc')  -- backs "new things" dashboard
