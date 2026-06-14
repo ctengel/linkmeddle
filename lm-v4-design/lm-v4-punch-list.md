@@ -13,11 +13,11 @@ the list is sorted along the critical path. Complexity: **S** (hours–day), **M
 
 - [x] **0.1** Create the `thing`/`rel`/`run` Postgres schema + indexes; switch `DATABASE_URL` to Postgres+JSONB — **M** — #129 #80 #128 *(close #80/#128 when this lands)*
 - [x] **0.2** Port DLP boundary models + reusable `xform` helpers (Fibonacci, `compare_pl_runs`, `pl_hash`, `pl_dlp2lm`) onto the new layer — **M** — #151
-- [ ] **0.3** `thing`/`run` CRUD API + URL-classify; add-a-thing-by-URL (default B/`+1`, override A/C, `try_on=today`); `?url=` lookup; `apply_update`/PATCH — **M** — #140 #142 #147 #102
+- [x] **0.3** `thing`/`run` CRUD API; add-a-thing-by-URL (record URL, default B/`+1`, override A/C, `type` default playlist — classify deferred to 4.x, `try_on=today`); `?url=` + `extractor`/`native_id` lookup; `apply_update`/PATCH (rating + permafail-ack); no DELETE — **M** — #140 #142 #102
 
 ## Phase 1 — Fan-out core (the heart of V4) — tracker: #81
 
-- [ ] **1.1** Stage-1 ingest endpoint + worker metadata push (replaces the PP POST); upsert `thing`+`rel`+`run`; stub videos w/ denormalized fields; per-site depth flag — **L** — #97 #110 #137 #83
+- [ ] **1.1** Stage-1 ingest endpoint + worker metadata push (replaces the PP POST); upsert `thing`+`rel`+`run`; stub videos w/ denormalized fields; per-site depth flag; backfill title/extractor/native_id/type when NULL (#147) — **L** — #97 #110 #137 #83 #147
 - [ ] **1.2** Prioritized dispatch + thin runner: job-dispatch endpoint (§4.2 predicate + `FOR UPDATE SKIP LOCKED`, single top job); adapt `job_runner.py` to pull one job and loop; `run.success=NULL` in-progress marker — **L** — #115 #19 *(close #19 when this lands)*
 - [ ] **1.3** Stage-2 downloader: per-video path (`init_download(maybe_playlist=False)`; OI upload); worker push sets `best_oi`, `try_on=NULL` — **M** — #115
 - [ ] **1.4** `try_on` scheduler integration: Fibonacci + initial A3/B5/C8; failure backoff; live re-check edge case — **M** — *(#149 resolved: no guard)*

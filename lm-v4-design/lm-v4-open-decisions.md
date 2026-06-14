@@ -317,6 +317,8 @@ This is the crux of whether fan-out is two stages or three. **Claude Opus Recomm
 
 **Addendum (finalization) — enrich inline, never a separate single-video-metadata job:** The hope is the **flat playlist pull already carries enough per-video metadata to make the acquire/skip decision** (C-like). Where it does not — *and we don't already have that video's metadata* — Stage 1 enriches it **inline, as part of the same playlist-learn process** (B-like), rather than triggering a separate single-video-metadata job. There is deliberately **no** standalone metadata-pull stage or per-video metadata job type (that is the rejected three-stage model). Whether to enrich and how deep is per-site and left to the implementor based on live testing.
 
+**Addendum (Task 0.3 implementation) — URL-classify deferred to 4.x:** because the worker determines a thing's extractor/native_id/real `type` when it runs the job, **4.0 does no URL classification at add time.** `POST /things/` simply records the URL with `type` defaulting to `playlist` ("unknown → assume playlist", overridable) and leaves `extractor_key`/`native_id` NULL; the worker fills them (and corrects `type`, and backfills `title` — #147) on result-ingest (§3.3, Task 1.1). No yt-dlp `suitable()`/classify step ships in 4.0. Two related 0.3 scope calls: **no `DELETE /things/` verb in 4.0** (normal deletion is the D/F rating; a 4.x admin hard-remove can be added then); and **#147 (title-when-NULL) is Task 1.1**, the worker's ingest path, not the 0.3 PATCH.
+
 ---
 
 ### C5. Partial playlist resume mechanism `[flagged]` `[improvement]`

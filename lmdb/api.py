@@ -1,28 +1,40 @@
-"""LMDB API implementation using FastAPI
+"""LMDB API (V4): thing/rel/run CRUD + add-a-thing-by-URL.
 
-Impports FastAPI and SQLModel to provide a RESTful API for managing playlist schedules and summaries.
+The thing-centric surface from LM-V4-DESIGN.md §3.3. Everything is a `thing`
+(playlist / video / channel). Job dispatch + result-ingest endpoints (`/jobs/...`)
+are Phase 1, not here. URL-classify is deferred to 4.x: `POST /things/` just records
+the URL; the worker fills extractor/native_id/real type on result ingest later.
+
+Note the SQLModel select gotcha (LM-V4-DESIGN.md §6.4): filters on nullable columns
+use SQL `== None` / `!= None`, never Python `is None` (which silently evaluates wrong).
 """
 
-# TODO factor out complicated return logic into separate functions, sometimes xform.py
-
-from typing import List
 import os
+import uuid
 import datetime
-import warnings
+from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
-from .models import PlaylistSchedBase, PlaylistSchedPublic, PlaylistSchedWithStatsAndSum, PlaylistSum, PlaylistSched, PlaylistStats, PlaylistSumBase, PlaylistSumWithSched, PlaylistRunResult, PlaylistSumWithVids, PlaylistVid, PlaylistRunCreate, PlaylistStatsStrHash, PlaylistSumPublic
-from . import xform
+from . import models
+from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
+                     RunRead, ThingAdd, ThingPatch)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
+
+# Letter grade <-> signed float (-2..+2). D/F are not addable (you don't add to suppress).
+GRADE_VALUES = {"A": 2.0, "B": 1.0, "C": 0.0, "D": -1.0, "F": -2.0}
+ADD_GRADES = {"A", "B", "C"}
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create DB tables on startup"""
     SQLModel.metadata.create_all(engine)
     yield
+
 
 app = FastAPI(title="LinkMeddle LMDB API", lifespan=lifespan)
 
@@ -33,251 +45,165 @@ def get_session():
         yield session
 
 
+def _today() -> datetime.date:
+    """Today in UTC (the V4 datetime convention)."""
+    return models.naive_utcnow().date()
 
 
-
-# --- Generic helpers -----------------------------------------------------------------
-def get_or_404(session: Session, model, item_id: int):
-    """Get an item or raise 404"""
-    statement = select(model).where(model.sched_id == item_id)
-    result = session.exec(statement).one_or_none()
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{model.__name__} not found")
-    return result
+def get_thing_or_404(session: Session, thing_id: uuid.UUID) -> Thing:
+    """Fetch a thing by id or raise 404"""
+    thing = session.get(Thing, thing_id)
+    if not thing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thing not found")
+    return thing
 
 
-def apply_update(instance, update_data: dict):
-    """Apply update data to an instance"""
-    # TODO replace this with sqlmodel's built-in update mechanism if possible
-    for key, value in update_data.items():
-        if key == "sched_id":
-            continue
-        if value is None:
-            continue
-        setattr(instance, key, value)
-    return instance
+def _run_read(run: Run) -> RunRead:
+    """Serialize a run, hex-encoding the binary entries_hash for JSON."""
+    return RunRead(id=run.id, thing_id=run.thing_id, worker=run.worker,
+                   input_json=run.input_json, data_json=run.data_json,
+                   entries_hash=run.entries_hash.hex() if run.entries_hash else None,
+                   playlist_count=run.playlist_count, starttime=run.starttime,
+                   endtime=run.endtime, success=run.success)
 
 
-# --- PlaylistSum CRUD ----------------------------------------------------------------
+def _related(session: Session, thing_id: uuid.UUID,
+             direction: Optional[str]) -> list[RelatedThing]:
+    """rel neighbors in both directions (or one if direction is 'child'/'parent')."""
+    out: list[RelatedThing] = []
+    if direction in (None, "child"):
+        for rel, thing in session.exec(
+                select(Rel, Thing).where(Rel.parent == thing_id, Rel.child == Thing.id)).all():
+            out.append(RelatedThing(direction="child", rel_type=rel.type,
+                                    thing=ThingRead.model_validate(thing)))
+    if direction in (None, "parent"):
+        for rel, thing in session.exec(
+                select(Rel, Thing).where(Rel.child == thing_id, Rel.parent == Thing.id)).all():
+            out.append(RelatedThing(direction="parent", rel_type=rel.type,
+                                    thing=ThingRead.model_validate(thing)))
+    return out
 
 
+# --- Things ---------------------------------------------------------------------------
 
-@app.get("/playlists/", response_model=List[PlaylistSumPublic])
-def list_playlist_sums(extractor: str | None = None,
-                       channel: str | None = None,
-                       playlist_id: int | None = None,
-                       session: Session = Depends(get_session)):
-    """List of known playlists for a given channel
-    
-    :param extractor: yt-dlp extractor ID
-    :type extractor: str
-    :param channel: channel identifier
-    :type channel: str
-    :param session: auto-injected DB session
-    :type session: Session
+@app.post("/things/", response_model=ThingRead, status_code=status.HTTP_201_CREATED)
+def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get_session)):
+    """Add a thing by URL (the human entry point).
+
+    Stores the URL with a default rating of B (override A/C); `type` defaults to
+    'playlist' ("unknown -> assume playlist"). extractor_key/native_id are filled in
+    later by the worker. Idempotent on URL (returns the existing thing with 200).
     """
-    if playlist_id is not None:
-        statement = select(PlaylistSum).where(PlaylistSum.playlist_id == playlist_id)
-        return session.exec(statement).all()
-    assert extractor and channel, "extractor and channel are required"
-    statement = select(PlaylistSum).where(PlaylistSum.extractor_id == extractor,
-                                         PlaylistSum.channel == channel)
-    return session.exec(statement).all()
+    existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
+    if existing:
+        response.status_code = status.HTTP_200_OK
+        return existing
+    grade = (item.rating or "B").upper()
+    if grade not in ADD_GRADES:
+        raise HTTPException(status_code=422,
+                            detail=f"rating must be one of {sorted(ADD_GRADES)} at add time")
+    thing = Thing(url=item.url, type=item.type, human_rating=GRADE_VALUES[grade])
+    session.add(thing)
+    try:
+        session.commit()
+    except IntegrityError:  # lost a race on the UNIQUE(url) index (#142)
+        session.rollback()
+        existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
+        if existing is None:
+            raise
+        response.status_code = status.HTTP_200_OK
+        return existing
+    session.refresh(thing)
+    return thing
 
 
-@app.get("/playlists/{url:path}", response_model=PlaylistSumWithSched)
-def get_playlist_sum(url: str, session: Session = Depends(get_session)):
-    """Get a playlist summary by URL
-    
-    :param url: UTL of the playlist
-    :type url: str
-    :param session: auto-injected DB session
-    :type session: Session
+@app.get("/things/", response_model=list[ThingRead])
+def list_things(type: Optional[str] = None, rating: Optional[str] = None,
+                due: bool = False, needs_rating: bool = False, new: bool = False,
+                failing: bool = False, url: Optional[str] = None,
+                extractor: Optional[str] = None, native_id: Optional[str] = None,
+                session: Session = Depends(get_session)):
+    """List/search things. Backs every list view + the status dashboard.
+
+    `extractor` + `native_id` is the V4 replacement for V3 GET /videos/{ex}/{id} (#102).
     """
-    pl = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == url)).one_or_none()
-    if not pl:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Playlist not found")
-    sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == pl.webpage_url)).all()
-    pl_with_sched = PlaylistSumWithSched.model_validate(pl, update={'schedules': list(sched), 'entries': [(pv.vid_id, pv.extractor_id) for pv in pl.entries]})
-    return pl_with_sched
-
-
-# --- PlaylistSched CRUD --------------------------------------------------------------
-@app.post("/schedules/", response_model=PlaylistSchedWithStatsAndSum, status_code=status.HTTP_201_CREATED)
-def create_playlist_sched(item: PlaylistSchedBase,
-                          session: Session = Depends(get_session)):
-    """Create a new playlist schedule"""
-    item = PlaylistSched.model_validate(item)
-    session.add(item)
-    session.commit()
-    session.refresh(item)
-    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == item.webpage_url)).one_or_none()
-    return PlaylistSchedWithStatsAndSum(**item.model_dump(),
-                                     runs=[],
-                                     summary=summary)
-
-@app.get("/schedules/", response_model=List[PlaylistSchedPublic])
-def list_playlist_scheds(next_run: datetime.date | None = None,
-                         extractor: str | None = None,
-                         session: Session = Depends(get_session)):
-    """List of playlist schedules, optionally filtered by next_run date and/or extractor ID"""
-    # TODO add sched_id to output model?
-    statement = select(PlaylistSched)
-    if next_run is not None:
-        statement = statement.where(PlaylistSched.next_run is not None and PlaylistSched.next_run <= next_run)
+    stmt = select(Thing)
+    if type is not None:
+        stmt = stmt.where(Thing.type == type)
+    if url is not None:
+        stmt = stmt.where(Thing.url == url)
     if extractor is not None:
-        statement = statement.where(PlaylistSched.extractor_id == extractor)
-    return session.exec(statement).all()
-
-@app.get("/schedules/{item_id}", response_model=PlaylistSchedWithStatsAndSum)
-def get_playlist_sched(item_id: int, session: Session = Depends(get_session)):
-    """Get a playlist schedule by ID, including stats and summary"""
-    pl = get_or_404(session, PlaylistSched, item_id)
-    #stats = session.exec(select(PlaylistStats).where(PlaylistStats.playlist_id == pl.id)).all()
-    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == pl.webpage_url)).one_or_none()
-    stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == pl.sched_id)).all()
-    return PlaylistSchedWithStatsAndSum(**pl.model_dump(),
-                                     runs=[PlaylistStatsStrHash.model_validate(s, update={"entries_hash": s.entries_hash.hex()}) for s in stats],
-                                     summary=summary)
-
-
-@app.patch("/schedules/{item_id}", response_model=PlaylistSchedWithStatsAndSum)
-def update_playlist_sched(item_id: int, item: PlaylistSchedBase, session: Session = Depends(get_session)):
-    """Update a playlist schedule by ID"""
-    db_item = get_or_404(session, PlaylistSched, item_id)
-    hero_data = item.model_dump(exclude_unset=True)    
-    db_item.sqlmodel_update(hero_data)
-    session.add(db_item)
-    session.commit()
-    session.refresh(db_item)
-    summary = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == db_item.webpage_url)).one_or_none()
-    stats = session.exec(select(PlaylistStats).where(PlaylistStats.sched_id == db_item.sched_id)).all()
-    return PlaylistSchedWithStatsAndSum(**db_item.model_dump(),
-                                     runs=[PlaylistStatsStrHash.model_validate(s, update={"entries_hash": s.entries_hash.hex()}) for s in stats],
-                                     summary=summary)
+        stmt = stmt.where(Thing.extractor_key == extractor.lower())
+    if native_id is not None:
+        stmt = stmt.where(Thing.native_id == native_id)
+    if rating is not None:
+        grade = rating.upper()
+        if grade not in GRADE_VALUES:
+            raise HTTPException(status_code=422,
+                                detail="invalid rating grade")
+        stmt = stmt.where(Thing.human_rating == GRADE_VALUES[grade])
+    if needs_rating:
+        stmt = stmt.where(Thing.human_rating == None)  # noqa: E711  (SQL IS NULL)
+    if due:
+        stmt = stmt.where(Thing.try_on != None, Thing.try_on <= _today())  # noqa: E711
+    if failing:
+        stmt = stmt.where(  # noqa: E711
+            Thing.last_failure_dt != None,
+            (Thing.last_success_dt == None) | (Thing.last_failure_dt > Thing.last_success_dt))
+    if new:
+        cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
+        stmt = stmt.where(Thing.created_dt >= cutoff)
+    stmt = stmt.order_by(Thing.created_dt.desc())
+    return session.exec(stmt).all()
 
 
-@app.delete("/schedules/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_playlist_sched(item_id: int, session: Session = Depends(get_session)):
-    db_item = get_or_404(session, PlaylistSched, item_id)
-    for run in db_item.runs:
-        session.delete(run)
-    session.delete(db_item)
-    session.commit()
-    return None
+@app.get("/things/{thing_id}", response_model=ThingWithRelated)
+def get_thing(thing_id: uuid.UUID, include: Optional[str] = None,
+              session: Session = Depends(get_session)):
+    """Get one thing; `?include=related` also returns its rel neighbors."""
+    thing = get_thing_or_404(session, thing_id)
+    related = _related(session, thing_id, None) if include == "related" else []
+    return ThingWithRelated(**ThingRead.model_validate(thing).model_dump(), related=related)
 
-def upsert_vid(session: Session, vid_id: str, playlist_id: int, extractor_id: str) -> PlaylistVid:
-    """Upsert a PlaylistVid entry"""
-    extractor_id = extractor_id.lower()
-    pl_vid = session.exec(select(PlaylistVid).where(PlaylistVid.vid_id == vid_id,
-                                                    PlaylistVid.playlist_id == playlist_id,
-                                                    PlaylistVid.extractor_id == extractor_id)).one_or_none()
-    if not pl_vid:
-        pl_vid = PlaylistVid(vid_id=vid_id, playlist_id=playlist_id, extractor_id=extractor_id)
-        session.add(pl_vid)
-        session.commit()
-        session.refresh(pl_vid)
-    return pl_vid
 
-@app.post("/playlist-run", response_model=PlaylistRunResult)
-def create_playlist_run(run_info: PlaylistRunCreate, session: Session = Depends(get_session)):
-    """Designed to be called upon playlist completion by postprocessor
-    
-    Fulfills user story #1, requirement 4
+@app.get("/things/{thing_id}/related", response_model=list[RelatedThing])
+def get_related(thing_id: uuid.UUID, direction: Optional[str] = None,
+                session: Session = Depends(get_session)):
+    """rel neighbors of a thing (children + parents; narrow with ?direction=)."""
+    get_thing_or_404(session, thing_id)
+    return _related(session, thing_id, direction)
 
-    Also enables user story #2
+
+@app.get("/things/{thing_id}/runs", response_model=list[RunRead])
+def get_thing_runs(thing_id: uuid.UUID, session: Session = Depends(get_session)):
+    """Run history for a thing, newest first."""
+    get_thing_or_404(session, thing_id)
+    runs = session.exec(
+        select(Run).where(Run.thing_id == thing_id).order_by(Run.starttime.desc())).all()
+    return [_run_read(r) for r in runs]
+
+
+@app.patch("/things/{thing_id}", response_model=ThingRead)
+def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
+                session: Session = Depends(get_session)):
+    """Update a thing: set the rating (incl. D/F), or ack permafail (try_on=null).
+
+    (The 'raise-to-eligible -> try_on=today' side-effect is Task 2.1; title backfill is
+    Task 1.1.)
     """
-    # TODO rewrite this whole function to use upserts and relationships better
-    item = run_info.playlist
-    # TODO allow partial
-    base_summary = xform.full2sum(item)
-    summary = PlaylistSum.model_validate(base_summary, update={"entries": []})
-    existing_pl = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == summary.webpage_url)).one_or_none()
-    if not existing_pl:
-        session.add(summary)
-        session.commit()
-        session.refresh(summary)
-        existing_pl = summary
-    for vid in item.entries:
-        assert vid.extractor is not None
-        my_vid_extractor = vid.extractor.extractor_key.lower() if vid.extractor.extractor_key else None
-        if not my_vid_extractor:
-            warnings.warn(f"Video {vid.id} ({vid.webpage_url}) has no extractor; fallback to playlist extractor {existing_pl.extractor_id}.")
-            my_vid_extractor = existing_pl.extractor_id
-        assert existing_pl.playlist_id is not None
-        upsert_vid(session, xform.entry2text(vid), existing_pl.playlist_id, my_vid_extractor)
-        # Also create pseudo-channel playlist if needed
-        uploader_url = xform.vid_uploader_url(vid)
-        if not uploader_url:
-            warnings.warn(f"Video {my_vid_extractor}:{vid.id} ({vid.webpage_url}) has no uploader URL; skipping pseudo-channel playlist creation.")
-            continue
-        ul_pseudo = session.exec(select(PlaylistSum).where(PlaylistSum.webpage_url == uploader_url)).one_or_none()
-        if not ul_pseudo:
-            ul_pseudo = PlaylistSum(
-                extractor_id=existing_pl.extractor_id,
-                id=None,
-                title=None,
-                webpage_url=uploader_url,
-                channel=uploader_url,
-                entries=[],
-                playlist_id=None,
-                pseudo_channel=True,
-                modified_date=None,
-                playlist_count=None
-            )
-        ul_pseudo.pseudo_channel = True
-        session.add(ul_pseudo)
-        session.commit()
-        session.refresh(ul_pseudo)
-        assert ul_pseudo.playlist_id is not None
-        upsert_vid(session, xform.entry2text(vid), ul_pseudo.playlist_id, my_vid_extractor)
+    thing = get_thing_or_404(session, thing_id)
+    data = item.model_dump(exclude_unset=True)
+    grade = data.pop("grade", None)
+    if grade is not None:
+        if grade.upper() not in GRADE_VALUES:
+            raise HTTPException(status_code=422,
+                                detail="invalid grade")
+        thing.human_rating = GRADE_VALUES[grade.upper()]
+    if "human_rating" in data:
+        thing.human_rating = data["human_rating"]
+    if "try_on" in data:  # explicit; null acknowledges permafail
+        thing.try_on = data["try_on"]
+    session.add(thing)
     session.commit()
-    if run_info.schedule_id is not None:
-        sched = session.exec(select(PlaylistSched).where(PlaylistSched.sched_id == run_info.schedule_id)).one_or_none()
-        assert sched is not None, f"Schedule with ID {run_info.schedule_id} not found"
-        if sched.webpage_url != existing_pl.webpage_url:
-            warnings.warn(f"Schedule webpage URL {sched.webpage_url} does not match playlist sum DB entry webpage URL {existing_pl.webpage_url}")
-        if sched.webpage_url != item.webpage_url:
-            warnings.warn(f"Schedule webpage URL {sched.webpage_url} does not match playlist submitted webpage URL {item.webpage_url}")
-    else:
-        sched = session.exec(select(PlaylistSched).where(PlaylistSched.webpage_url == item.webpage_url)).first()
-        if sched:
-            warnings.warn(f"Found schedule with matching webpage URL {sched.webpage_url} for playlist run with no schedule ID; associating with this schedule. Consider providing schedule ID in future to avoid ambiguity.")
-        else:
-            warnings.warn(f"No schedule found with matching webpage URL {item.webpage_url} for playlist run with no schedule ID; playlist run will be recorded without association to a schedule.")
-    new_stats = None
-    new_stats_db = None
-    if sched:
-        # TODO handele following call with join/relationship
-        existing_stats = sched.runs
-        new_stats = xform.full2stats(item, download_count=run_info.download_count)
-        sched, _, new_stats = xform.add_new_run(sched, list(existing_stats), new_stats)
-        session.add(sched)
-        new_stats_db = PlaylistStats.model_validate(new_stats)
-        assert sched.sched_id is not None
-        new_stats_db.sched_id = sched.sched_id
-        session.add(new_stats_db)
-        session.commit()
-        session.refresh(sched)
-        session.refresh(new_stats_db)
-    # TODO delete old stats???
-    session.refresh(existing_pl)
-    if sched:
-        assert new_stats_db is not None
-    else:
-        assert new_stats_db is None
-    return PlaylistRunResult(
-        summary=PlaylistSumWithVids.model_validate(existing_pl, update={"entries": [(pv.vid_id, pv.extractor_id) for pv in existing_pl.entries]}),
-        schedule=sched if sched else None,
-        new_stats=PlaylistStatsStrHash.model_validate(new_stats_db, update={"entries_hash": new_stats_db.entries_hash.hex()}) if new_stats_db else None
-    )
-
-@app.get("/videos/{extractor}/{video_id}", response_model=List[PlaylistSumPublic])
-def get_video(extractor: str, video_id: str, session: Session = Depends(get_session)):
-    """Get playlists containing a given video ID for a specific extractor"""
-    statement = select(PlaylistSum).join(PlaylistVid).where(PlaylistVid.vid_id == video_id,
-                                                            PlaylistVid.extractor_id == extractor)
-    result = session.exec(statement).all()
-    if not result:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
-    return result
+    session.refresh(thing)
+    return thing

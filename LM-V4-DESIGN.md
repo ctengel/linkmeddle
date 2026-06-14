@@ -260,7 +260,7 @@ External systems are unchanged: **OI/SO** (object storage; LM talks only to OI),
 - The Phase III **per-video downloader** job type.
 - The **prioritized job-dispatch endpoint** — the API owns prioritization and hands the runner the single highest-priority due job (running the §4.2 predicate + the `SKIP LOCKED` claim). This is the V4 evolution of V3's `GET /schedules/` + `random.shuffle`.
 - **Compute-on-read machine rating** in the worker selection query.
-- The **add-a-thing-by-URL action** — the primary human entry point. The user supplies a URL (optionally a grade); the URL-classify endpoint sets `type` (playlist / video / channel); the `thing` is created with `try_on = today` (creation default, §2.5) and **default `human_rating = +1` / B**, overridable to A or C (§2.4). This is the V4 form of V3's "add a playlist" (`POST /schedules/`), minus `freq_days`.
+- The **add-a-thing-by-URL action** — the primary human entry point. The user supplies a URL (optionally a grade); the `thing` is created with `try_on = today` (creation default, §2.5) and **default `human_rating = +1` / B**, overridable to A or C (§2.4). This is the V4 form of V3's "add a playlist" (`POST /schedules/`), minus `freq_days`. **URL-classify is deferred to 4.x** (implementation decision, Task 0.3): in 4.0 the add just records the URL with `type` defaulting to `playlist` ("unknown → assume playlist"); `extractor_key`, `native_id`, and the real `type` are filled in by the worker on result-ingest (§3.3, Phase 1) when the job actually runs — so no yt-dlp `suitable()`/classify step at add time.
 - The **status dashboard** query endpoints (recent activity / new things / failures).
 - The **permanent-failure acknowledgment** action (a PATCH setting `try_on = NULL`).
 
@@ -275,11 +275,10 @@ Illustrative only — verbs, paths, and intent, **not** an OpenAPI contract; exa
 **Core LMDB API (`lmdb` / PLAPI)** — `thing`-centric; a near-total rewrite of V3's playlist-specific surface (no `/schedules/`, no `/playlist-run`, no `/videos/{extractor}/{id}`).
 
 *Things*
-- `POST /things/` — **add by URL** (the human entry point): classify `type`, default `human_rating=+1`/B (override A/C), `try_on=today` (§2.4, §3.2).
+- `POST /things/` — **add by URL** (the human entry point): record the URL, `type` default `playlist` (override; classify deferred to 4.x — §3.2), default `human_rating=+1`/B (override A/C), `try_on=today` (§2.4, §3.2). Idempotent on `url` (returns the existing thing) — closes the #142 race.
 - `GET /things/` — list/search; query params e.g. `type`, `rating`, `due` (`try_on≤today`), `needs_rating`, `new` (recent `created_dt`), `failing` (`last_failure_dt>last_success_dt`), `url=`, and **`extractor=`&`native_id=` — this lookup is the V4 replacement for V3's `GET /videos/{extractor}/{video_id}`**. Backs every list + the status dashboard.
 - `GET /things/{id}` — one thing (+ `rel` summary + latest run). Supports `?include=related` to return the **full page view-model in a single call** — the thing plus its related things already carrying display fields, rating/acquired state, and playback pointer (see the frontend round-trip constraint below).
-- `PATCH /things/{id}` — set `human_rating` (including D/F = delete intent), permanent-failure ack (`try_on=NULL`), title backfill (#147).
-- `DELETE /things/{id}` — admin hard-remove (rare; normal deletion is via the D/F rating, not this verb).
+- `PATCH /things/{id}` — set `human_rating` (including D/F = delete intent) and permanent-failure ack (`try_on=NULL`). *(Title backfill (#147) is the worker's job on result-ingest — Task 1.1, not this endpoint. No `DELETE` verb in 4.0 — normal deletion is via the D/F rating, and the 4.x admin hard-remove can be added then.)*
 
 *Graph & history*
 - `GET /things/{id}/related` — `rel` neighbors in **both** directions (children, e.g. playlist→videos, *and* parents) in one call; an optional `direction`/`role` param narrows to one side.
@@ -404,13 +403,13 @@ Relative complexity: **S** (hours–day), **M** (a few days), **L** (the hard, m
 |---|---|---|---|---|
 | 0.1 | Create the `thing`/`rel`/`run` Postgres schema + indexes (§2) | **M** | #129, #80, #128(resolved: no order) | Schema is frozen here; switch `DATABASE_URL` to Postgres+JSONB; close #80/#128 when this lands |
 | 0.2 | Port DLP boundary models + reusable `xform` helpers (Fibonacci, `compare_pl_runs`, `pl_hash`, `pl_dlp2lm`) onto the new layer | **M** | — | Reuse-heavy; mind the SQLModel `is_(None)` select gotcha |
-| 0.3 | `thing`/`run` CRUD API + URL-classify endpoint; **add-a-thing-by-URL** (default `human_rating=+1`/B, override A/C; `try_on=today`); `?url=` lookup; `apply_update`/PATCH | **M** | #140, #142, #147, #102(clarify) | #142 race resolved by §4.5; #147 = update title when NULL |
+| 0.3 | `thing`/`run` CRUD API; **add-a-thing-by-URL** (record URL, default `human_rating=+1`/B, override A/C; `type` default playlist, classify deferred to 4.x; `try_on=today`); `?url=` + `extractor`/`native_id` lookup; `apply_update`/PATCH (rating + permafail-ack); no DELETE | **M** | #140, #142, #102(clarify) | #142 race closed by the `UNIQUE(url)` idempotent add; URL-classify deferred to 4.x |
 
 ### Phase 1 — Fan-out core (the heart of V4)
 
 | # | Task | Cplx | Issues | Notes |
 |---|---|---|---|---|
-| 1.1 | **Stage 1 ingest:** new fan-out ingest endpoint + **worker metadata push** (replaces the PP POST); upsert `thing`+`rel`+`run`; create stub videos with denormalized fields; per-site depth flag | **L** | #97, #110, #137, #83 | #137 sidestepped via stub creation; #97 likely resolves naturally |
+| 1.1 | **Stage 1 ingest:** new fan-out ingest endpoint + **worker metadata push** (replaces the PP POST); upsert `thing`+`rel`+`run`; create stub videos with denormalized fields; per-site depth flag; **backfill `thing` title/extractor/native_id/real type when NULL (#147)** | **L** | #97, #110, #137, #83, #147 | #137 sidestepped via stub creation; #97 likely resolves naturally; #147 = worker fills/updates fields on ingest |
 | 1.2 | **Prioritized dispatch + thin runner:** API job-dispatch endpoint (§4.2 predicate + `FOR UPDATE SKIP LOCKED`, single top job, soft priority order); adapt `job_runner.py` to pull one prioritized job and loop (replacing `random.shuffle`); `run.success=NULL` in-progress marker | **L** | #115, #19 | API owns ordering; §4.2–4.5; close #19 when this lands |
 | 1.3 | **Stage 2 downloader:** per-video path (`init_download(maybe_playlist=False)`; OI upload via `ObjIdxUploadPP` or worker-side); worker metadata push sets `best_oi`, `try_on=NULL` | **M** | #115 | Reuses existing execution primitive |
 | 1.4 | **`try_on` scheduler integration:** Fibonacci + initial A3/B5/C8; failure backoff; live re-check edge case | **M** | #149(resolved: no guard) | §4.4 |

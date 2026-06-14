@@ -1,35 +1,24 @@
-"""CLI to interact with LinkMeddle API for playlist scheduling."""
+"""CLI to add things (by URL) to the LinkMeddle API."""
 
 import os
-import datetime
 import requests
 import typer
-from .models import PlaylistSchedBase
 
 LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI")
 
-app = typer.Typer(help="CLI to POST /schedules/ to LinkMeddle API")
+app = typer.Typer(help="CLI to add things by URL to the LinkMeddle API (POST /things/)")
 
 
-@app.command("schedule-playlist")
-def create(oibucket, webpage_url, use_cookies: bool = False, lpmlib=None) -> None:
-    """
-    Create a new playlist schedule by POSTing to /schedules/.
-    """
+@app.command("add-thing")
+def add(url: str, rating: str = "B", thing_type: str = "playlist") -> None:
+    """Add a thing by URL by POSTing to /things/ (V4 form of the old schedule add)."""
     assert LINKMEDDLE_PLAPI is not None, "LINKMEDDLE_PLAPI env var must be set"
-    schedule = PlaylistSchedBase(
-        oi_bucket=oibucket,
-        webpage_url=webpage_url,
-        use_cookies=use_cookies,
-        lpm_lib=lpmlib,
-        next_run=datetime.date.today(),
-        freq_days=3
-    )
-    payload = schedule.model_dump()
-    payload['next_run'] = payload['next_run'].isoformat()
-    url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
-    resp = requests.post(url, json=payload, timeout=5)
+    payload = {"url": url, "type": thing_type, "rating": rating}
+    api_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/things/"
+    resp = requests.post(api_url, json=payload, timeout=5)
     resp.raise_for_status()
+    typer.echo(resp.json())
+
 
 if __name__ == "__main__":
     app()

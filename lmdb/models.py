@@ -5,12 +5,12 @@ Includes DLP-compat and LM-native
 
 import datetime
 import uuid
-from typing import Optional, List
+from typing import Optional
 from pydantic import BaseModel
 import sqlalchemy as sa
 from sqlalchemy import Column, ForeignKey, Index, text
 from sqlalchemy.dialects import postgresql
-from sqlmodel import Field, Relationship, SQLModel
+from sqlmodel import Field, SQLModel
 
 class CommonDLP(BaseModel):
     """DLP: Elements fon in both playlists and entries thereof"""
@@ -128,109 +128,6 @@ class PlaylistFull(PlaylistCommon):
     entries: list[VidFull]
     extractor: DLPIE
 
-class PlaylistSumBase(PlaylistCommon):
-    """Suitable for simple pl lookup table"""
-    channel: Optional[str] = None
-    extractor_id: str
-    pseudo_channel: bool = False
-
-class PlaylistSum(PlaylistSumBase, table=True):
-    """LM-native summarized playlist"""
-    #__tablename__ = "playlist_sums"
-    playlist_id: int | None = Field(primary_key=True, default=None)
-    entries: List['PlaylistVid'] = Relationship(back_populates="playlist")
-
-class PlaylistVid(SQLModel, table=True):
-    """Link between vids and playlists"""
-    vid_id: str = Field(primary_key=True)
-    playlist_id: int = Field(foreign_key="playlistsum.playlist_id", primary_key=True)
-    playlist: PlaylistSum = Relationship(back_populates="entries")
-    extractor_id: str = Field(primary_key=True)
-
-class PlaylistSumPublic(PlaylistSumBase):
-    """Public view of a playlist summary"""
-    playlist_id: Optional[int] = None
-
-class PlaylistSumWithVids(PlaylistSumPublic):
-    """Playlist summary with vids included"""
-    entries: list[tuple[str, str | None]]
-
-class PlaylistStatsBase(SQLModel):
-    """Base stats of a playlist run"""
-    modified_date: Optional[datetime.datetime]
-    playlist_count: int
-    different: Optional[bool]
-    success: bool
-    download_count: Optional[int] = None
-    failed_count: Optional[int] = None
-    input_params: Optional[str]  # TODO JSON-encoded dict
-    output_params: Optional[str]  # TODO JSON-encoded dict
-    timestamp: datetime.datetime
-    newest_item: Optional[datetime.datetime]
-    interval: Optional[int]
-
-class PlaylistStatsBinHash(PlaylistStatsBase):
-    """Playlist stats with binary hash"""
-    entries_hash: bytes
-
-class PlaylistStatsStrHash(PlaylistStatsBase):
-    """Playlist stats with string hash"""
-    entries_hash: str
-    sched_id: int
-    stat_id: int
-
-class PlaylistStats(PlaylistStatsBinHash, table=True):
-    """Stats of a playlist run"""
-    sched_id: int = Field(default=None, foreign_key="playlistsched.sched_id")
-    stat_id: int | None = Field(primary_key=True, default=None)
-    schedule: 'PlaylistSched' = Relationship(back_populates="runs")
-
-class PlaylistSchedBase(SQLModel):
-    """A schedule of when to attempt a playlist"""
-    extractor_id: Optional[str] = None
-    id: Optional[str] = None
-    next_run: Optional[datetime.date] = None
-    freq_days: Optional[int] = None
-    input_params: Optional[str] = None  # TODO JSON-encoded dict
-    webpage_url: Optional[str] = None
-    lpm_lib: Optional[str] = None
-    oi_bucket: Optional[str] = None
-    use_cookies: Optional[bool] = None
-
-class PlaylistSched(PlaylistSchedBase, table=True):
-    """A schedule of when to attempt a playlist"""
-    #__tablename__ = "playlist_scheds"
-    sched_id: int | None = Field(primary_key=True, default=None)
-    runs: list[PlaylistStats] = Relationship(back_populates="schedule")
-    playlist_id: Optional[int] = Field(default=None, foreign_key="playlistsum.playlist_id")
-
-class PlaylistSchedPublic(PlaylistSchedBase):
-    """Public view of a playlist schedule"""
-    sched_id: int
-
-class PlaylistSchedWithStatsAndSum(PlaylistSchedPublic):
-    """Playlist schedule with stats and summary included"""
-    runs: list[PlaylistStatsStrHash] = []
-    summary: PlaylistSumPublic | None = None
-
-class PlaylistSumWithSched(PlaylistSumWithVids):
-    """Playlist summary with schedule included"""
-    schedules: list[PlaylistSchedPublic]
-
-class PlaylistRunResult(BaseModel):
-    """Result of a playlist run"""
-    summary: PlaylistSumWithVids
-    schedule: Optional[PlaylistSched]
-    new_stats: Optional[PlaylistStatsStrHash]
-
-class PlaylistRunCreate(BaseModel):
-    """Info needed to create a playlist run"""
-    playlist: PlaylistFull
-    schedule_id: Optional[int] = None
-    download_count: int = 0
-    failed_count: int = 0
-
-
 # --- V4 schema (thing / rel / run) -----------------------------------------------------
 # Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
 # (`timestamp`, not `timestamptz`); the app uses UTC everywhere. The canonical DDL is
@@ -280,12 +177,13 @@ class Thing(SQLModel, table=True):
     last_failure_dt: Optional[datetime.datetime] = Field(
         default=None, sa_column=Column(sa.DateTime, nullable=True))
     try_on: Optional[datetime.date] = Field(
-        default=None, sa_column=Column(sa.Date, nullable=True, server_default=_UTC_TODAY))
+        default_factory=lambda: naive_utcnow().date(),
+        sa_column=Column(sa.Date, nullable=True, server_default=_UTC_TODAY))
     best_oi: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     attrs: Optional[dict] = Field(
         default=None, sa_column=Column(postgresql.JSONB, nullable=True))
     created_dt: Optional[datetime.datetime] = Field(
-        default=None,
+        default_factory=naive_utcnow,
         sa_column=Column(sa.DateTime, nullable=False, server_default=_UTC_NOW))
 
 
@@ -326,3 +224,68 @@ class Run(SQLModel, table=True):
         default=None, sa_column=Column(sa.DateTime, nullable=True))
     success: Optional[bool] = Field(
         default=None, sa_column=Column(sa.Boolean, nullable=True))
+
+
+# --- V4 API I/O models -----------------------------------------------------------------
+
+class ThingRead(SQLModel):
+    """Public view of a thing (all columns, id as uuid)."""
+    id: uuid.UUID
+    url: Optional[str] = None
+    backend: int = 0
+    site: Optional[str] = None
+    extractor_key: Optional[str] = None
+    native_id: Optional[str] = None
+    type: str
+    title: Optional[str] = None
+    channel: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    modified: Optional[datetime.datetime] = None
+    human_rating: Optional[float] = None
+    machine_rating: Optional[float] = None
+    last_success_dt: Optional[datetime.datetime] = None
+    last_failure_dt: Optional[datetime.datetime] = None
+    try_on: Optional[datetime.date] = None
+    best_oi: Optional[str] = None
+    attrs: Optional[dict] = None
+    created_dt: Optional[datetime.datetime] = None
+
+
+class RelatedThing(SQLModel):
+    """A thing reachable across one `rel` edge, with the edge's type and direction."""
+    direction: str  # 'parent' = the given thing is parent (this is a child), or 'child'
+    rel_type: str
+    thing: ThingRead
+
+
+class ThingWithRelated(ThingRead):
+    """A thing plus its `rel` neighbors (for ?include=related / page view-models)."""
+    related: list[RelatedThing] = []
+
+
+class RunRead(SQLModel):
+    """Public view of a run (entries_hash hex-encoded for JSON)."""
+    id: uuid.UUID
+    thing_id: uuid.UUID
+    worker: Optional[str] = None
+    input_json: Optional[dict] = None
+    data_json: Optional[dict] = None
+    entries_hash: Optional[str] = None
+    playlist_count: Optional[int] = None
+    starttime: datetime.datetime
+    endtime: Optional[datetime.datetime] = None
+    success: Optional[bool] = None
+
+
+class ThingAdd(BaseModel):
+    """add-a-thing-by-URL request (the human entry point)."""
+    url: str
+    type: str = 'playlist'   # "unknown -> assume playlist"; overridable
+    rating: Optional[str] = None  # grade letter A/B/C (default B); D/F not allowed at add
+
+
+class ThingPatch(BaseModel):
+    """PATCH a thing: set rating, or acknowledge permafail (try_on=null)."""
+    human_rating: Optional[float] = None
+    grade: Optional[str] = None          # grade letter alternative to human_rating
+    try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
