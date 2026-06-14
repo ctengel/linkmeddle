@@ -12,7 +12,7 @@ the list is sorted along the critical path. Complexity: **S** (hours–day), **M
 ## Phase 0 — Foundations (must precede everything)
 
 - [x] **0.1** Create the `thing`/`rel`/`run` Postgres schema + indexes; switch `DATABASE_URL` to Postgres+JSONB — **M** — #129 #80 #128 *(close #80/#128 when this lands)*
-- [ ] **0.2** Port DLP boundary models + reusable `xform` helpers (Fibonacci, `compare_pl_runs`, `pl_hash`, `pl_dlp2lm`) onto the new layer — **M** — #151
+- [x] **0.2** Port DLP boundary models + reusable `xform` helpers (Fibonacci, `compare_pl_runs`, `pl_hash`, `pl_dlp2lm`) onto the new layer — **M** — #151
 - [ ] **0.3** `thing`/`run` CRUD API + URL-classify; add-a-thing-by-URL (default B/`+1`, override A/C, `try_on=today`); `?url=` lookup; `apply_update`/PATCH — **M** — #140 #142 #147 #102
 
 ## Phase 1 — Fan-out core (the heart of V4) — tracker: #81

@@ -237,6 +237,11 @@ class PlaylistRunCreate(BaseModel):
 # mirrored in lmdb/schema/v4.0.sql. 4.x changes must be additive (nullable cols / new
 # tables), never migrations.
 
+def naive_utcnow() -> datetime.datetime:
+    """Current UTC time as a naive datetime (the V4 convention; see LM-V4-DESIGN.md §2)."""
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
 # UTC server defaults yield naive `timestamp` values (timezone('utc', now())).
 _UTC_NOW = text("(now() at time zone 'utc')")
 _UTC_TODAY = text("(now() at time zone 'utc')::date")
@@ -315,7 +320,7 @@ class Run(SQLModel, table=True):
     playlist_count: Optional[int] = Field(
         default=None, sa_column=Column(sa.Integer, nullable=True))
     starttime: datetime.datetime = Field(
-        default_factory=datetime.datetime.utcnow,
+        default_factory=naive_utcnow,
         sa_column=Column(sa.DateTime, nullable=False))
     endtime: Optional[datetime.datetime] = Field(
         default=None, sa_column=Column(sa.DateTime, nullable=True))

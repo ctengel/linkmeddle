@@ -2,7 +2,8 @@
 
 import statistics
 import datetime
-from typing import Optional
+import uuid
+from typing import NamedTuple, Optional
 import hashlib
 import warnings
 from . import models
@@ -255,3 +256,120 @@ def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
     if vid.channel.channel_url:
         return vid.channel.channel_url
     return None
+
+
+# --- V4 layer: DLP/LM-native -> thing/rel/run ------------------------------------------
+# These convert the (reused) DLP boundary models into the frozen thing/rel/run schema
+# (LM-V4-DESIGN.md Part 2). They are pure constructors — no DB/session — so the actual
+# upsert/dedup against existing rows is the Stage-1 ingest's job (Task 1.1). Note the
+# SQLModel select gotcha for the query side (LM-V4-DESIGN.md §6.4): use `col == None` /
+# `is_(None)`, never Python `is not None`, in filters on nullable columns.
+
+def _norm_extractor(extractor: models.DLPIE) -> Optional[str]:
+    """Canonical lowercased extractor key for a thing (key, falling back to name)."""
+    ek = extractor.extractor_key or extractor.extractor
+    return ek.lower() if ek else None
+
+
+def chan_url(chan: models.UlChan) -> Optional[str]:
+    """Best URL for an uploader/channel."""
+    return chan.uploader_url or chan.channel_url
+
+
+def thing_from_vid(vid: models.VidFull) -> models.Thing:
+    """Build a stub video `thing` with whatever the playlist pull told us (#137 sidestep)."""
+    return models.Thing(url=vid.webpage_url,
+                        extractor_key=_norm_extractor(vid.extractor),
+                        native_id=vid.id,
+                        type='video',
+                        title=vid.title,
+                        channel=vid_uploader_url(vid),
+                        thumbnail_url=vid.thumbnail,
+                        modified=vid.upload_date)
+
+
+def thing_from_pl(pl: models.PlaylistFull) -> models.Thing:
+    """Build the playlist `thing`."""
+    return models.Thing(url=pl.webpage_url,
+                        extractor_key=_norm_extractor(pl.extractor),
+                        native_id=pl.id,
+                        type='playlist',
+                        title=pl.title,
+                        channel=chan_url(pl.channel),
+                        modified=pl.modified_date)
+
+
+def thing_from_chan(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
+    """Build a channel `thing` from an uploader/channel descriptor, or None if no URL."""
+    url = chan_url(chan)
+    if not url:
+        return None
+    return models.Thing(url=url,
+                        extractor_key=extractor_key,
+                        native_id=chan.uploader_id or chan.channel_id,
+                        type='channel',
+                        title=chan.uploader,
+                        channel=url)
+
+
+class ThingGraph(NamedTuple):
+    """The thing/rel graph derived from one playlist pull, ready to upsert."""
+    playlist: models.Thing
+    videos: list[models.Thing]
+    channels: list[models.Thing]
+    rels: list[models.Rel]
+
+
+def pl_full2things(pl: models.PlaylistFull) -> ThingGraph:
+    """Convert an LM-native playlist into its thing/rel graph.
+
+    Produces the playlist thing, a stub thing per entry, the playlist's own channel
+    thing, and the edges between them (`playlist_video`, `channel_playlist`). The
+    returned objects carry client-side UUIDs, so the edges already reference real ids.
+    """
+    pl_thing = thing_from_pl(pl)
+    videos: list[models.Thing] = []
+    channels: list[models.Thing] = []
+    rels: list[models.Rel] = []
+    for vid in pl.entries:
+        vid_thing = thing_from_vid(vid)
+        videos.append(vid_thing)
+        rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id,
+                               type='playlist_video'))
+    chan = thing_from_chan(pl.channel, pl_thing.extractor_key)
+    if chan is not None:
+        channels.append(chan)
+        rels.append(models.Rel(parent=chan.id, child=pl_thing.id,
+                               type='channel_playlist'))
+    return ThingGraph(playlist=pl_thing, videos=videos, channels=channels, rels=rels)
+
+
+def full2run(pl: models.PlaylistFull,
+             thing_id: uuid.UUID,
+             success: bool = True) -> models.Run:
+    """Build a `run` record for a playlist (Stage-1) pull.
+
+    `entries_hash` (reusing `pl_hash`) is the change-detection fingerprint; the raw
+    yt-dlp output rides in `data_json` (caller supplies it later if desired).
+    """
+    count = len(pl.entries)
+    if pl.playlist_count is None:
+        warnings.warn(f'No provided playlist_count; leveraging length of {count}.')
+    elif count != pl.playlist_count:
+        warnings.warn(f"Provided playlist count {pl.playlist_count} doesn't match actual "
+                      f"length of {count}; will record provided.")
+        count = pl.playlist_count
+    return models.Run(thing_id=thing_id,
+                     entries_hash=pl_hash(pl.entries),
+                     playlist_count=count,
+                     success=success,
+                     starttime=models.naive_utcnow())
+
+
+def runs_differ(prev: models.Run, new: models.Run) -> bool:
+    """Did a playlist change between runs? (LM-V4-DESIGN.md §2.3)
+
+    True iff the new run's membership fingerprint differs from the most recent prior
+    *successful* run's. Caller is responsible for passing that prior successful run.
+    """
+    return prev.entries_hash != new.entries_hash
