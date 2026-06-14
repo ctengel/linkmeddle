@@ -289,3 +289,28 @@ class ThingPatch(BaseModel):
     human_rating: Optional[float] = None
     grade: Optional[str] = None          # grade letter alternative to human_rating
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
+
+
+class JobCreate(BaseModel):
+    """Create an in-progress run (success=NULL) for a thing.
+
+    TEMPORARY (Task 1.1): exists only so the result-ingest endpoint can be exercised
+    standalone. Task 1.2's dispatcher creates the run itself and returns the run_id, at
+    which point POST /jobs/ is deleted.
+    """
+    thing_id: uuid.UUID
+    worker: Optional[str] = None
+    input_json: Optional[dict] = None
+
+
+class RunResultIn(BaseModel):
+    """Worker-owned result push for a run (the V4 rewrite of V3's POST /playlist-run).
+
+    `playlist` is the LM-native pull result (required on a successful playlist run);
+    `data_json` carries the raw yt-dlp output to store on the run. (Stage-2 single-video
+    result shape is Task 1.3.)
+    """
+    playlist: Optional[PlaylistFull] = None
+    success: bool = True
+    data_json: Optional[dict] = None
+    worker: Optional[str] = None

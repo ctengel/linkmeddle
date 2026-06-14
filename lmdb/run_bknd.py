@@ -14,9 +14,53 @@ from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
 #from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
-from . import ytdl_arch_oi
+from . import ytdl_arch_oi, models, xform
 from .linkmeddle_playlist import LinkMeddlePlaylistPP
 # TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
+
+RESULT_TIMEOUT = 64  # large playlists make a big POST body (mirrors the old plugin)
+
+
+def _playlist_full_json(pl: models.PlaylistFull) -> dict:
+    """Serialize an LM-native playlist to JSON-safe dict (datetimes -> ISO)."""
+    body = pl.model_dump()
+    body['modified_date'] = body['modified_date'].isoformat() if body['modified_date'] else None
+    for entry in body['entries']:
+        entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
+    return body
+
+
+def create_run(api_base: str, thing_id: str,
+               worker: str | None = None, input_json: dict | None = None) -> str:
+    """Mint an in-progress run for a thing; returns its run_id.
+
+    Worker-side helper for the Task 1.1 ingest flow. TEMPORARY: once Task 1.2's dispatcher
+    creates the run and returns the run_id, this round-trip goes away.
+    """
+    resp = requests.post(f"{api_base.rstrip('/')}/jobs/",
+                         json={'thing_id': thing_id, 'worker': worker,
+                               'input_json': input_json},
+                         timeout=RESULT_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()['id']
+
+
+def post_run_result(api_base: str, run_id: str, info: dict | None,
+                    success: bool = True, worker: str | None = None) -> dict:
+    """Push a run's result to POST /jobs/{run_id}/result (replaces the in-plugin POST).
+
+    `info` is a raw yt-dlp playlist info dict; it is converted to the LM-native payload
+    here (DLP -> PlaylistFull) and also sent as `data_json` (raw yt-dlp output).
+    """
+    body: dict = {'success': success, 'worker': worker}
+    if info is not None:
+        pl = xform.pl_dlp2lm(models.PlaylistDLP.model_validate(info))
+        body['playlist'] = _playlist_full_json(pl)
+        body['data_json'] = info
+    resp = requests.post(f"{api_base.rstrip('/')}/jobs/{run_id}/result",
+                         json=body, timeout=RESULT_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
 
 def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
     # Exclude live streams by checking 'is_live' key in info_dict

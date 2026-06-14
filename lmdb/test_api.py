@@ -206,3 +206,116 @@ def test_patch_permafail_ack(client):
 def test_patch_404(client):
     r = client.patch(f"/things/{uuid.uuid4()}", json={"grade": "A"})
     assert r.status_code == 404
+
+
+# --- jobs / Stage-1 ingest (Task 1.1) --------------------------------------------------
+
+def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest") -> dict:
+    """A JSON-ready LM-native PlaylistFull body for the ingest endpoint."""
+    pl = models.PlaylistFull(
+        id=native, title="Ingest PL", webpage_url=url,
+        modified_date=datetime.datetime(2026, 1, 31), playlist_count=n,
+        extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
+        channel=models.UlChan(uploader_id="up1", uploader="Up One",
+                              uploader_url="http://example/up1"),
+        entries=[models.VidFull(
+            id=f"vid{i}", title=f"Video {i}", webpage_url=f"http://example/v/{i}",
+            thumbnail=f"http://example/v/{i}/t.jpg",
+            upload_date=datetime.datetime(2026, 1, i + 1),
+            extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
+            channel=models.UlChan(uploader_id="up1", uploader="Up One",
+                                  uploader_url="http://example/up1"),
+        ) for i in range(n)],
+    )
+    return pl.model_dump(mode="json")
+
+
+def test_create_job_in_progress(client):
+    tid = client.post("/things/", json={"url": "http://example/pl/job"}).json()["id"]
+    r = client.post("/jobs/", json={"thing_id": tid})
+    assert r.status_code == 201
+    j = r.json()
+    assert j["thing_id"] == tid
+    assert j["success"] is None      # in-progress marker
+    assert j["endtime"] is None
+    assert j["id"]
+
+
+def test_create_job_404(client):
+    r = client.post("/jobs/", json={"thing_id": str(uuid.uuid4())})
+    assert r.status_code == 404
+
+
+def test_ingest_fans_out(client):
+    url = "http://example/pl/fan"
+    tid = client.post("/things/", json={"url": url}).json()["id"]   # url-only stub
+    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"playlist": _pl_payload(3, url=url, native="plfan"),
+                          "data_json": {"raw": 1}})
+    assert r.status_code == 200
+    run = r.json()
+    assert run["success"] is True and run["endtime"]
+    assert run["playlist_count"] == 3 and run["entries_hash"]
+    assert run["data_json"] == {"raw": 1}
+
+    # #147: the url-only playlist thing is backfilled from the pull
+    pl = client.get(f"/things/{tid}").json()
+    assert pl["native_id"] == "plfan"
+    assert pl["extractor_key"] == "youtube"   # lowercased
+    assert pl["title"] == "Ingest PL"
+    assert pl["last_success_dt"]
+
+    related = client.get(f"/things/{tid}", params={"include": "related"}).json()["related"]
+    kids = [e for e in related if e["direction"] == "child"]
+    parents = [e for e in related if e["direction"] == "parent"]
+    assert len(kids) == 3
+    assert all(e["rel_type"] == "playlist_video" for e in kids)
+    assert all(e["thing"]["type"] == "video" for e in kids)
+    assert len(parents) == 1
+    assert parents[0]["rel_type"] == "channel_playlist"
+    assert parents[0]["thing"]["type"] == "channel"
+
+    # video stubs carry denormalized fields and are eligible for Stage-2 (try_on=today)
+    vids = client.get("/things/", params={"type": "video"}).json()
+    assert len(vids) == 3
+    assert all(v["title"] for v in vids)
+    assert all(v["try_on"] == datetime.date.today().isoformat() for v in vids)
+
+
+def test_ingest_idempotent(client):
+    url = "http://example/pl/idem"
+    tid = client.post("/things/", json={"url": url}).json()["id"]
+    payload = _pl_payload(3, url=url, native="plidem")
+    for _ in range(2):
+        rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+        assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    assert len(client.get("/things/", params={"type": "video"}).json()) == 3   # no dup things
+    assert len(client.get("/things/", params={"type": "channel"}).json()) == 1
+    assert len(client.get(f"/things/{tid}/runs").json()) == 2                   # but two runs
+    kids = [e for e in client.get(f"/things/{tid}", params={"include": "related"}).json()
+            ["related"] if e["direction"] == "child"]
+    assert len(kids) == 3                                                       # no dup rels
+
+
+def test_ingest_failure_records_only(client):
+    url = "http://example/pl/fail"
+    tid = client.post("/things/", json={"url": url}).json()["id"]
+    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    r = client.post(f"/jobs/{rid}/result", json={"success": False})
+    assert r.status_code == 200 and r.json()["success"] is False
+    pl = client.get(f"/things/{tid}").json()
+    assert pl["last_failure_dt"] and pl["last_success_dt"] is None
+    assert client.get("/things/", params={"type": "video"}).json() == []       # no fan-out
+
+
+def test_ingest_success_requires_playlist(client):
+    tid = client.post("/things/", json={"url": "http://example/pl/req"}).json()["id"]
+    rid = client.post("/jobs/", json={"thing_id": tid}).json()["id"]
+    r = client.post(f"/jobs/{rid}/result", json={"success": True})
+    assert r.status_code == 422
+
+
+def test_ingest_run_404(client):
+    r = client.post(f"/jobs/{uuid.uuid4()}/result", json={"success": False})
+    assert r.status_code == 404

@@ -113,3 +113,22 @@ def test_runs_differ():
     changed = xform.full2run(_pl(4), thing_id=tid)
     assert xform.runs_differ(same_a, same_b) is False
     assert xform.runs_differ(same_a, changed) is True
+
+
+def test_null_backfill_fills_only_nulls():
+    existing = models.Thing(type="playlist", url="http://x")  # title/extractor/... all NULL
+    incoming = models.Thing(type="playlist", title="T", extractor_key="youtube",
+                            native_id="n1", channel="http://c", thumbnail_url="http://t",
+                            modified=datetime.datetime(2026, 1, 1))
+    assert xform.null_backfill(existing, incoming) == {
+        "title": "T", "extractor_key": "youtube", "native_id": "n1",
+        "channel": "http://c", "thumbnail_url": "http://t",
+        "modified": datetime.datetime(2026, 1, 1)}
+
+
+def test_null_backfill_preserves_existing_values():
+    existing = models.Thing(type="playlist", title="Keep", extractor_key="vimeo")
+    incoming = models.Thing(type="video", title="New", extractor_key="youtube",
+                            native_id="n2")
+    # only the NULL field (native_id) is offered; present values are untouched
+    assert xform.null_backfill(existing, incoming) == {"native_id": "n2"}

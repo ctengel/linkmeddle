@@ -221,13 +221,11 @@ def pl_full2things(pl: models.PlaylistFull) -> ThingGraph:
     return ThingGraph(playlist=pl_thing, videos=videos, channels=channels, rels=rels)
 
 
-def full2run(pl: models.PlaylistFull,
-             thing_id: uuid.UUID,
-             success: bool = True) -> models.Run:
-    """Build a `run` record for a playlist (Stage-1) pull.
+def reconcile_count(pl: models.PlaylistFull) -> int:
+    """Reconcile a playlist's reported `playlist_count` against its actual entries.
 
-    `entries_hash` (reusing `pl_hash`) is the change-detection fingerprint; the raw
-    yt-dlp output rides in `data_json` (caller supplies it later if desired).
+    Returns the count to record (provided count wins on mismatch), warning on disagreement.
+    Shared by `full2run` and the Stage-1 ingest endpoint.
     """
     count = len(pl.entries)
     if pl.playlist_count is None:
@@ -236,11 +234,43 @@ def full2run(pl: models.PlaylistFull,
         warnings.warn(f"Provided playlist count {pl.playlist_count} doesn't match actual "
                       f"length of {count}; will record provided.")
         count = pl.playlist_count
+    return count
+
+
+def full2run(pl: models.PlaylistFull,
+             thing_id: uuid.UUID,
+             success: bool = True) -> models.Run:
+    """Build a `run` record for a playlist (Stage-1) pull.
+
+    `entries_hash` (reusing `pl_hash`) is the change-detection fingerprint; the raw
+    yt-dlp output rides in `data_json` (caller supplies it later if desired).
+    """
     return models.Run(thing_id=thing_id,
                      entries_hash=pl_hash(pl.entries),
-                     playlist_count=count,
+                     playlist_count=reconcile_count(pl),
                      success=success,
                      starttime=models.naive_utcnow())
+
+
+# Fields backfilled onto an existing thing from a fresher pull when they are still NULL
+# (#147). Never overwrites a value already present; `type` is NOT NULL so it is corrected
+# separately by the ingest endpoint, not here.
+_BACKFILL_FIELDS = ("title", "extractor_key", "native_id",
+                    "channel", "thumbnail_url", "modified")
+
+
+def null_backfill(existing: models.Thing, incoming: models.Thing) -> dict:
+    """Fields to set on `existing` from `incoming` where `existing` is NULL (#147).
+
+    Pure: returns `{field: value}` for whitelist fields that are unset on the stored thing
+    but known from the fresh pull. The caller applies them (so it can guard the unique
+    native-key index). Never returns a field that would overwrite a present value.
+    """
+    out: dict = {}
+    for field in _BACKFILL_FIELDS:
+        if getattr(existing, field) is None and getattr(incoming, field) is not None:
+            out[field] = getattr(incoming, field)
+    return out
 
 
 def runs_differ(prev: models.Run, new: models.Run) -> bool:

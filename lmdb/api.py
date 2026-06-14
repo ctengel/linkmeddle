@@ -17,9 +17,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
-from . import models
+from . import models, xform
 from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
-                     RunRead, ThingAdd, ThingPatch)
+                     RunRead, ThingAdd, ThingPatch, JobCreate, RunResultIn)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -207,3 +207,126 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
     session.commit()
     session.refresh(thing)
     return thing
+
+
+# --- Jobs / runs: Stage-1 ingest (Task 1.1) -------------------------------------------
+
+def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
+    """Locate an existing thing matching `thing`'s identity: native key, then URL.
+
+    (`col == None` deliberately becomes SQL `IS NULL` here for stubs without an
+    extractor_key — see the module docstring gotcha.)
+    """
+    if thing.native_id is not None:
+        found = session.exec(
+            select(Thing).where(Thing.backend == thing.backend,
+                                Thing.extractor_key == thing.extractor_key,
+                                Thing.native_id == thing.native_id)).first()
+        if found is not None:
+            return found
+    if thing.url is not None:
+        return session.exec(select(Thing).where(Thing.url == thing.url)).first()
+    return None
+
+
+def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
+    """Fill NULL fields on `existing` from `incoming` (#147), guarding the native-key index.
+
+    If backfilling `native_id` would collide with a different existing row, that one field
+    is skipped (true cross-row merge is out of 4.0 scope).
+    """
+    fields = xform.null_backfill(existing, incoming)
+    if "native_id" in fields:
+        ek = fields.get("extractor_key", existing.extractor_key)
+        clash = session.exec(
+            select(Thing).where(Thing.backend == existing.backend,
+                                Thing.extractor_key == ek,
+                                Thing.native_id == fields["native_id"],
+                                Thing.id != existing.id)).first()
+        if clash is not None:
+            fields.pop("native_id")
+    for key, value in fields.items():
+        setattr(existing, key, value)
+
+
+@app.post("/jobs/", response_model=RunRead, status_code=status.HTTP_201_CREATED)
+def create_job(item: JobCreate, session: Session = Depends(get_session)):
+    """Create an in-progress run (success=NULL) for a thing.
+
+    TEMPORARY (Task 1.1): lets the result-ingest endpoint be exercised before dispatch
+    exists. Task 1.2's dispatcher creates the run itself and returns the run_id.
+    # TODO(1.2): delete; dispatch creates the run.
+    """
+    get_thing_or_404(session, item.thing_id)
+    run = Run(thing_id=item.thing_id, worker=item.worker, input_json=item.input_json,
+              starttime=models.naive_utcnow(), success=None)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _run_read(run)
+
+
+@app.post("/jobs/{run_id}/result", response_model=RunRead)
+def submit_result(run_id: uuid.UUID, item: RunResultIn,
+                  session: Session = Depends(get_session)):
+    """Stage-1 ingest: record a run's result and upsert the thing/rel graph it found.
+
+    The V4 rewrite of V3's POST /playlist-run. On success, fans the playlist pull out into
+    a stub `thing` per entry (+ the playlist's channel) and the `rel` edges between them
+    (#137), backfilling NULL fields on things we already knew (#147). On failure, records
+    the failure only (C8: a metadata-only run fails whole-playlist). The Fibonacci `try_on`
+    backoff is Task 1.4.
+    """
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    now = models.naive_utcnow()
+    run.endtime = now
+    run.success = item.success
+    if item.worker is not None:
+        run.worker = item.worker
+    if item.data_json is not None:
+        run.data_json = item.data_json
+
+    pl_thing = session.get(Thing, run.thing_id)
+
+    if not item.success:
+        if pl_thing is not None:
+            pl_thing.last_failure_dt = now
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return _run_read(run)
+
+    if item.playlist is None:
+        raise HTTPException(status_code=422,
+                            detail="playlist is required on a successful playlist run")
+    graph = xform.pl_full2things(item.playlist)
+
+    run.entries_hash = xform.pl_hash(item.playlist.entries)
+    run.playlist_count = xform.reconcile_count(item.playlist)
+
+    # The dispatched thing IS the playlist: backfill it, correct its type, mark success.
+    _apply_backfill(session, pl_thing, graph.playlist)
+    pl_thing.type = graph.playlist.type
+    pl_thing.last_success_dt = now
+
+    remap = {graph.playlist.id: pl_thing.id}
+    for stub in graph.videos + graph.channels:
+        existing = _find_thing(session, stub)
+        if existing is not None:
+            _apply_backfill(session, existing, stub)
+            remap[stub.id] = existing.id
+        else:
+            session.add(stub)
+            remap[stub.id] = stub.id
+    session.flush()  # persist new stubs so the rel FKs resolve
+
+    for rel in graph.rels:
+        parent, child = remap[rel.parent], remap[rel.child]
+        if session.get(Rel, (parent, child, rel.type)) is None:
+            session.add(Rel(parent=parent, child=child, type=rel.type))
+
+    session.commit()
+    session.refresh(run)
+    return _run_read(run)

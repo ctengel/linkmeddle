@@ -17,7 +17,7 @@ the list is sorted along the critical path. Complexity: **S** (hours–day), **M
 
 ## Phase 1 — Fan-out core (the heart of V4) — tracker: #81
 
-- [ ] **1.1** Stage-1 ingest endpoint + worker metadata push (replaces the PP POST); upsert `thing`+`rel`+`run`; stub videos w/ denormalized fields; per-site depth flag; backfill title/extractor/native_id/type when NULL (#147) — **L** — #97 #110 #137 #83 #147
+- [x] **1.1** Stage-1 ingest endpoint + worker metadata push (replaces the PP POST); upsert `thing`+`rel`+`run`; stub videos w/ denormalized fields; per-site depth flag; backfill title/extractor/native_id/type when NULL (#147) — **L** — #97 #110 #137 #83 #147 *(`POST /jobs/{run_id}/result` + temporary `POST /jobs/` run-create; `xform.null_backfill`; worker client helpers in `run_bknd.py`. Deferred to later tasks: thin-runner conversion of `job_runner.py` (1.2); Fibonacci `try_on` backoff (1.4); per-site enrich depth (game-day, per design).)*
 - [ ] **1.2** Prioritized dispatch + thin runner: job-dispatch endpoint (§4.2 predicate + `FOR UPDATE SKIP LOCKED`, single top job); adapt `job_runner.py` to pull one job and loop; `run.success=NULL` in-progress marker — **L** — #115 #19 *(close #19 when this lands)*
 - [ ] **1.3** Stage-2 downloader: per-video path (`init_download(maybe_playlist=False)`; OI upload); worker push sets `best_oi`, `try_on=NULL` — **M** — #115
 - [ ] **1.4** `try_on` scheduler integration: Fibonacci + initial A3/B5/C8; failure backoff; live re-check edge case — **M** — *(#149 resolved: no guard)*
