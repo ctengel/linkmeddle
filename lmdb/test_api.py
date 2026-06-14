@@ -47,42 +47,63 @@ def _session() -> Session:
 # --- add-a-thing-by-URL ----------------------------------------------------------------
 
 def test_add_thing_defaults(client):
-    r = client.post("/things/", json={"url": "http://example/pl/1"})
+    r = client.post("/things/", json={"url": "http://example/pl/1", "bucket": "b1"})
     assert r.status_code == 201
     t = r.json()
     assert t["type"] == "playlist"          # unknown -> assume playlist
     assert t["human_rating"] == 1.0         # default B
     assert t["try_on"] == datetime.date.today().isoformat()
+    assert t["bucket"] == "b1"              # required, round-trips ([A10])
+    assert t["attrs"] is None               # no cookies/lpm_lib hints supplied
     assert t["extractor_key"] is None and t["native_id"] is None  # worker fills later
     assert t["id"] and t["created_dt"]
 
 
+def test_add_thing_bucket_required(client):
+    # bucket has no server default; omitting it is a validation error ([A10])
+    r = client.post("/things/", json={"url": "http://example/pl/nobucket"})
+    assert r.status_code == 422
+
+
+def test_add_thing_hints_stored_in_attrs(client):
+    # cookies/lpm_lib are optional soft hints stored in attrs ([A11])
+    r = client.post("/things/", json={"url": "http://example/pl/hints", "bucket": "b",
+                                      "cookies": True, "lpm_lib": "mylib"})
+    assert r.status_code == 201
+    assert r.json()["attrs"] == {"cookies": True, "lpm_lib": "mylib"}
+
+
 @pytest.mark.parametrize("grade,value", [("A", 2.0), ("B", 1.0), ("C", 0.0)])
 def test_add_thing_rating_override(client, grade, value):
-    r = client.post("/things/", json={"url": f"http://example/pl/{grade}", "rating": grade})
+    r = client.post("/things/", json={"url": f"http://example/pl/{grade}", "rating": grade,
+                                      "bucket": "b"})
     assert r.status_code == 201
     assert r.json()["human_rating"] == value
 
 
 def test_add_thing_type_override(client):
-    r = client.post("/things/", json={"url": "http://example/v/1", "type": "video"})
+    r = client.post("/things/", json={"url": "http://example/v/1", "type": "video",
+                                      "bucket": "b"})
     assert r.status_code == 201
     assert r.json()["type"] == "video"
 
 
 def test_add_thing_invalid_rating(client):
-    r = client.post("/things/", json={"url": "http://example/pl/x", "rating": "D"})
+    r = client.post("/things/", json={"url": "http://example/pl/x", "rating": "D",
+                                      "bucket": "b"})
     assert r.status_code == 422
 
 
 def test_add_thing_idempotent(client):
     # #142: duplicate URL must not create a second row
-    r1 = client.post("/things/", json={"url": "http://example/dup"})
+    r1 = client.post("/things/", json={"url": "http://example/dup", "bucket": "first"})
     assert r1.status_code == 201
-    r2 = client.post("/things/", json={"url": "http://example/dup", "rating": "A"})
+    r2 = client.post("/things/", json={"url": "http://example/dup", "rating": "A",
+                                       "bucket": "second"})
     assert r2.status_code == 200
     assert r2.json()["id"] == r1.json()["id"]
     assert r2.json()["human_rating"] == 1.0  # unchanged; existing returned as-is
+    assert r2.json()["bucket"] == "first"    # bucket is immutable ([A10])
 
 
 # --- list / search ---------------------------------------------------------------------
@@ -94,9 +115,10 @@ def test_list_things_empty(client):
 
 
 def test_list_filters(client):
-    client.post("/things/", json={"url": "http://example/p1", "type": "playlist"})
-    client.post("/things/", json={"url": "http://example/p2", "type": "playlist", "rating": "A"})
-    client.post("/things/", json={"url": "http://example/v1", "type": "video"})
+    client.post("/things/", json={"url": "http://example/p1", "type": "playlist", "bucket": "b"})
+    client.post("/things/", json={"url": "http://example/p2", "type": "playlist",
+                                  "rating": "A", "bucket": "b"})
+    client.post("/things/", json={"url": "http://example/v1", "type": "video", "bucket": "b"})
 
     assert len(client.get("/things/", params={"type": "playlist"}).json()) == 2
     assert len(client.get("/things/", params={"type": "video"}).json()) == 1
@@ -113,7 +135,7 @@ def test_extractor_native_lookup(client):
     # the V4 replacement for GET /videos/{extractor}/{id}; extractor/native are set by
     # the worker (Phase 1), so seed directly here.
     with _session() as s:
-        s.add(models.Thing(url="http://example/vid", type="video",
+        s.add(models.Thing(url="http://example/vid", type="video", bucket="testbucket",
                            extractor_key="youtube", native_id="abc123"))
         s.commit()
     r = client.get("/things/", params={"extractor": "YouTube", "native_id": "abc123"})
@@ -130,8 +152,8 @@ def test_get_thing_404(client):
 
 
 def test_get_thing_and_related(client):
-    pl = models.Thing(url="http://example/pl", type="playlist", title="PL")
-    vid = models.Thing(url="http://example/vid2", type="video", title="V")
+    pl = models.Thing(url="http://example/pl", type="playlist", title="PL", bucket="testbucket")
+    vid = models.Thing(url="http://example/vid2", type="video", title="V", bucket="testbucket")
     with _session() as s:
         s.add(pl)
         s.add(vid)
@@ -163,7 +185,7 @@ def test_get_thing_and_related(client):
 
 
 def test_thing_runs(client):
-    pl = models.Thing(url="http://example/plruns", type="playlist")
+    pl = models.Thing(url="http://example/plruns", type="playlist", bucket="testbucket")
     with _session() as s:
         s.add(pl)
         s.commit()
@@ -184,20 +206,20 @@ def test_thing_runs(client):
 # --- patch -----------------------------------------------------------------------------
 
 def test_patch_rating_grade(client):
-    tid = client.post("/things/", json={"url": "http://example/patch1"}).json()["id"]
+    tid = client.post("/things/", json={"url": "http://example/patch1", "bucket": "b"}).json()["id"]
     r = client.patch(f"/things/{tid}", json={"grade": "A"})
     assert r.status_code == 200
     assert r.json()["human_rating"] == 2.0
 
 
 def test_patch_rating_numeric(client):
-    tid = client.post("/things/", json={"url": "http://example/patch2"}).json()["id"]
+    tid = client.post("/things/", json={"url": "http://example/patch2", "bucket": "b"}).json()["id"]
     r = client.patch(f"/things/{tid}", json={"human_rating": -2.0})
     assert r.json()["human_rating"] == -2.0
 
 
 def test_patch_permafail_ack(client):
-    tid = client.post("/things/", json={"url": "http://example/patch3"}).json()["id"]
+    tid = client.post("/things/", json={"url": "http://example/patch3", "bucket": "b"}).json()["id"]
     r = client.patch(f"/things/{tid}", json={"try_on": None})
     assert r.status_code == 200
     assert r.json()["try_on"] is None
@@ -216,6 +238,7 @@ def _seed_thing(**kw) -> str:
     try_on is re-applied after insert so an explicit value (incl. None for permafail)
     overrides the column's server_default.
     """
+    kw.setdefault("bucket", "testbucket")  # bucket is NOT NULL ([A10])
     with _session() as s:
         t = models.Thing(**kw)
         s.add(t)
@@ -237,9 +260,14 @@ def _claim(client, worker=None):
     return r.json()
 
 
-def _claimed_run(client, url):
+def _claimed_run(client, url, bucket="plbucket", cookies=None, lpm_lib=None):
     """Add a B-rated playlist by url and claim it; returns (thing_id, run_id)."""
-    tid = client.post("/things/", json={"url": url}).json()["id"]
+    body = {"url": url, "bucket": bucket}
+    if cookies is not None:
+        body["cookies"] = cookies
+    if lpm_lib is not None:
+        body["lpm_lib"] = lpm_lib
+    tid = client.post("/things/", json=body).json()["id"]
     job = _claim(client)
     assert job and job["thing"]["id"] == tid and job["action"] == "pull"
     return tid, job["run_id"]
@@ -298,8 +326,20 @@ def test_claim_creates_in_progress_run(client):
     assert runs[0]["success"] is None and runs[0]["worker"] == "w1"   # in-progress marker
 
 
-def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest") -> dict:
-    """A JSON-ready LM-native PlaylistFull body for the ingest endpoint."""
+def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest",
+                per_video_uploader=False) -> dict:
+    """A JSON-ready LM-native PlaylistFull body for the ingest endpoint.
+
+    By default every entry shares the playlist's uploader (up1). With
+    `per_video_uploader`, each entry gets its own uploader (vup{i}) so the channel
+    fan-out (`channel_video`, 1.3c) can be exercised with distinct uploaders.
+    """
+    def vid_channel(i):
+        if per_video_uploader:
+            return models.UlChan(uploader_id=f"vup{i}", uploader=f"V Up {i}",
+                                 uploader_url=f"http://example/vup{i}")
+        return models.UlChan(uploader_id="up1", uploader="Up One",
+                             uploader_url="http://example/up1")
     pl = models.PlaylistFull(
         id=native, title="Ingest PL", webpage_url=url,
         modified_date=datetime.datetime(2026, 1, 31), playlist_count=n,
@@ -311,8 +351,7 @@ def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest") -> dict:
             thumbnail=f"http://example/v/{i}/t.jpg",
             upload_date=datetime.datetime(2026, 1, i + 1),
             extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
-            channel=models.UlChan(uploader_id="up1", uploader="Up One",
-                                  uploader_url="http://example/up1"),
+            channel=vid_channel(i),
         ) for i in range(n)],
     )
     return pl.model_dump(mode="json")
@@ -368,6 +407,66 @@ def test_ingest_fans_out(client):
     assert all(v["title"] for v in vids)
     assert all(v["try_on"] == datetime.date.today().isoformat() for v in vids)
 
+    # 1.3a: stubs inherit the dispatched playlist's bucket (immutable)
+    assert all(v["bucket"] == "plbucket" for v in vids)
+    chans = client.get("/things/", params={"type": "channel"}).json()
+    assert chans and all(c["bucket"] == "plbucket" for c in chans)
+
+
+def test_ingest_propagates_hints(client):
+    # 1.3b: a playlist's cookies/lpm_lib hints propagate onto its video stubs (attrs);
+    # channels do not carry the hints (bucket only).
+    url = "http://example/pl/hintprop"
+    tid, rid = _claimed_run(client, url, cookies=True, lpm_lib="lib7")
+    payload = _pl_payload(2, url=url, native="plhint")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    vids = client.get("/things/", params={"type": "video"}).json()
+    assert vids and all(v["attrs"] == {"cookies": True, "lpm_lib": "lib7"} for v in vids)
+    chans = client.get("/things/", params={"type": "channel"}).json()
+    assert chans and all(not c["attrs"] for c in chans)
+
+
+def test_ingest_per_video_uploader_channels(client):
+    # 1.3c: each distinct video uploader gets a type='channel' thing + channel_video edge;
+    # the playlist keeps its own channel_playlist parent.
+    url = "http://example/pl/chans"
+    tid, rid = _claimed_run(client, url)
+    payload = _pl_payload(3, url=url, native="plchans", per_video_uploader=True)
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    # 1 playlist uploader (up1) + 3 distinct video uploaders (vup0..2)
+    chans = client.get("/things/", params={"type": "channel"}).json()
+    assert len(chans) == 4
+
+    # the playlist's only parent edge is channel_playlist
+    pl_parents = [e for e in client.get(f"/things/{tid}", params={"include": "related"})
+                  .json()["related"] if e["direction"] == "parent"]
+    assert len(pl_parents) == 1 and pl_parents[0]["rel_type"] == "channel_playlist"
+
+    # every video has exactly one channel_video parent (+ its playlist_video parent)
+    for vid in client.get("/things/", params={"type": "video"}).json():
+        parents = client.get(f"/things/{vid['id']}/related",
+                             params={"direction": "parent"}).json()
+        rel_types = sorted(e["rel_type"] for e in parents)
+        assert rel_types == ["channel_video", "playlist_video"]
+        chan_edge = next(e for e in parents if e["rel_type"] == "channel_video")
+        assert chan_edge["thing"]["type"] == "channel"
+
+
+def test_ingest_shared_uploader_one_channel(client):
+    # 1.3c: same-uploader videos (default payload: all up1) reuse a single channel node,
+    # which carries both channel_playlist (to the pl) and channel_video (to each vid) edges.
+    url = "http://example/pl/shared"
+    tid, rid = _claimed_run(client, url)
+    payload = _pl_payload(3, url=url, native="plshared")  # all share up1 = pl channel
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    chans = client.get("/things/", params={"type": "channel"}).json()
+    assert len(chans) == 1
+    children = client.get(f"/things/{chans[0]['id']}/related",
+                          params={"direction": "child"}).json()
+    rel_types = sorted(e["rel_type"] for e in children)
+    assert rel_types == ["channel_playlist", "channel_video", "channel_video", "channel_video"]
+
 
 def test_ingest_idempotent(client):
     url = "http://example/pl/idem"
@@ -383,6 +482,20 @@ def test_ingest_idempotent(client):
     kids = [e for e in client.get(f"/things/{tid}", params={"include": "related"}).json()
             ["related"] if e["direction"] == "child"]
     assert len(kids) == 3                                                       # no dup rels
+
+
+def test_ingest_preserves_existing_bucket(client):
+    # 1.3a: a thing added directly keeps its own bucket even when a later playlist pull
+    # (carrying a different inherited bucket) re-discovers it — bucket is immutable.
+    client.post("/things/", json={"url": "http://example/v/0", "type": "video",
+                                  "bucket": "vidbucket"})
+    url = "http://example/pl/preserve"
+    tid, rid = _claimed_run(client, url, bucket="plbucket")
+    payload = _pl_payload(3, url=url, native="plpreserve")  # entries include .../v/0..2
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    assert by_url["http://example/v/0"]["bucket"] == "vidbucket"   # kept, not overwritten
+    assert by_url["http://example/v/1"]["bucket"] == "plbucket"    # newly inherited
 
 
 def test_ingest_failure_records_only(client):

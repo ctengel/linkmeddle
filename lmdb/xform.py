@@ -197,28 +197,72 @@ class ThingGraph(NamedTuple):
     rels: list[models.Rel]
 
 
-def pl_full2things(pl: models.PlaylistFull) -> ThingGraph:
+# Soft `attrs` hints (§2.1, [A11]) propagated playlist -> video on fan-out. `cookies` is
+# copied whenever the parent has it set; `lpm_lib` only when present — both reduce to
+# "copy the key if the parent carries it" since we only ever propagate one-way (downward).
+_PROPAGATE_HINTS = ("cookies", "lpm_lib")
+
+
+def propagate_attrs(parent_attrs: Optional[dict]) -> Optional[dict]:
+    """The subset of a parent thing's `attrs` inherited by its child stubs (§2.1, [A11])."""
+    if not parent_attrs:
+        return None
+    out = {k: parent_attrs[k] for k in _PROPAGATE_HINTS if k in parent_attrs}
+    return out or None
+
+
+def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
+                   parent_attrs: Optional[dict] = None) -> ThingGraph:
     """Convert an LM-native playlist into its thing/rel graph.
 
-    Produces the playlist thing, a stub thing per entry, the playlist's own channel
-    thing, and the edges between them (`playlist_video`, `channel_playlist`). The
-    returned objects carry client-side UUIDs, so the edges already reference real ids.
+    Produces the playlist thing, a stub thing per entry, a `type='channel'` thing per
+    distinct uploader (the playlist's and each video's — V4's `pseudo_channel`, [A11]),
+    and the edges between them: `playlist_video`, `channel_playlist` (channel->playlist),
+    and `channel_video` (channel->video, so a video is reachable from its own uploader).
+    The returned objects carry client-side UUIDs, so the edges already reference real ids.
+
+    Every constructed thing inherits the parent playlist's `bucket` (required, immutable,
+    [A10]); video stubs also inherit the parent's propagated soft hints
+    (`attrs.cookies`/`attrs.lpm_lib`, §2.1). The caller supplies `bucket`/`parent_attrs`
+    from the dispatched playlist thing; this stays a pure constructor (no DB).
     """
+    hints = propagate_attrs(parent_attrs)
     pl_thing = thing_from_pl(pl)
+    pl_thing.bucket = bucket
     videos: list[models.Thing] = []
-    channels: list[models.Thing] = []
     rels: list[models.Rel] = []
+    # One channel node per uploader URL, shared across the playlist + its videos.
+    channels_by_url: dict[str, models.Thing] = {}
+
+    def channel_for(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
+        url = chan_url(chan)
+        if not url:
+            return None
+        existing = channels_by_url.get(url)
+        if existing is None:
+            existing = thing_from_chan(chan, extractor_key)
+            existing.bucket = bucket
+            channels_by_url[url] = existing
+        return existing
+
+    pl_chan = channel_for(pl.channel, pl_thing.extractor_key)
+    if pl_chan is not None:
+        rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id,
+                               type='channel_playlist'))
     for vid in pl.entries:
         vid_thing = thing_from_vid(vid)
+        vid_thing.bucket = bucket
+        if hints is not None:
+            vid_thing.attrs = dict(hints)
         videos.append(vid_thing)
         rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id,
                                type='playlist_video'))
-    chan = thing_from_chan(pl.channel, pl_thing.extractor_key)
-    if chan is not None:
-        channels.append(chan)
-        rels.append(models.Rel(parent=chan.id, child=pl_thing.id,
-                               type='channel_playlist'))
-    return ThingGraph(playlist=pl_thing, videos=videos, channels=channels, rels=rels)
+        vid_chan = channel_for(vid.channel, _norm_extractor(vid.extractor))
+        if vid_chan is not None:
+            rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id,
+                                   type='channel_video'))
+    return ThingGraph(playlist=pl_thing, videos=videos,
+                      channels=list(channels_by_url.values()), rels=rels)
 
 
 def reconcile_count(pl: models.PlaylistFull) -> int:

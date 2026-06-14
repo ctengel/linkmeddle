@@ -97,8 +97,10 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     """Add a thing by URL (the human entry point).
 
     Stores the URL with a default rating of B (override A/C); `type` defaults to
-    'playlist' ("unknown -> assume playlist"). extractor_key/native_id are filled in
-    later by the worker. Idempotent on URL (returns the existing thing with 200).
+    'playlist' ("unknown -> assume playlist"). `bucket` (OI storage home) is required —
+    no server default ([A10]). Optional `cookies`/`lpm_lib` are stored as soft hints in
+    `attrs` ([A11]). extractor_key/native_id are filled in later by the worker. Idempotent
+    on URL (returns the existing thing with 200, bucket unchanged — bucket is immutable).
     """
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
@@ -108,7 +110,13 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     if grade not in ADD_GRADES:
         raise HTTPException(status_code=422,
                             detail=f"rating must be one of {sorted(ADD_GRADES)} at add time")
-    thing = Thing(url=item.url, type=item.type, human_rating=GRADE_VALUES[grade])
+    attrs: dict = {}
+    if item.cookies is not None:
+        attrs["cookies"] = item.cookies
+    if item.lpm_lib is not None:
+        attrs["lpm_lib"] = item.lpm_lib
+    thing = Thing(url=item.url, type=item.type, human_rating=GRADE_VALUES[grade],
+                  bucket=item.bucket, attrs=attrs or None)
     session.add(thing)
     try:
         session.commit()
@@ -331,7 +339,10 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     if item.playlist is None:
         raise HTTPException(status_code=422,
                             detail="playlist is required on a successful playlist run")
-    graph = xform.pl_full2things(item.playlist)
+    # Stubs inherit the dispatched playlist thing's bucket (immutable, [A10]) and its
+    # propagated soft hints (attrs.cookies/lpm_lib -> video stubs, [A11]).
+    graph = xform.pl_full2things(item.playlist, bucket=pl_thing.bucket,
+                                 parent_attrs=pl_thing.attrs)
 
     run.entries_hash = xform.pl_hash(item.playlist.entries)
     run.playlist_count = xform.reconcile_count(item.playlist)

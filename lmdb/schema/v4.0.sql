@@ -37,7 +37,7 @@ CREATE INDEX thing_try_on ON thing (type, try_on);   -- worker selection
 CREATE TABLE rel (
   parent     uuid NOT NULL REFERENCES thing(id),
   child      uuid NOT NULL REFERENCES thing(id),
-  type       text NOT NULL,         -- 'playlist_video' | 'channel_playlist' | ...
+  type       text NOT NULL,         -- 'playlist_video' | 'channel_playlist' | 'channel_video' | ...
   PRIMARY KEY (parent, child, type)
 );
 CREATE INDEX rel_child ON rel (child);

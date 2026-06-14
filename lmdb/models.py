@@ -179,6 +179,7 @@ class Thing(SQLModel, table=True):
     try_on: Optional[datetime.date] = Field(
         default_factory=lambda: naive_utcnow().date(),
         sa_column=Column(sa.Date, nullable=True, server_default=_UTC_TODAY))
+    bucket: str = Field(sa_column=Column(sa.Text, nullable=False))  # OI bucket; required, inherited, immutable [A10]
     best_oi: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     attrs: Optional[dict] = Field(
         default=None, sa_column=Column(postgresql.JSONB, nullable=True))
@@ -246,6 +247,7 @@ class ThingRead(SQLModel):
     last_success_dt: Optional[datetime.datetime] = None
     last_failure_dt: Optional[datetime.datetime] = None
     try_on: Optional[datetime.date] = None
+    bucket: str
     best_oi: Optional[str] = None
     attrs: Optional[dict] = None
     created_dt: Optional[datetime.datetime] = None
@@ -280,8 +282,11 @@ class RunRead(SQLModel):
 class ThingAdd(BaseModel):
     """add-a-thing-by-URL request (the human entry point)."""
     url: str
+    bucket: str              # OI storage bucket; required, no server default [A10]
     type: str = 'playlist'   # "unknown -> assume playlist"; overridable
     rating: Optional[str] = None  # grade letter A/B/C (default B); D/F not allowed at add
+    cookies: Optional[bool] = None  # soft hint -> attrs.cookies (suggest cookies) [A11]
+    lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (optional library tag) [A11]
 
 
 class ThingPatch(BaseModel):
