@@ -52,7 +52,7 @@ def test_add_thing_defaults(client):
     t = r.json()
     assert t["type"] == "playlist"          # unknown -> assume playlist
     assert t["human_rating"] == 1.0         # default B
-    assert t["try_on"] == datetime.date.today().isoformat()
+    assert t["try_on"] == models.naive_utcnow().date().isoformat()  # app is UTC, not local
     assert t["bucket"] == "b1"              # required, round-trips ([A10])
     assert t["attrs"] is None               # no cookies/lpm_lib hints supplied
     assert t["extractor_key"] is None and t["native_id"] is None  # worker fills later
@@ -273,7 +273,7 @@ def _claimed_run(client, url, bucket="plbucket", cookies=None, lpm_lib=None):
     return tid, job["run_id"]
 
 
-_TODAY = datetime.date.today()
+_TODAY = models.naive_utcnow().date()   # UTC, matching the app's date convention (not local)
 _FUTURE = _TODAY + datetime.timedelta(days=5)
 
 
@@ -303,7 +303,7 @@ def test_claim_video_when_no_playlist(client):
 def test_claim_skips_ineligible_videos(client):
     _seed_thing(type="video", url="http://e/vc", human_rating=0.0, try_on=_TODAY)   # C < B
     _seed_thing(type="video", url="http://e/vacq", human_rating=2.0, try_on=_TODAY,
-                best_oi="oi:1")                                                     # acquired
+                best_oi=uuid.uuid4())                                               # acquired
     _seed_thing(type="video", url="http://e/vfut", human_rating=2.0, try_on=_FUTURE)  # not due
     assert _claim(client) is None
 
@@ -405,7 +405,7 @@ def test_ingest_fans_out(client):
     vids = client.get("/things/", params={"type": "video"}).json()
     assert len(vids) == 3
     assert all(v["title"] for v in vids)
-    assert all(v["try_on"] == datetime.date.today().isoformat() for v in vids)
+    assert all(v["try_on"] == models.naive_utcnow().date().isoformat() for v in vids)
 
     # 1.3a: stubs inherit the dispatched playlist's bucket (immutable)
     assert all(v["bucket"] == "plbucket" for v in vids)
@@ -516,3 +516,62 @@ def test_ingest_success_requires_playlist(client):
 def test_ingest_run_404(client):
     r = client.post(f"/jobs/{uuid.uuid4()}/result", json={"success": False})
     assert r.status_code == 404
+
+
+# --- jobs: cookies suggestion + Stage-2 download result (Task 1.3) ----------------------
+
+def test_claim_cookies_default_false(client):
+    _seed_thing(type="playlist", url="http://e/nocook", human_rating=1.0, try_on=_TODAY)
+    assert _claim(client)["cookies"] is False
+
+
+def test_claim_cookies_hint(client):
+    # attrs.cookies hint -> the dispatch suggests cookies (hint-only in 1.3)
+    _seed_thing(type="playlist", url="http://e/cook", human_rating=1.0, try_on=_TODAY,
+                attrs={"cookies": True})
+    assert _claim(client)["cookies"] is True
+
+
+def _claimed_download(client, **kw):
+    """Seed a B-rated due video, claim it; returns (thing_id, run_id)."""
+    kw.setdefault("human_rating", 1.0)
+    kw.setdefault("try_on", _TODAY)
+    v = _seed_thing(type="video", **kw)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["action"] == "download"
+    return v, job["run_id"]
+
+
+def test_download_result_sets_best_oi(client):
+    oi = str(uuid.uuid4())
+    v, rid = _claimed_download(client, url="http://e/dl")  # no extractor/native yet
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True, "best_oi": oi,
+                          "extractor_key": "youtube", "native_id": "vid42",
+                          "input_json": {"cookies": False}})
+    assert r.status_code == 200
+    assert r.json()["input_json"] == {"cookies": False}     # per-run decision recorded
+    t = client.get(f"/things/{v}").json()
+    assert t["best_oi"] == oi                                # OI file uuid stored
+    assert t["extractor_key"] == "youtube" and t["native_id"] == "vid42"  # identity backfilled
+    assert t["try_on"] is None and t["last_success_dt"]      # acquired; never re-fetch
+    assert t["last_failure_dt"] is None
+
+
+def test_download_result_backfill_no_overwrite(client):
+    # identity backfill is NULL-only: an already-known extractor/native is not overwritten
+    v, rid = _claimed_download(client, url="http://e/dl2",
+                               extractor_key="vimeo", native_id="orig")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True, "best_oi": str(uuid.uuid4()),
+                      "extractor_key": "youtube", "native_id": "new"})
+    t = client.get(f"/things/{v}").json()
+    assert t["extractor_key"] == "vimeo" and t["native_id"] == "orig"
+
+
+def test_download_result_failure(client):
+    v, rid = _claimed_download(client, url="http://e/dlf")
+    r = client.post(f"/jobs/{rid}/result", json={"success": False})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{v}").json()
+    assert t["last_failure_dt"] and t["best_oi"] is None

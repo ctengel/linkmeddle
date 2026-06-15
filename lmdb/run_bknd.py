@@ -30,18 +30,29 @@ def _playlist_full_json(pl: models.PlaylistFull) -> dict:
     return body
 
 
-def post_run_result(api_base: str, run_id: str, info: dict | None,
-                    success: bool = True, worker: str | None = None) -> dict:
-    """Push a run's result to POST /jobs/{run_id}/result (replaces the in-plugin POST).
+def post_result(api_base: str, run_id: str, info: dict | None, *,
+                action: str, use_cookies: bool = False,
+                worker: str | None = None) -> dict:
+    """Push a run's result to POST /jobs/{run_id}/result (one path for both job kinds).
 
-    `info` is a raw yt-dlp playlist info dict; it is converted to the LM-native payload
-    here (DLP -> PlaylistFull) and also sent as `data_json` (raw yt-dlp output).
+    `info` is the sanitized yt-dlp output, or None on failure (-> success=False). For a
+    'pull' it is converted DLP -> PlaylistFull (the Stage-1 fan-out body); for a 'download'
+    the OI file UUID is read straight from info['oi_uuid'] (set by ObjIdxUploadPP) and the
+    extractor/id are sent for identity backfill. `data_json` carries the raw output;
+    `input_json` records the per-run cookies decision.
     """
-    body: dict = {'success': success, 'worker': worker}
+    body: dict = {'success': info is not None, 'worker': worker,
+                  'input_json': {'cookies': use_cookies}}
     if info is not None:
-        pl = xform.pl_dlp2lm(models.PlaylistDLP.model_validate(info))
-        body['playlist'] = _playlist_full_json(pl)
         body['data_json'] = info
+        if action == 'pull':
+            pl = xform.pl_dlp2lm(models.PlaylistDLP.model_validate(info))
+            body['playlist'] = _playlist_full_json(pl)
+        elif action == 'download':
+            oi_uuid = info.get('oi_uuid')
+            body['best_oi'] = str(oi_uuid) if oi_uuid else None
+            body['extractor_key'] = (info.get('extractor') or '').lower() or None
+            body['native_id'] = info.get('id')
     resp = requests.post(f"{api_base.rstrip('/')}/jobs/{run_id}/result",
                          json=body, timeout=RESULT_TIMEOUT)
     resp.raise_for_status()
@@ -101,20 +112,43 @@ def get_cookies(url: str) -> str:
     resp.raise_for_status()
     return resp.json()['jar']['cookies']
 
-def pull_playlist(url: str, use_cookies: bool = False) -> dict:
-    """Stage-1 metadata-only playlist pull (§3.3): extract info, download nothing.
+def extract_info(url: str, *, download: bool,
+                 oibucket: str | None = None,
+                 lpmlib: str | None = None,
+                 use_cookies: bool = False) -> Optional[dict]:
+    """Unified yt-dlp invocation for both fan-out stages — the worker's one code path.
 
-    Returns the sanitized yt-dlp info dict for the worker to push via `post_run_result`
-    (which converts it DLP -> PlaylistFull). No OI upload and no in-plugin POST — the
-    worker owns the metadata push now. Per-site enrich depth stays a game-day call.
+    download=False -> Stage-1 metadata-only playlist pull (§3.3); download=True -> Stage-2
+    real video download with OI upload (the `ObjIdxUploadPP` sets info['oi_uuid'], which the
+    worker reads back as `best_oi` — no separate OI lookup). Returns the sanitized info dict
+    on success, or None on a caught YoutubeDLError (the worker treats None as a failed run).
+    No `LinkMeddlePlaylistPP` — the worker owns the metadata push (`post_result`).
     """
+    if lpmlib:
+        assert oibucket, "oibucket must be set to use lpmlib"
     cookies = None
     if use_cookies:
         assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
         cookies = io.StringIO(get_cookies(url))
-    with _ydl(cookies=cookies) as ydl:
-        info = ydl.extract_info(url, download=False)
+    download_archive = None
+    if download:
+        assert os.getenv("OBJIDX_URL"), "OBJIDX_URL must be set to download"
+        assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to download"
+        download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
+    with _ydl(download_archive=download_archive, cookies=cookies) as ydl:
+        try:
+            if download and oibucket:
+                ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
+            info = ydl.extract_info(url, download=download)
+        except YoutubeDLError as exc:
+            warnings.warn(f"yt-dlp error for {url}: {exc}")
+            return None
         return ydl.sanitize_info(info)
+
+
+def pull_playlist(url: str, use_cookies: bool = False) -> Optional[dict]:
+    """Stage-1 metadata-only playlist pull — thin wrapper over `extract_info`."""
+    return extract_info(url, download=False, use_cookies=use_cookies)
 
 
 def init_download(url: str,

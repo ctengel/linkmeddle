@@ -11,7 +11,6 @@ import os
 import socket
 import warnings
 import requests
-from yt_dlp.utils import YoutubeDLError
 from . import run_bknd
 
 LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
@@ -30,24 +29,26 @@ def claim_job(api_base: str, worker: str) -> dict | None:
 
 
 def run_job(api_base: str, job: dict, worker: str) -> None:
-    """Run one claimed job and report its result back to the API."""
+    """Run one claimed job and report its result — one common path for both job kinds.
+
+    Stage-1 'pull' (metadata only) and Stage-2 'download' (real download + OI upload) differ
+    only in a few parameters: `download`, and the download-only `oibucket`/`lpmlib`. `cookies`
+    is the server's per-job suggestion (§4.7). A failed run (extract returns None) posts
+    success=False — fail-whole, no partial resume (§4.7).
+    """
     run_id, thing, action = job["run_id"], job["thing"], job["action"]
-    if action == "pull":
-        # Stage-1 playlist metadata pull; fail whole on any error (§4.7).
-        try:
-            info = run_bknd.pull_playlist(thing["url"])
-        except YoutubeDLError as exc:
-            warnings.warn(f"Stage-1 pull failed for {thing['url']}: {exc}")
-            run_bknd.post_run_result(api_base, run_id, None, success=False, worker=worker)
-            return
-        run_bknd.post_run_result(api_base, run_id, info, success=True, worker=worker)
-    elif action == "download":
-        # TODO(1.3): Stage-2 per-video download (init_download(maybe_playlist=False) + OI
-        # upload; result sets best_oi, try_on=NULL). Until then, don't crash the loop.
-        warnings.warn(f"Stage-2 download not implemented yet (1.3); skipping {thing['url']}")
-        run_bknd.post_run_result(api_base, run_id, None, success=False, worker=worker)
-    else:
+    if action not in ("pull", "download"):
         warnings.warn(f"Unknown job action {action!r}; skipping {thing.get('url')}")
+        return
+    download = action == "download"
+    cookies = job.get("cookies", False)
+    info = run_bknd.extract_info(
+        thing["url"], download=download,
+        oibucket=thing["bucket"] if download else None,
+        lpmlib=(thing.get("attrs") or {}).get("lpm_lib") if download else None,
+        use_cookies=cookies)
+    run_bknd.post_result(api_base, run_id, info, action=action,
+                         use_cookies=cookies, worker=worker)
 
 
 def main() -> int:

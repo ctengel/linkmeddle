@@ -180,7 +180,8 @@ class Thing(SQLModel, table=True):
         default_factory=lambda: naive_utcnow().date(),
         sa_column=Column(sa.Date, nullable=True, server_default=_UTC_TODAY))
     bucket: str = Field(sa_column=Column(sa.Text, nullable=False))  # OI bucket; required, inherited, immutable [A10]
-    best_oi: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
+    best_oi: Optional[uuid.UUID] = Field(  # OI file UUID; set by worker from info['oi_uuid'] [A5-A]
+        default=None, sa_column=Column(postgresql.UUID(as_uuid=True), nullable=True))
     attrs: Optional[dict] = Field(
         default=None, sa_column=Column(postgresql.JSONB, nullable=True))
     created_dt: Optional[datetime.datetime] = Field(
@@ -248,7 +249,7 @@ class ThingRead(SQLModel):
     last_failure_dt: Optional[datetime.datetime] = None
     try_on: Optional[datetime.date] = None
     bucket: str
-    best_oi: Optional[str] = None
+    best_oi: Optional[uuid.UUID] = None
     attrs: Optional[dict] = None
     created_dt: Optional[datetime.datetime] = None
 
@@ -307,16 +308,22 @@ class JobClaim(BaseModel):
     run_id: uuid.UUID
     thing: ThingRead
     action: str          # 'pull' (Stage-1 playlist) | 'download' (Stage-2 video)
+    cookies: bool = False  # per-job cookies suggestion the worker acts on (hint-only in 4.0) [A11]
 
 
 class RunResultIn(BaseModel):
     """Worker-owned result push for a run (the V4 rewrite of V3's POST /playlist-run).
 
-    `playlist` is the LM-native pull result (required on a successful playlist run);
-    `data_json` carries the raw yt-dlp output to store on the run. (Stage-2 single-video
-    result shape is Task 1.3.)
+    Stage-1 (playlist pull): `playlist` is the LM-native pull result (required on success).
+    Stage-2 (video download): `best_oi` is the OI file UUID from the upload (info['oi_uuid']),
+    with `extractor_key`/`native_id` for identity backfill. `data_json` carries the raw yt-dlp
+    output; `input_json` records the per-run decisions (e.g. whether cookies were used).
     """
     playlist: Optional[PlaylistFull] = None
+    best_oi: Optional[uuid.UUID] = None
+    extractor_key: Optional[str] = None
+    native_id: Optional[str] = None
     success: bool = True
     data_json: Optional[dict] = None
+    input_json: Optional[dict] = None
     worker: Optional[str] = None

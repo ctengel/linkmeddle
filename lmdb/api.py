@@ -300,8 +300,10 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     session.add(run)
     session.commit()
     session.refresh(run)
+    # Per-job cookies suggestion: hint-only in 4.0 (failure-escalation is Task 1.4) [A11].
+    cookies = bool((thing.attrs or {}).get("cookies"))
     return JobClaim(run_id=run.id, thing=ThingRead.model_validate(thing),
-                    action=ACTION_BY_TYPE[thing.type])
+                    action=ACTION_BY_TYPE[thing.type], cookies=cookies)
 
 
 @app.post("/jobs/{run_id}/result", response_model=RunRead)
@@ -309,11 +311,12 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
                   session: Session = Depends(get_session)):
     """Stage-1 ingest: record a run's result and upsert the thing/rel graph it found.
 
-    The V4 rewrite of V3's POST /playlist-run. On success, fans the playlist pull out into
-    a stub `thing` per entry (+ the playlist's channel) and the `rel` edges between them
-    (#137), backfilling NULL fields on things we already knew (#147). On failure, records
-    the failure only (C8: a metadata-only run fails whole-playlist). The Fibonacci `try_on`
-    backoff is Task 1.4.
+    The V4 rewrite of V3's POST /playlist-run, one endpoint for both job kinds. A Stage-2
+    *video* download result sets `best_oi` (the OI file UUID), backfills NULL identity
+    (extractor_key/native_id) from the download, and marks the thing acquired (`try_on=NULL`).
+    A Stage-1 *playlist* pull, on success, fans out into a stub `thing` per entry (+ channels)
+    and the `rel` edges (#137), backfilling NULL fields we already knew (#147); on failure it
+    records the failure only (C8). The Fibonacci `try_on` backoff is Task 1.4.
     """
     run = session.get(Run, run_id)
     if run is None:
@@ -325,8 +328,27 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         run.worker = item.worker
     if item.data_json is not None:
         run.data_json = item.data_json
+    if item.input_json is not None:  # per-run decisions (e.g. cookies used), §2.3
+        run.input_json = item.input_json
 
     pl_thing = session.get(Thing, run.thing_id)
+
+    # Stage-2 (video download) result — distinct from the Stage-1 playlist fan-out below.
+    if pl_thing is not None and pl_thing.type == "video":
+        if item.success:
+            incoming = Thing(type="video", bucket=pl_thing.bucket,
+                             extractor_key=item.extractor_key, native_id=item.native_id)
+            _apply_backfill(session, pl_thing, incoming)  # NULL-only identity backfill (#147)
+            pl_thing.best_oi = item.best_oi
+            pl_thing.last_success_dt = now
+            pl_thing.last_failure_dt = None
+            pl_thing.try_on = None       # acquired; never re-fetch (§2.5)
+        else:
+            pl_thing.last_failure_dt = now   # backoff date is Task 1.4
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return _run_read(run)
 
     if not item.success:
         if pl_thing is not None:
