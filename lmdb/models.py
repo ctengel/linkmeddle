@@ -292,7 +292,7 @@ class ThingAdd(BaseModel):
 
 class ThingPatch(BaseModel):
     """PATCH a thing: set rating, or acknowledge permafail (try_on=null)."""
-    human_rating: Optional[float] = None
+    human_rating: Optional[float] = Field(default=None, ge=-2, le=2)  # -2..+2 (§2.4)
     grade: Optional[str] = None          # grade letter alternative to human_rating
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
 

@@ -65,6 +65,12 @@ def _effective_rating(thing: Thing) -> float:
     return 0.0
 
 
+def _is_eligible(thing_type: str, rating: float) -> bool:
+    """Does `rating` clear the run-eligibility floor for this thing type (§4.5)?"""
+    floor = 0.5 if thing_type == "video" else -0.5   # video=B, playlist/other=C
+    return rating >= floor
+
+
 def _set_try_on(session: Session, thing: Thing) -> None:
     """Advance thing.try_on from its run history via the Fibonacci backoff (§4.4, Task 1.4).
 
@@ -220,11 +226,14 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
                 session: Session = Depends(get_session)):
     """Update a thing: set the rating (incl. D/F), or ack permafail (try_on=null).
 
-    (The 'raise-to-eligible -> try_on=today' side-effect is Task 2.1; title backfill is
-    Task 1.1.)
+    Raising the human rating to an eligible level re-opens the date gate
+    (`try_on = today`, guarded by `best_oi IS NULL`) — resurrecting a permafail or pulling
+    a future-scheduled thing forward (§2.5, Task 2.1). An explicit `try_on` in the request
+    wins (user intent). (Title backfill is Task 1.1.)
     """
     thing = get_thing_or_404(session, thing_id)
     data = item.model_dump(exclude_unset=True)
+    old_rating = _effective_rating(thing)
     grade = data.pop("grade", None)
     if grade is not None:
         if grade.upper() not in GRADE_VALUES:
@@ -235,6 +244,11 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
         thing.human_rating = data["human_rating"]
     if "try_on" in data:  # explicit; null acknowledges permafail
         thing.try_on = data["try_on"]
+    else:  # raise-to-eligible side-effect (§2.5) — explicit try_on overrides this
+        new_rating = _effective_rating(thing)
+        if (thing.best_oi is None and new_rating > old_rating
+                and _is_eligible(thing.type, new_rating)):
+            thing.try_on = _today()
     session.add(thing)
     session.commit()
     session.refresh(thing)

@@ -231,6 +231,50 @@ def test_patch_404(client):
     assert r.status_code == 404
 
 
+# --- patch: raise-to-eligible try_on side-effect (Task 2.1, §2.5) ----------------------
+
+def test_patch_raise_resurrects_permafail(client):
+    tid = _seed_thing(type="playlist", url="http://e/raise-perma",
+                      human_rating=-1.0, try_on=None)  # D, permafail-acked
+    r = client.patch(f"/things/{tid}", json={"grade": "B"})
+    assert r.status_code == 200
+    assert r.json()["try_on"] == _TODAY.isoformat()
+
+
+def test_patch_raise_pulls_future_forward(client):
+    tid = _seed_thing(type="playlist", url="http://e/raise-future",
+                      human_rating=0.0, try_on=_FUTURE)  # C, scheduled ahead
+    r = client.patch(f"/things/{tid}", json={"grade": "A"})
+    assert r.json()["try_on"] == _TODAY.isoformat()
+
+
+def test_patch_raise_skips_acquired(client):
+    tid = _seed_thing(type="video", url="http://e/raise-acq", human_rating=1.0,
+                      try_on=None, best_oi=uuid.uuid4())  # already acquired
+    r = client.patch(f"/things/{tid}", json={"grade": "A"})
+    assert r.json()["try_on"] is None   # best_oi guard: never disturbed
+
+
+def test_patch_downgrade_does_not_pull_forward(client):
+    tid = _seed_thing(type="playlist", url="http://e/downgrade",
+                      human_rating=2.0, try_on=_FUTURE)  # A, scheduled ahead
+    r = client.patch(f"/things/{tid}", json={"grade": "C"})  # still eligible, but a drop
+    assert r.json()["try_on"] == _FUTURE.isoformat()
+
+
+def test_patch_raise_to_still_ineligible(client):
+    tid = _seed_thing(type="video", url="http://e/still-inelig",
+                      human_rating=-1.0, try_on=None)  # D video
+    r = client.patch(f"/things/{tid}", json={"grade": "C"})  # 0.0 < 0.5 video floor
+    assert r.json()["try_on"] is None
+
+
+def test_patch_human_rating_out_of_range(client):
+    tid = _seed_thing(type="playlist", url="http://e/oor", human_rating=0.0)
+    r = client.patch(f"/things/{tid}", json={"human_rating": 3.0})
+    assert r.status_code == 422
+
+
 # --- jobs: dispatch (Task 1.2) + Stage-1 ingest (Task 1.1) ------------------------------
 
 def _seed_thing(**kw) -> str:
