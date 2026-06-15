@@ -324,3 +324,104 @@ def runs_differ(prev: models.Run, new: models.Run) -> bool:
     *successful* run's. Caller is responsible for passing that prior successful run.
     """
     return prev.entries_hash != new.entries_hash
+
+
+# --- V4 try_on backoff (Task 1.4) ------------------------------------------------------
+# Reworks V3's add_new_run/next_run/rec_adjust_freq onto the V4 `run` table: there is no
+# stored freq_days, so the "current interval" is derived from run.starttime gaps and the
+# result is written to thing.try_on (§4.4, §2.5). Pure: operates on `run` rows, no DB.
+
+INITIAL_INTERVAL = {"A": 3, "B": 5, "C": 8}   # 2nd-run interval by rating band (§4.4)
+
+
+def initial_interval(rating: float) -> int:
+    """Initial backoff interval (days) for a rating, by grade band (§2.4/§4.4)."""
+    if rating >= 1.5:           # A band
+        return INITIAL_INTERVAL["A"]
+    if rating >= 0.5:           # B band
+        return INITIAL_INTERVAL["B"]
+    return INITIAL_INTERVAL["C"]   # C and below
+
+
+class _RunStat(NamedTuple):
+    """A completed run reduced to the quantities the backoff needs."""
+    success: bool
+    different: bool          # membership changed vs the most-recent prior successful run
+    interval: int            # day-gap from the immediately-prior completed run (0 for the first)
+    date: datetime.date      # run.starttime date
+
+
+def _run_stats(runs: list[models.Run]) -> list[_RunStat]:
+    """Reduce a thing's runs to ordered `_RunStat`s (drops in-progress success=None runs)."""
+    done = sorted((r for r in runs if r.success is not None), key=lambda r: r.starttime)
+    out: list[_RunStat] = []
+    prev_date: Optional[datetime.date] = None
+    prev_success_hash: Optional[bytes] = None
+    for run in done:
+        run_date = run.starttime.date()
+        interval = 0 if prev_date is None else (run_date - prev_date).days
+        # First run counts as "different" (no prior successful run to compare, §2.3).
+        different = True if prev_success_hash is None else run.entries_hash != prev_success_hash
+        out.append(_RunStat(success=bool(run.success), different=different,
+                            interval=interval, date=run_date))
+        prev_date = run_date
+        if run.success and run.entries_hash is not None:
+            prev_success_hash = run.entries_hash
+    return out
+
+
+def _current_interval(stats: list[_RunStat]) -> Optional[int]:
+    """Day-gap between the last two successful runs (the §4.4 'current interval'); None if <2."""
+    succ = [s.date for s in stats if s.success]
+    if len(succ) < 2:
+        return None
+    return (succ[-1] - succ[-2]).days
+
+
+def _rec_adjust(window: list[_RunStat]) -> Optional[bool]:
+    """Recommend backoff direction over a recent window (port of V3 rec_adjust_freq).
+
+    True = back off (up): everything failed, or nothing changed. False = speed up (down):
+    every run found new content. None = keep the current interval.
+    """
+    if all(not s.success for s in window):
+        return True
+    if all(not s.different for s in window):
+        return True
+    if all(s.different for s in window):
+        return False
+    return None
+
+
+def next_try_on(rating: float, runs: list[models.Run],
+                today: Optional[datetime.date] = None) -> datetime.date:
+    """The next `try_on` date for a thing, from its run history (§4.4; reworked add_new_run).
+
+    No `freq_days`: the interval is derived from `run.starttime` gaps. 2nd run uses the
+    rating's initial interval; subsequent successful runs adapt it via Fibonacci (back off
+    when nothing changes / all fail, speed up when every run finds new content). A failure
+    backs off short — tomorrow after a success, else a Fibonacci step up (§2.5).
+    """
+    if today is None:
+        today = models.naive_utcnow().date()
+    stats = _run_stats(runs)
+    if not stats:
+        return today
+    last = stats[-1]
+    window = stats[-3:]
+
+    if not last.success:                       # failure backoff (§2.5/§4.7)
+        if len(window) >= 2 and window[-2].success:
+            return last.date + datetime.timedelta(days=1)   # first failure -> retry tomorrow
+        step = _current_interval(stats) or initial_interval(rating)
+        return last.date + datetime.timedelta(days=next_fib(step, True))
+
+    successful = [s for s in stats if s.success]
+    if len(successful) < 2:                    # 2nd run uses the rating initial (§4.4)
+        interval = initial_interval(rating)
+    else:
+        interval = _current_interval(stats)
+        rec = _rec_adjust(window)
+        if rec is not None:
+            interval = next_fib(interval, rec)
+    return last.date + datetime.timedelta(days=interval)

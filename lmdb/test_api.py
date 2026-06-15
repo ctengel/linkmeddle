@@ -13,6 +13,7 @@ from pytest_postgresql import factories
 
 from lmdb import api
 from lmdb import models
+from lmdb import xform
 
 # Fedora keeps pg_ctl in /usr/bin (pytest-postgresql's default assumes a Debian path).
 postgresql_proc = factories.postgresql_proc(executable="/usr/bin/pg_ctl")
@@ -575,3 +576,86 @@ def test_download_result_failure(client):
     assert r.status_code == 200 and r.json()["success"] is False
     t = client.get(f"/things/{v}").json()
     assert t["last_failure_dt"] and t["best_oi"] is None
+    assert t["try_on"] is not None        # failure backoff applied (1.4), not left at today/null
+
+
+# --- try_on backoff (Task 1.4): pure xform ---------------------------------------------
+
+def _run_on(day, success, h=None):
+    """A bare models.Run for the pure backoff helpers (no DB)."""
+    return models.Run(thing_id=uuid.uuid4(), success=success, entries_hash=h,
+                      starttime=datetime.datetime(2026, 1, day, 12, 0))
+
+
+def test_initial_interval_bands():
+    assert xform.initial_interval(2.0) == 3    # A
+    assert xform.initial_interval(1.0) == 5    # B
+    assert xform.initial_interval(0.0) == 8    # C
+    assert xform.initial_interval(-1.0) == 8   # D/below falls in the C interval
+
+
+def test_next_try_on_first_success_uses_initial():
+    today = datetime.date(2026, 1, 10)
+    runs = [_run_on(10, True, b"h1")]
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=5)   # B
+    assert xform.next_try_on(2.0, runs, today) == today + datetime.timedelta(days=3)   # A
+
+
+def test_next_try_on_backs_off_when_unchanged():
+    # 5-day cadence, identical membership hash -> back off (fib up: 5 -> 8)
+    runs = [_run_on(d, True, b"same") for d in (1, 6, 11, 16)]
+    today = datetime.date(2026, 1, 16)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+
+
+def test_next_try_on_speeds_up_when_changing():
+    # every run finds new content -> speed up (fib down: 5 -> 3)
+    runs = [_run_on(d, True, bytes([i])) for i, d in enumerate((1, 6, 11, 16))]
+    today = datetime.date(2026, 1, 16)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=3)
+
+
+def test_next_try_on_failure_after_success_tomorrow():
+    runs = [_run_on(1, True, b"h"), _run_on(6, False)]
+    assert xform.next_try_on(1.0, runs, datetime.date(2026, 1, 6)) == datetime.date(2026, 1, 7)
+
+
+def test_next_try_on_consecutive_failures_back_off():
+    # prior success then two failures -> fib backoff from the B initial (5 -> 8)
+    runs = [_run_on(1, True, b"h"), _run_on(6, False), _run_on(11, False)]
+    today = datetime.date(2026, 1, 11)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+
+
+# --- try_on backoff (Task 1.4): wired through the API ----------------------------------
+
+def test_playlist_success_sets_backoff(client):
+    url = "http://example/pl/backoff"
+    tid, rid = _claimed_run(client, url)          # B-rated playlist, claimed
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": _pl_payload(2, url=url, native="plbo")}
+                       ).status_code == 200
+    t = client.get(f"/things/{tid}").json()
+    expect = (models.naive_utcnow().date() + datetime.timedelta(days=5)).isoformat()  # B initial
+    assert t["try_on"] == expect
+
+
+def test_playlist_failure_sets_backoff(client):
+    url = "http://example/pl/failbo"
+    tid, rid = _claimed_run(client, url)
+    assert client.post(f"/jobs/{rid}/result", json={"success": False}).status_code == 200
+    t = client.get(f"/things/{tid}").json()
+    # first-ever failure, no prior success -> fib backoff from the B initial: next_fib(5) = 8
+    expect = (models.naive_utcnow().date() + datetime.timedelta(days=8)).isoformat()
+    assert t["try_on"] == expect and t["last_failure_dt"]
+
+
+def test_claim_cookies_escalation(client):
+    # last completed run failed cookielessly -> the next claim suggests cookies (§4.7)
+    v = _seed_thing(type="video", url="http://e/esc", human_rating=1.0, try_on=_TODAY)
+    with _session() as s:
+        s.add(models.Run(thing_id=uuid.UUID(v), success=False,
+                         starttime=models.naive_utcnow(), input_json={"cookies": False}))
+        s.commit()
+    job = _claim(client)
+    assert job["thing"]["id"] == v and job["cookies"] is True

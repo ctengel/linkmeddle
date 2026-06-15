@@ -56,6 +56,24 @@ def _today() -> datetime.date:
     return models.naive_utcnow().date()
 
 
+def _effective_rating(thing: Thing) -> float:
+    """Effective rating = human, else machine, else 0.0 (C) — COALESCE in Python (§2.4)."""
+    if thing.human_rating is not None:
+        return thing.human_rating
+    if thing.machine_rating is not None:
+        return thing.machine_rating
+    return 0.0
+
+
+def _set_try_on(session: Session, thing: Thing) -> None:
+    """Advance thing.try_on from its run history via the Fibonacci backoff (§4.4, Task 1.4).
+
+    Re-queries the thing's runs (the just-recorded run is autoflushed in, so it counts).
+    """
+    runs = session.exec(select(Run).where(Run.thing_id == thing.id)).all()
+    thing.try_on = xform.next_try_on(_effective_rating(thing), runs)
+
+
 def get_thing_or_404(session: Session, thing_id: uuid.UUID) -> Thing:
     """Fetch a thing by id or raise 404"""
     thing = session.get(Thing, thing_id)
@@ -300,8 +318,17 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     session.add(run)
     session.commit()
     session.refresh(run)
-    # Per-job cookies suggestion: hint-only in 4.0 (failure-escalation is Task 1.4) [A11].
+    # Per-job cookies suggestion: the attrs.cookies hint, OR escalation after a cookieless
+    # failure — the last completed run failed without cookies (§4.7) [A11]. (The just-created
+    # in-progress run is excluded by the `success != None` filter.)
     cookies = bool((thing.attrs or {}).get("cookies"))
+    if not cookies:
+        last_done = session.exec(
+            select(Run).where(Run.thing_id == thing.id, Run.success != None)  # noqa: E711
+            .order_by(Run.starttime.desc())).first()
+        if (last_done is not None and last_done.success is False
+                and not (last_done.input_json or {}).get("cookies")):
+            cookies = True
     return JobClaim(run_id=run.id, thing=ThingRead.model_validate(thing),
                     action=ACTION_BY_TYPE[thing.type], cookies=cookies)
 
@@ -344,7 +371,8 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.last_failure_dt = None
             pl_thing.try_on = None       # acquired; never re-fetch (§2.5)
         else:
-            pl_thing.last_failure_dt = now   # backoff date is Task 1.4
+            pl_thing.last_failure_dt = now
+            _set_try_on(session, pl_thing)   # failure backoff (§4.4)
         session.add(run)
         session.commit()
         session.refresh(run)
@@ -353,6 +381,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     if not item.success:
         if pl_thing is not None:
             pl_thing.last_failure_dt = now
+            _set_try_on(session, pl_thing)   # failure backoff (§4.4)
         session.add(run)
         session.commit()
         session.refresh(run)
@@ -390,6 +419,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         if session.get(Rel, (parent, child, rel.type)) is None:
             session.add(Rel(parent=parent, child=child, type=rel.type))
 
+    _set_try_on(session, pl_thing)   # successful playlist run -> next backoff date (§4.4)
     session.commit()
     session.refresh(run)
     return _run_read(run)
