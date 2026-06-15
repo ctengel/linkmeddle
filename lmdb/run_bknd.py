@@ -13,50 +13,8 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
-#from yt_dlp_plugins.postprocessor.linkmeddle_playlist import LinkMeddlePlaylistPP
-from . import ytdl_arch_oi, models, xform
-from .linkmeddle_playlist import LinkMeddlePlaylistPP
-# TODO install LinkMeddlePlaylistPP properly in yt_dlp_plugins
+from . import ytdl_arch_oi
 
-RESULT_TIMEOUT = 64  # large playlists make a big POST body (mirrors the old plugin)
-
-
-def _playlist_full_json(pl: models.PlaylistFull) -> dict:
-    """Serialize an LM-native playlist to JSON-safe dict (datetimes -> ISO)."""
-    body = pl.model_dump()
-    body['modified_date'] = body['modified_date'].isoformat() if body['modified_date'] else None
-    for entry in body['entries']:
-        entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
-    return body
-
-
-def post_result(api_base: str, run_id: str, info: dict | None, *,
-                action: str, use_cookies: bool = False,
-                worker: str | None = None) -> dict:
-    """Push a run's result to POST /jobs/{run_id}/result (one path for both job kinds).
-
-    `info` is the sanitized yt-dlp output, or None on failure (-> success=False). For a
-    'pull' it is converted DLP -> PlaylistFull (the Stage-1 fan-out body); for a 'download'
-    the OI file UUID is read straight from info['oi_uuid'] (set by ObjIdxUploadPP) and the
-    extractor/id are sent for identity backfill. `data_json` carries the raw output;
-    `input_json` records the per-run cookies decision.
-    """
-    body: dict = {'success': info is not None, 'worker': worker,
-                  'input_json': {'cookies': use_cookies}}
-    if info is not None:
-        body['data_json'] = info
-        if action == 'pull':
-            pl = xform.pl_dlp2lm(models.PlaylistDLP.model_validate(info))
-            body['playlist'] = _playlist_full_json(pl)
-        elif action == 'download':
-            oi_uuid = info.get('oi_uuid')
-            body['best_oi'] = str(oi_uuid) if oi_uuid else None
-            body['extractor_key'] = (info.get('extractor') or '').lower() or None
-            body['native_id'] = info.get('id')
-    resp = requests.post(f"{api_base.rstrip('/')}/jobs/{run_id}/result",
-                         json=body, timeout=RESULT_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
 
 def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
     # Exclude live streams by checking 'is_live' key in info_dict
@@ -71,18 +29,13 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> Y
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
     # TODO "format": "best", "noplaylist": True, "quiet": False, "no_warnings": True,
-    # TODO skip is_live somehow?
     opts = {'writeinfojson': True,
             'download_archive': download_archive,
             #'writethumbnail': True,
             #'writesubtitles': True,
             'sleep_interval': 8,
             'max_sleep_interval': 32,
-            'ignoreerrors': 'only_download',
             'restrictfilenames': True,
-            'skip_playlist_after_errors': 3,
-            # NOTE: no 'playlistrandom' (§4.6) — deterministic natural order is the
-            # prerequisite for 4.x lazy-load/partial-resume of huge playlists.
             'match_filter': _exclude_live}
     if cookies is not None:
         opts['cookiefile'] = cookies
@@ -112,66 +65,27 @@ def get_cookies(url: str) -> str:
     resp.raise_for_status()
     return resp.json()['jar']['cookies']
 
-def extract_info(url: str, *, download: bool,
-                 oibucket: str | None = None,
-                 lpmlib: str | None = None,
-                 use_cookies: bool = False) -> Optional[dict]:
-    """Unified yt-dlp invocation for both fan-out stages — the worker's one code path.
-
-    download=False -> Stage-1 metadata-only playlist pull (§3.3); download=True -> Stage-2
-    real video download with OI upload (the `ObjIdxUploadPP` sets info['oi_uuid'], which the
-    worker reads back as `best_oi` — no separate OI lookup). Returns the sanitized info dict
-    on success, or None on a caught YoutubeDLError (the worker treats None as a failed run).
-    No `LinkMeddlePlaylistPP` — the worker owns the metadata push (`post_result`).
-    """
-    if lpmlib:
-        assert oibucket, "oibucket must be set to use lpmlib"
-    cookies = None
-    if use_cookies:
-        assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
-        cookies = io.StringIO(get_cookies(url))
-    download_archive = None
-    if download:
-        assert os.getenv("OBJIDX_URL"), "OBJIDX_URL must be set to download"
-        assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to download"
-        download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
-    with _ydl(download_archive=download_archive, cookies=cookies) as ydl:
-        try:
-            if download and oibucket:
-                ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
-            info = ydl.extract_info(url, download=download)
-        except YoutubeDLError as exc:
-            warnings.warn(f"yt-dlp error for {url}: {exc}")
-            return None
-        return ydl.sanitize_info(info)
-
-
-def pull_playlist(url: str, use_cookies: bool = False) -> Optional[dict]:
-    """Stage-1 metadata-only playlist pull — thin wrapper over `extract_info`."""
-    return extract_info(url, download=False, use_cookies=use_cookies)
-
-
-def init_download(url: str,
+def init_download(url: str, *,
+                  download: bool = True,
                   oibucket: str | None = None,
                   lpmlib: str | None = None,
-                  schedid: int | None = None,
-                  maybe_playlist: bool = True,
-                  use_cookies: bool = False) -> None:
-    """Initiate a yt-dlp download for the given URL.
-    
+                  use_cookies: bool = False) -> Optional[dict]:
+    """Run yt-dlp for the given URL — the worker's single yt-dlp code path.
+
+    download=False -> Stage-1 metadata-only pull (no OI required); download=True -> Stage-2
+    real download with OI upload (the `ObjIdxUploadPP` sets info['oi_uuid'], which the caller
+    reads back as `best_oi` — no separate OI lookup). Returns the sanitized info dict on
+    success, or None on a caught YoutubeDLError (callers treat None as a failed run). No
+    LinkMeddlePlaylistPP — the worker owns the metadata push (job_runner.post_result).
+
     URL: the URL to download
-    oibucket: if provided, enables ObjIdx upload postprocessor with this bucket
+    oibucket: if provided (download only), enables ObjIdx upload postprocessor with this bucket
     lpmlib: if provided, provided to OI
-    schedid: if provided, provided to LinkMeddle playlist postprocessor
-    maybe_playlist: if True, allows playlist postprocessor to trigger; else disables it
-    use_cookies: if True, enables cookie usage in yt-dlp
+    use_cookies: if True, fetch cookies from Crustula and pass to yt-dlp
 
-    Returns nothing for now; in future may return job ID or similar.
-
-    For now. env variables can control behavior:
+    For now, env variables can control behavior:
     OBJIDX_URL=
     OBJIDX_AUTH=
-    LINKMEDDLE_PLAPI=
     CRUSTULA_URL=
     """
 
@@ -181,15 +95,8 @@ def init_download(url: str,
     cookies = None
 
     # check preconditions
-    if oibucket:
-        assert os.getenv("OBJIDX_URL"), "OBJIDX_URL must be set to use ObjIdx upload"
-        assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to use ObjIdx upload"
     if lpmlib:
         assert oibucket, "oibucket must be set to use lpmlib"
-    if maybe_playlist:
-        assert os.getenv("LINKMEDDLE_PLAPI"), "LINKMEDDLE_PLAPI must be set to use LinkMeddle playlist postprocessor"
-    if schedid:
-        assert maybe_playlist, "maybe_playlist must be True to use schedid"
     if use_cookies:
         assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
         # TODO catch exceptions
@@ -197,30 +104,35 @@ def init_download(url: str,
         print("got cookies:", cookiestr)
         cookies = io.StringIO(cookiestr)
 
-    download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
+    download_archive = None
+    if download:
+        assert os.getenv("OBJIDX_URL"), "OBJIDX_URL must be set to download"
+        assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to download"
+        download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
 
+    # TODO download_archive on download mode only to prevent yt-dlp skipping playlist items we already have
+    # TODO flat playlist or similar to reduce calls?
     with _ydl(download_archive=download_archive, cookies=cookies) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
-            if oibucket:
+            if download and oibucket:
                 ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
-            if maybe_playlist:
-                ydl.add_post_processor(LinkMeddlePlaylistPP(schedid=str(schedid) if schedid else None), when='playlist')
-            info = ydl.extract_info(url)  #, download=True)
+            info = ydl.extract_info(url, download=download)
         except YoutubeDLError as e:
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
             time.sleep(128)
-            return
+            return None
     if cookies:
         cookies.seek(0)
         print("Final cookies:", cookies.read())
         # TODO callback success to Crustula
     print("Download completed for URL:", url)
-    #    print(json.dumps(ydl.sanitize_info(info)))
-    #retcode = json.loads(json.dumps(retcode, default=lambda o: repr(o)))
     _print_download_result(info)
+    # TODO this sleep adds per-job latency to the worker loop; tune/remove now that the
+    #      server owns try_on backoff
     time.sleep(64)
+    return ydl.sanitize_info(info)
 
 def cli():
     """Command-line interface to download a URL using yt-dlp programmatically."""
@@ -229,19 +141,14 @@ def cli():
     parser.add_argument("--oibucket",
                         help="Object Index bucket for ObjIdx upload postprocessor",
                         default=None)
-    parser.add_argument("--lpmlib", help="LinkMeddle library name for playlist postprocessor", default=None)
-    parser.add_argument("--schedid",
-                        type=int,
-                        help="Schedule ID for playlist postprocessor",
-                        default=None)
-    parser.add_argument("--no-playlist", action="store_true", help="Disable playlist postprocessor")
+    parser.add_argument("--lpmlib", help="LinkMeddle library name for OI postprocessor", default=None)
     parser.add_argument("--use-cookies", action="store_true", help="Enable cookie usage (not yet implemented)")
-    init_download(url=parser.parse_args().url,
-                  oibucket=parser.parse_args().oibucket,
-                  lpmlib=parser.parse_args().lpmlib,
-                  schedid=parser.parse_args().schedid,
-                  maybe_playlist=not parser.parse_args().no_playlist,
-                  use_cookies=parser.parse_args().use_cookies)
+    args = parser.parse_args()
+    init_download(url=args.url,
+                  download=True,
+                  oibucket=args.oibucket,
+                  lpmlib=args.lpmlib,
+                  use_cookies=args.use_cookies)
     return 0
 
 if __name__ == "__main__":
