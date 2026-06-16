@@ -190,6 +190,52 @@ def test_extract_pull_handles_flat_entries():
     assert v.extractor_key == "youtube" and v.title == "V1"
 
 
+def test_extract_pull_splits_videos_and_child_playlists():
+    # A channel's flat pull lists both videos and playlist-typed entries (tabs/sub-playlists):
+    # videos -> entries, playlist entries -> child_playlists stubs (not flattened).
+    raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
+           "entries": [
+               {"_type": "url", "ie_key": "Youtube", "id": "v1",
+                "url": "https://x/v/1", "title": "V1"},
+               {"_type": "playlist", "ie_key": "Youtube", "id": "subpl",
+                "url": "https://x/pl/sub", "title": "Sub PL"},
+           ]}
+    pl = run_bknd.extract_pull(raw)
+    assert [v.native_id for v in pl.entries] == ["v1"]
+    assert [c.native_id for c in pl.child_playlists] == ["subpl"]
+    assert pl.child_playlists[0].url == "https://x/pl/sub"
+
+
+def test_post_result_pull_single_video_discovers_leaf(monkeypatch):
+    # #153: a 'pull' that resolves to a single video (no entries) is posted as `video`, not
+    # `playlist`, so the server classifies the unknown thing as a leaf (container=False).
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "solo", "webpage_url": "https://e/v/solo", "extractor": "YouTube",
+            "title": "Solo"}
+    job_runner.post_result("http://api/", "r", info, action="pull")
+    body = captured["body"]
+    assert "video" in body and "playlist" not in body
+    assert body["video"]["native_id"] == "solo"
+
+
+def test_post_result_pull_container_sends_playlist(monkeypatch):
+    # A 'pull' that resolves to a playlist/channel (has entries) is posted as `playlist`.
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "pl", "webpage_url": "https://e/pl", "extractor": "YouTube",
+            "_type": "playlist",
+            "entries": [{"_type": "url", "ie_key": "Youtube", "id": "v1",
+                         "url": "https://e/v/1", "title": "V1"}]}
+    job_runner.post_result("http://api/", "r", info, action="pull")
+    body = captured["body"]
+    assert "playlist" in body and "video" not in body
+
+
 # --- producer: raw entry captured -> PullVid.info_json -> thing.attrs -------------------
 
 def _raw_playlist(n=2):

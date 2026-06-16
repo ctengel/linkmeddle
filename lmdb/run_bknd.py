@@ -91,36 +91,58 @@ def _pull_chan(info: dict) -> models.UlChan:
 
 def extract_pull_video(info: dict) -> models.VidFull:
     """Build a thin VidFull from a raw yt-dlp entry, carrying the raw entry as the hint."""
-    ts = entry.get("timestamp")
+    ts = info.get("timestamp")
     return models.VidFull(
         # Flat entries carry `url` (not `webpage_url`); full entries carry both.
-        url=entry.get("webpage_url") or entry.get("url"),
-        native_id=entry["id"],
-        extractor_key=_norm_extractor(entry),
-        title=entry.get("title"),
-        thumbnail_url=entry.get("thumbnail"),
+        url=info.get("webpage_url") or info.get("url"),
+        native_id=info["id"],
+        extractor_key=_norm_extractor(info),
+        title=info.get("title"),
+        thumbnail_url=info.get("thumbnail"),
         modified=datetime.datetime.fromtimestamp(ts) if ts else None,
-        channel=_pull_chan(entry),
+        channel=_pull_chan(info),
         # Faithful copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
-        info_json={k: v for k, v in entry.items() if k != "info_json"})
+        info_json={k: v for k, v in info.items() if k != "info_json"})
+
+
+def extract_pull_pl_stub(info: dict) -> Optional[models.PlaylistFull]:
+    """Build a thin sub-container stub (no members) from a flat playlist-typed entry.
+
+    A channel's flat pull lists its tabs/playlists as playlist-typed entries; each becomes a
+    `container` thing pulled on its own later, so we keep only identity + display here.
+    Returns None when the entry has no usable URL (PlaylistFull requires one).
+    """
+    url = info.get("webpage_url") or info.get("url")
+    if not url:
+        return None
+    return models.PlaylistFull(
+        url=url,
+        native_id=info.get("id"),
+        extractor_key=_norm_extractor(info),
+        title=info.get("title"),
+        playlist_count=info.get("playlist_count"),
+        channel=_pull_chan(info))
 
 
 def extract_pull(info: dict) -> models.PlaylistFull:
-    """Extract the thin pull contract from a raw yt-dlp playlist info dict.
+    """Extract the thin pull contract from a raw yt-dlp container info dict.
 
-    Nested playlists are flattened into one entries list (matching V3 pl_dlp2lm): a
-    playlist-typed entry contributes its sub-videos, a plain entry contributes itself.
+    Hierarchy-preserving: a video entry contributes a `VidFull` to `entries`; a
+    playlist-typed entry (a channel's tab/sub-playlist) contributes a stub to
+    `child_playlists` (pulled on its own later) instead of being flattened into videos.
     """
     assert info.get("webpage_url") is not None  # needed until we get an lmpl id
     entries: list[models.VidFull] = []
+    child_playlists: list[models.PlaylistFull] = []
     for entry in info.get("entries") or []:
         if entry is None:
             continue
         if entry.get("_type") == "playlist" or entry.get("entries"):
-            entries.extend(extract_pull_video(sub) for sub in (entry.get("entries") or [])
-                           if sub is not None)
+            stub = extract_pull_pl_stub(entry)
+            if stub is not None:
+                child_playlists.append(stub)
             continue
-        entries.append(_pull_vid(entry))
+        entries.append(extract_pull_video(entry))
     modified = info.get("modified_date")
     return models.PlaylistFull(
         url=info["webpage_url"],
@@ -130,7 +152,8 @@ def extract_pull(info: dict) -> models.PlaylistFull:
         modified=datetime.datetime.strptime(modified, "%Y%m%d") if modified else None,
         playlist_count=info.get("playlist_count"),
         channel=_pull_chan(info),
-        entries=entries)
+        entries=entries,
+        child_playlists=child_playlists)
 
 
 def init_download(url: str, *,

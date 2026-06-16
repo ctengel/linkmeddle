@@ -12,7 +12,7 @@ CREATE TABLE thing (
   site            text,                         -- rate-limit bucket / host; nullable [A7]
   extractor_key   text,                         -- backend source key (yt-dlp: extractor, lowercase)
   native_id       text,                         -- backend-native id (yt-dlp: extractor id)
-  type            text NOT NULL,                -- 'video' | 'playlist' | 'channel'
+  container       boolean,                      -- TRUE=playlist/channel, FALSE=video, NULL=unknown (classified on 1st pull)
   title           text,                         -- denormalized display    [A2-A]
   channel         text,                         -- denormalized display    [A2-A]
   thumbnail_url   text,                         -- nullable; populated when available (4.x UI)
@@ -32,13 +32,13 @@ CREATE UNIQUE INDEX thing_native ON thing (backend, extractor_key, native_id)
   WHERE native_id IS NOT NULL;                  -- secondary lookup key     [A1-A,A7]
 CREATE UNIQUE INDEX thing_url ON thing (url)
   WHERE url IS NOT NULL;                         -- pre-extraction / paste-time dedup [A8]
-CREATE INDEX thing_try_on ON thing (type, try_on);   -- worker selection
+CREATE INDEX thing_try_on ON thing (container, try_on);   -- worker selection
 
 CREATE TABLE rel (
-  parent     uuid NOT NULL REFERENCES thing(id),
-  child      uuid NOT NULL REFERENCES thing(id),
-  type       text NOT NULL,         -- 'playlist_video' | 'channel_playlist' | 'channel_video' | ...
-  PRIMARY KEY (parent, child, type)
+  parent   uuid NOT NULL REFERENCES thing(id),
+  child    uuid NOT NULL REFERENCES thing(id),
+  channel  boolean NOT NULL DEFAULT false,   -- TRUE = parent is the child's channel/uploader; FALSE = plain containment/membership
+  PRIMARY KEY (parent, child)
 );
 CREATE INDEX rel_child ON rel (child);
 

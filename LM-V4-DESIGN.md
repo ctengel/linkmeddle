@@ -65,6 +65,8 @@ From the unified DoD (DESIGN-SUMMARY §"V4 Definition of Done"):
 
 All three tables live in **PostgreSQL**; raw yt-dlp metadata is stored in `JSONB` columns — there is no separate document store. `[F1]` The database starts **greenfield**: there is no V3→V4 data migration (no populated V3 instance exists to migrate from). `[F3]` **All datetime columns are naive UTC (`timestamp`, not `timestamptz`); the application works in UTC everywhere** (matching V3's existing naive `datetime.now()`), keeping timezone handling out of the data layer entirely. The canonical DDL is mirrored in `lmdb/schema/v4.0.sql`.
 
+> **Amendment (pre-4.0): channels are containers; `type`/`rel.type` text → two booleans.** There are only two *structural* kinds of `thing` — **containers** (playlists/channels: have children, refreshed periodically) and **leaf videos** (fetched once). A channel is **not** a third type; it is a container whose "channel-ness" is a *relationship* (a video is uploaded by it), which belongs in `rel`. So `thing.type` collapses to **`thing.container boolean NULL`** (`True`=container, `False`=video, `NULL`=unknown until the first pull classifies it — which is also the answer to #153: the user never declares a type), and `rel.type` collapses to a single parent→child edge plus **`rel.channel boolean`** (`True` = the parent is the child's channel/uploader; `False` = plain containment / curated membership). Channel-ness for display is derivable (a container that is a `channel=True` parent) and additionally tagged with a soft **`attrs.kind='channel'`** hint. The edge's `channel` flag is chosen by **identity** at fan-out (the pulled parent's `(extractor_key, native_id)` == the entry's uploader ⇒ `channel=True`, with no duplicate membership edge), not by a stored type. **Tradeoff vs the text-for-extensibility rationale that motivated the original text columns:** a future leaf media-kind (e.g. `photo`) rides an `attrs` hint, and a future non-containment edge (`same`) returns as an **additive** nullable column / side table. The §2.1/§2.2 DDL below reflects the booleans; surrounding prose that still says `type='channel'` / `rel type='channel_video'` describes the old form — read it as "a container tagged `kind='channel'`" / "a `channel=True` edge".
+
 ### 2.1 `thing`
 
 The universal entity: playlist, video, or channel.
@@ -77,7 +79,7 @@ CREATE TABLE thing (
   site            text,                         -- rate-limit bucket / host; nullable; join key to future per-site table [A7]
   extractor_key   text,                         -- backend source key (yt-dlp: extractor, lowercase)
   native_id       text,                         -- backend-native id (yt-dlp: extractor id)
-  type            text NOT NULL,                -- 'video' | 'playlist' | 'channel'; plain text, so 4.x can add e.g. 'photo' with no migration
+  container       boolean,                      -- TRUE=playlist/channel, FALSE=video, NULL=unknown (classified on 1st pull); channel-ness = attrs.kind + channel=True rel edges
   title           text,                         -- denormalized display    [A2-A]
   channel         text,                         -- denormalized display    [A2-A]
   thumbnail_url   text,                         -- nullable; populated when available (4.x UI)
@@ -97,7 +99,7 @@ CREATE UNIQUE INDEX thing_native ON thing (backend, extractor_key, native_id)
   WHERE native_id IS NOT NULL;                  -- secondary lookup key     [A1-A,A7]
 CREATE UNIQUE INDEX thing_url ON thing (url)
   WHERE url IS NOT NULL;                         -- pre-extraction / paste-time dedup [A8]
-CREATE INDEX thing_try_on ON thing (type, try_on);   -- worker selection
+CREATE INDEX thing_try_on ON thing (container, try_on);   -- worker selection
 ```
 
 Notes on the contested columns:
@@ -120,7 +122,7 @@ Notes on the contested columns:
 - **`attrs` also carries two *soft, optional* 4.0 hints** `[A11]` (alongside its 4.x escape-hatch role), the loose counterparts to the strict `bucket` column — both for the other two V3 `PlaylistSched` download-config fields that, unlike `oi_bucket`, do *not* warrant a required column:
   - **`attrs.cookies`** — a *suggestion* to consider cookies for this thing (cookies are avoided whenever possible and never permanently "attached"). It is only a hint: the actual per-run *decision* to use cookies is recorded in `run.input_json` (§2.3), and the worker may also opt into cookies on its own after a cookieless failure (§4.7). Propagated playlist→video on fan-out: a playlist that needed cookies sets `attrs.cookies` on the video stubs it creates (§4.1). A per-site cookie policy is a 4.x concern (the future per-site table, Appendix A).
   - **`attrs.lpm_lib`** — an optional LPM library tag, the V4.0 home for V3's `PlaylistSched.lpm_lib` (passed to `ObjIdxUploadPP(lpmlib=)` at download). Always optional; helpful today but slated for **full deprecation in V5** (the broader LPM-as-things work, §Appendix A / #136). Propagated playlist→video **only if present**, and **never** video→playlist. 4.x may fold it into the per-site table.
-- **`type` is plain `text`, not a DB enum**, so 4.x can add new kinds — e.g. **`photo`** — with no migration; 4.0 uses `video`/`playlist`/`channel`.
+- **The kind is `container boolean NULL`** (per the Part 2 amendment), not a text enum: `True`=container (playlist/channel), `False`=leaf video, `NULL`=unknown until first pull (#153). A future leaf media-kind (e.g. **`photo`**) is distinguished by an `attrs` hint rather than a new type value.
 - **`created_dt` is needed** — it records when LM first learned of the thing and backs the **"new things" dashboard** (recently-discovered items awaiting a rating, §3.1). Keep it.
 
 ### 2.2 `rel`
@@ -129,13 +131,18 @@ Graph edges between things (playlist↔video, channel↔playlist).
 
 ```sql
 CREATE TABLE rel (
-  parent     uuid NOT NULL REFERENCES thing(id),
-  child      uuid NOT NULL REFERENCES thing(id),
-  type       text NOT NULL,         -- 'playlist_video' | 'channel_playlist' | 'channel_video' | ...; 4.x may add 'same' (two things are the same media)
-  PRIMARY KEY (parent, child, type)
+  parent   uuid NOT NULL REFERENCES thing(id),
+  child    uuid NOT NULL REFERENCES thing(id),
+  channel  boolean NOT NULL DEFAULT false,   -- TRUE = parent is the child's channel/uploader; FALSE = plain containment/membership
+  PRIMARY KEY (parent, child)
 );
 CREATE INDEX rel_child ON rel (child);
 ```
+
+One edge per `(parent, child)` pair; `channel` carries the only distinction the former
+`type` text held for 4.0 (uploader vs membership). A future non-containment edge such as
+`same` (two things are the same media) returns as an **additive** nullable column or side
+table, not by reviving a free-text `type`.
 
 **There is no `order` column** `[A4-B]`. Display order is derived on demand from the most recent `run.data_json` when needed; we don't usually care about order, and storing it signs us up for perpetual drift-maintenance on every fan-out update. (The door is open to add an order signal in 4.x as a nullable column or in `attrs` — additive, no migration.)
 
@@ -340,28 +347,28 @@ Illustrative only — verbs, paths, and intent, **not** an OpenAPI contract; exa
 This predicate lives **inside the API dispatch endpoint** (§4.5), which owns prioritization; the runner never queries `thing` directly — it asks the endpoint for the next job. Human rating always wins; anything assessing below the **C band** (r < −0.5, i.e. grades D/F) is never touched. Thresholds use the **grade bands** (§2.4), not bare integers, and an unrated thing assesses as **C (0.0)** — `COALESCE(human_rating, machine_rating, 0.0)` — so the effective-rating expression must default NULL to 0.0 or every comparison fails. Rather than separate passes, a single ordering spans all job kinds (playlist / video), so the endpoint returns whichever is highest-priority right now; the three predicates below are branches of that one ordering. The dispatched **action** follows from the matched branch: `pull` (playlist), `download` (video ≥ B), `meta` (video in the C band).
 
 ```sql
--- Stage 1 (playlist metadata pull) -> action 'pull': grade >= C band
-WHERE type = 'playlist'
+-- Stage 1 (container/unknown metadata pull) -> action 'pull': grade >= C band
+WHERE container IS NOT FALSE          -- container (TRUE) or unknown (NULL); a single-video result reclassifies it FALSE (#153)
   AND COALESCE(human_rating, <machine_rating computed on read>, 0.0) >= -0.5  -- grade C or higher (§2.4)
   AND try_on <= CURRENT_DATE          -- NULL try_on is NOT eligible (done / permafail), §2.5
   AND (last_success_dt IS NULL OR last_success_dt::date < CURRENT_DATE)
 
 -- Stage 2 (video download) -> action 'download': grade >= B band
-WHERE type = 'video'
+WHERE container IS FALSE              -- a leaf video
   AND COALESCE(human_rating, <machine_rating>, 0.0) >= 0.5   -- grade B or higher (§2.4)
   AND best_oi IS NULL                 -- "never acquired"; an already-acquired thing (live media, or a 4.x tombstone) is not re-acquired here (§2.4)
   AND try_on <= CURRENT_DATE          -- NULL not eligible; a live-hit is just a failure → try_on backed off to tomorrow (§2.5, [E1-C])
 
 -- Stage 2 (video metadata-only) -> action 'meta': C band, no human-decision metadata yet
-WHERE type = 'video'
+WHERE container IS FALSE              -- a leaf video
   AND COALESCE(human_rating, <machine_rating>, 0.0) >= -0.5
   AND COALESCE(human_rating, <machine_rating>, 0.0) < 0.5    -- below the B download floor (C band)
   AND last_success_dt IS NULL         -- flat pull under-described it (§Stage 1)
   AND best_oi IS NULL
   AND try_on <= CURRENT_DATE
 
--- all branches: ORDER BY COALESCE(human_rating, machine_rating, 0.0) DESC, try_on ASC
--- (playlists first; B+ downloads outrank C meta jobs by rating)
+-- all branches: ORDER BY (container IS NOT FALSE) DESC, COALESCE(human_rating, machine_rating, 0.0) DESC, try_on ASC
+-- (containers/unknowns first; B+ downloads outrank C meta jobs by rating)
 ```
 
 The machine-rating expression is computed on read (one-hop MAX for videos, AVG for playlists). Making this **simple and fast inside the selection query is the single biggest implementation risk** in V4 `[B4]` — see §6.

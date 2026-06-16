@@ -41,10 +41,11 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     """Push a run's result to POST /jobs/{run_id}/result (one path for all job kinds).
 
     `info` is the sanitized yt-dlp output, or None when extraction failed. `action` shapes the
-    body (the server re-derives the kind from thing.type, but the result body differs):
+    body (the server derives the kind from which body field is set — `playlist` vs `video`):
 
     - 'pull' (Stage-1 metadata): info is extracted into the thin PlaylistFull (the fan-out
-      body); a non-None info means success (extraction failure already surfaced as None).
+      body) when it is a container; an unknown URL that resolves to a single video is sent as
+      `video` instead so the server classifies it as a leaf (#153). Non-None info = success.
     - 'meta' / 'download' (Stage-2): both extract the full single-video metadata into a thin
       VidFull (`video`) so the server enriches the stub identically (display + channel). 'meta'
       stops there (no media, no OI; success is `info is not None`). 'download' additionally
@@ -63,7 +64,13 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
         body['extractor_key'] = (info.get('extractor') or '').lower() or None
         body['native_id'] = info.get('id')
         if action == 'pull':
-            body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
+            # A pull of a known container yields entries; a pull of an unknown thing
+            # (container=None) may resolve to a single video -> send it as `video` so the
+            # server classifies it as a leaf (container=False, the #153 correction).
+            if info.get("_type") == "playlist" or info.get("entries"):
+                body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
+            else:
+                body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
         else:  # 'download' or 'meta' -> single-video metadata (common); download adds best_oi
             body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
             if action == 'download':

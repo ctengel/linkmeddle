@@ -50,7 +50,7 @@ def test_add_thing_defaults(client):
     r = client.post("/things/", json={"url": "http://example/pl/1", "bucket": "b1"})
     assert r.status_code == 201
     t = r.json()
-    assert t["type"] == "playlist"          # unknown -> assume playlist
+    assert t["container"] is None           # unknown -> NULL until the first pull classifies it
     assert t["human_rating"] == 0.0         # default C
     assert t["try_on"] == models.naive_utcnow().date().isoformat()  # app is UTC, not local
     assert t["bucket"] == "b1"              # required, round-trips ([A10])
@@ -84,7 +84,17 @@ def test_add_thing_type_override(client):
     r = client.post("/things/", json={"url": "http://example/v/1", "type": "video",
                                       "bucket": "b"})
     assert r.status_code == 201
-    assert r.json()["type"] == "video"
+    assert r.json()["container"] is False   # 'video' hint -> leaf
+
+
+def test_add_thing_channel_tags_kind(client):
+    # 'channel' hint -> a container tagged attrs.kind='channel' (no separate type)
+    r = client.post("/things/", json={"url": "http://example/chan/1", "type": "channel",
+                                      "bucket": "b"})
+    assert r.status_code == 201
+    assert r.json()["container"] is True
+    assert r.json()["attrs"] == {"kind": "channel"}
+    assert client.get("/things/", params={"type": "channel"}).json()[0]["id"] == r.json()["id"]
 
 
 def test_add_thing_invalid_rating(client):
@@ -123,7 +133,7 @@ def test_list_filters(client):
     assert len(client.get("/things/", params={"type": "video"}).json()) == 1
     assert len(client.get("/things/", params={"rating": "A"}).json()) == 1
     one = client.get("/things/", params={"url": "http://example/v1"}).json()
-    assert len(one) == 1 and one[0]["type"] == "video"
+    assert len(one) == 1 and one[0]["container"] is False
     # everything added via POST has a human_rating, so needs_rating is empty
     assert client.get("/things/", params={"needs_rating": True}).json() == []
     # all added with try_on=today -> all due
@@ -134,7 +144,7 @@ def test_extractor_native_lookup(client):
     # the V4 replacement for GET /videos/{extractor}/{id}; extractor/native are set by
     # the worker (Phase 1), so seed directly here.
     with _session() as s:
-        s.add(models.Thing(url="http://example/vid", type="video", bucket="testbucket",
+        s.add(models.Thing(url="http://example/vid", container=False, bucket="testbucket",
                            extractor_key="youtube", native_id="abc123"))
         s.commit()
     r = client.get("/things/", params={"extractor": "YouTube", "native_id": "abc123"})
@@ -151,15 +161,15 @@ def test_get_thing_404(client):
 
 
 def test_get_thing_and_related(client):
-    pl = models.Thing(url="http://example/pl", type="playlist", title="PL", bucket="testbucket")
-    vid = models.Thing(url="http://example/vid2", type="video", title="V", bucket="testbucket")
+    pl = models.Thing(url="http://example/pl", container=True, title="PL", bucket="testbucket")
+    vid = models.Thing(url="http://example/vid2", container=False, title="V", bucket="testbucket")
     with _session() as s:
         s.add(pl)
         s.add(vid)
         s.commit()
         s.refresh(pl)
         s.refresh(vid)
-        s.add(models.Rel(parent=pl.id, child=vid.id, type="playlist_video"))
+        s.add(models.Rel(parent=pl.id, child=vid.id, channel=False))
         s.commit()
         pl_id, vid_id = str(pl.id), str(vid.id)
 
@@ -172,7 +182,7 @@ def test_get_thing_and_related(client):
     assert len(full["related"]) == 1
     edge = full["related"][0]
     assert edge["direction"] == "child"
-    assert edge["rel_type"] == "playlist_video"
+    assert edge["channel"] is False         # plain membership, not an uploader edge
     assert edge["thing"]["id"] == vid_id
 
     # from the video's side it's a parent edge
@@ -184,7 +194,7 @@ def test_get_thing_and_related(client):
 
 
 def test_thing_runs(client):
-    pl = models.Thing(url="http://example/plruns", type="playlist", bucket="testbucket")
+    pl = models.Thing(url="http://example/plruns", container=True, bucket="testbucket")
     with _session() as s:
         s.add(pl)
         s.commit()
@@ -293,6 +303,11 @@ def _seed_thing(**kw) -> str:
     overrides the column's server_default.
     """
     kw.setdefault("bucket", "testbucket")  # bucket is NOT NULL ([A10])
+    if "type" in kw:  # ergonomic alias: map the old type kwarg to container (+kind hint)
+        kind = kw.pop("type")
+        kw["container"] = kind != "video"
+        if kind == "channel":
+            kw["attrs"] = {**(kw.get("attrs") or {}), "kind": "channel"}
     with _session() as s:
         t = models.Thing(**kw)
         s.add(t)
@@ -435,6 +450,31 @@ def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest",
     return pl.model_dump(mode="json")
 
 
+def _chan_payload(url="http://example/chan/ingest", native="chanX",
+                  n_videos=2, n_playlists=2) -> dict:
+    """A channel pull: the container IS its own uploader, with direct videos + sub-playlists.
+
+    Each direct video's uploader matches the container's identity (the channel uploaded it),
+    so fan-out emits a single uploader (`channel=True`) edge, no membership edge. Sub-playlists
+    become `container=True` stubs pulled on their own later (recursion).
+    """
+    chan = models.UlChan(native_id=native, title="The Channel", url=url)
+    pl = models.PlaylistFull(
+        url=url, native_id=native, title="The Channel", extractor_key="youtube",
+        playlist_count=n_videos + n_playlists,          # members = videos + sub-containers
+        channel=chan,                                   # the channel is its own uploader
+        entries=[models.VidFull(
+            native_id=f"cv{i}", title=f"CVid {i}", url=f"http://example/cv/{i}",
+            extractor_key="youtube", channel=chan,      # uploaded BY this channel
+        ) for i in range(n_videos)],
+        child_playlists=[models.PlaylistFull(
+            url=f"http://example/chan/{native}/pl{j}", native_id=f"{native}pl{j}",
+            title=f"Sub PL {j}", extractor_key="youtube", channel=chan,
+        ) for j in range(n_playlists)],
+    )
+    return pl.model_dump(mode="json")
+
+
 def _seed_run(thing_id: str) -> str:
     """Insert an in-progress run for a thing directly; returns run_id (str).
 
@@ -473,11 +513,12 @@ def test_ingest_fans_out(client):
     kids = [e for e in related if e["direction"] == "child"]
     parents = [e for e in related if e["direction"] == "parent"]
     assert len(kids) == 3
-    assert all(e["rel_type"] == "playlist_video" for e in kids)
-    assert all(e["thing"]["type"] == "video" for e in kids)
+    assert all(e["channel"] is False for e in kids)        # plain membership edges
+    assert all(e["thing"]["container"] is False for e in kids)  # leaf videos
     assert len(parents) == 1
-    assert parents[0]["rel_type"] == "channel_playlist"
-    assert parents[0]["thing"]["type"] == "channel"
+    assert parents[0]["channel"] is True                   # the uploader (channel) edge
+    assert parents[0]["thing"]["container"] is True
+    assert parents[0]["thing"]["attrs"]["kind"] == "channel"
 
     # video stubs carry denormalized fields and are eligible for Stage-2 (try_on=today)
     vids = client.get("/things/", params={"type": "video"}).json()
@@ -497,8 +538,11 @@ def test_ingest_last_success_from_title(client):
     url = "http://example/pl/rate"
     tid, rid = _claimed_run(client, url)
     pl = models.PlaylistFull(
+        # no playlist channel here: a fanned-out uploader channel is itself a claimable
+        # container now, which would outrank the title-less video below — out of scope for
+        # this title->last_success test (channel fan-out is covered by its own tests).
         url=url, native_id="plrate", title="Rate PL", extractor_key="youtube",
-        playlist_count=2, channel=models.UlChan(url="http://example/up1"),
+        playlist_count=2, channel=models.UlChan(),
         entries=[
             models.VidFull(native_id="hastitle", title="Has Title",
                            url="http://example/v/ht", extractor_key="youtube"),
@@ -523,8 +567,9 @@ def test_meta_result_fans_out_channel(client):
                                 "channel": {"url": "http://e/chan9", "title": "Chan 9"},
                                 "info_json": {"id": "mcv"}}})
     related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
-    chan = [e for e in related if e["rel_type"] == "channel_video"]
-    assert len(chan) == 1 and chan[0]["thing"]["type"] == "channel"
+    chan = [e for e in related if e["channel"]]
+    assert len(chan) == 1 and chan[0]["thing"]["container"] is True
+    assert chan[0]["thing"]["attrs"]["kind"] == "channel"
     assert chan[0]["thing"]["url"] == "http://e/chan9"
 
 
@@ -538,7 +583,8 @@ def test_ingest_propagates_hints(client):
     vids = client.get("/things/", params={"type": "video"}).json()
     assert vids and all(v["attrs"] == {"cookies": True, "lpm_lib": "lib7"} for v in vids)
     chans = client.get("/things/", params={"type": "channel"}).json()
-    assert chans and all(not c["attrs"] for c in chans)
+    # channels carry only the kind hint (no propagated cookies/lpm_lib)
+    assert chans and all(c["attrs"] == {"kind": "channel"} for c in chans)
 
 
 def test_ingest_stores_info_json_hint(client):
@@ -596,19 +642,18 @@ def test_ingest_per_video_uploader_channels(client):
     chans = client.get("/things/", params={"type": "channel"}).json()
     assert len(chans) == 4
 
-    # the playlist's only parent edge is channel_playlist
+    # the playlist's only parent edge is its uploader (channel=True)
     pl_parents = [e for e in client.get(f"/things/{tid}", params={"include": "related"})
                   .json()["related"] if e["direction"] == "parent"]
-    assert len(pl_parents) == 1 and pl_parents[0]["rel_type"] == "channel_playlist"
+    assert len(pl_parents) == 1 and pl_parents[0]["channel"] is True
 
-    # every video has exactly one channel_video parent (+ its playlist_video parent)
+    # every video has exactly one uploader (channel=True) parent + its membership (False) parent
     for vid in client.get("/things/", params={"type": "video"}).json():
         parents = client.get(f"/things/{vid['id']}/related",
                              params={"direction": "parent"}).json()
-        rel_types = sorted(e["rel_type"] for e in parents)
-        assert rel_types == ["channel_video", "playlist_video"]
-        chan_edge = next(e for e in parents if e["rel_type"] == "channel_video")
-        assert chan_edge["thing"]["type"] == "channel"
+        assert sorted(e["channel"] for e in parents) == [False, True]
+        chan_edge = next(e for e in parents if e["channel"])
+        assert chan_edge["thing"]["attrs"]["kind"] == "channel"
 
 
 def test_ingest_shared_uploader_one_channel(client):
@@ -622,8 +667,64 @@ def test_ingest_shared_uploader_one_channel(client):
     assert len(chans) == 1
     children = client.get(f"/things/{chans[0]['id']}/related",
                           params={"direction": "child"}).json()
-    rel_types = sorted(e["rel_type"] for e in children)
-    assert rel_types == ["channel_playlist", "channel_video", "channel_video", "channel_video"]
+    # one shared channel owns the playlist + each video, all via channel=True edges
+    assert len(children) == 4 and all(e["channel"] is True for e in children)
+
+
+def test_channel_pull_videos_and_subplaylists(client):
+    # A channel pull (parent IS its own uploader) emits a single channel=True edge per direct
+    # video (no membership edge), no self-edge, and a container=True stub per sub-playlist.
+    url = "http://example/chan/c1"
+    tid, rid = _claimed_run(client, url)        # added unknown, claimed as a pull
+    payload = _chan_payload(url=url, native="chanc1", n_videos=2, n_playlists=2)
+    run = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert run.status_code == 200
+    assert run.json()["playlist_count"] == 4    # videos + sub-containers (channel-aware count)
+
+    chan = client.get(f"/things/{tid}").json()
+    assert chan["container"] is True
+    assert chan["attrs"]["kind"] == "channel"               # acts as a channel -> tagged
+
+    related = client.get(f"/things/{tid}", params={"include": "related"}).json()["related"]
+    kids = [e for e in related if e["direction"] == "child"]
+    assert len(kids) == 4 and all(e["channel"] is True for e in kids)   # uploader/owner edges
+    assert not any(e["direction"] == "parent" for e in related)         # no self channel edge
+
+    # each direct video has exactly one parent edge, channel=True (no channel=False membership)
+    for v in client.get("/things/", params={"type": "video"}).json():
+        parents = client.get(f"/things/{v['id']}/related", params={"direction": "parent"}).json()
+        assert len(parents) == 1 and parents[0]["channel"] is True
+
+    # sub-playlists are container stubs, claimable -> a follow-up claim pulls one (recursion)
+    subs = [e["thing"] for e in kids if e["thing"]["container"] is True]
+    assert len(subs) == 2 and all(s["try_on"] for s in subs)
+    job = _claim(client)
+    assert job["action"] == "pull" and job["thing"]["id"] in {s["id"] for s in subs}
+
+
+def test_unknown_url_discovered_as_video(client):
+    # #153: an unknown URL (container=None) the pull resolves to a single video is sent as a
+    # `video` body and classified as a leaf (container=False), then download/meta-eligible.
+    tid, rid = _claimed_run(client, "http://e/unknown-vid")   # unknown, claimed as 'pull'
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "uv1", "title": "Surprise Video",
+                                    "extractor_key": "youtube", "info_json": {"id": "uv1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{tid}").json()
+    assert t["container"] is False                # classified as a leaf, not a container
+    assert t["title"] == "Surprise Video" and t["last_success_dt"]
+    assert t["best_oi"] is None                   # discovery is metadata-only
+
+
+def test_unknown_url_discovered_as_container(client):
+    # #153 counterpart: an unknown URL the pull resolves to a playlist is classified container.
+    url = "http://e/unknown-pl"
+    tid, rid = _claimed_run(client, url)
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": _pl_payload(2, url=url, native="unkpl")}
+                       ).status_code == 200
+    assert client.get(f"/things/{tid}").json()["container"] is True
 
 
 def test_ingest_idempotent(client):
@@ -751,7 +852,7 @@ def test_download_result_enriches_and_fans_out_channel(client):
     assert t["best_oi"] == oi and t["try_on"] is None and t["last_success_dt"]
     assert t["title"] == "Downloaded" and t["thumbnail_url"] == "http://e/dv1.jpg"  # display captured
     related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
-    chan = [e for e in related if e["rel_type"] == "channel_video"]
+    chan = [e for e in related if e["channel"]]
     assert len(chan) == 1 and chan[0]["thing"]["url"] == "http://e/dchan"           # channel fanned out
 
 

@@ -43,7 +43,12 @@ class VidFull(BaseModel):
     info_json: Optional[dict] = None
 
 class PlaylistFull(BaseModel):
-    """A discovered playlist + its entries (the POST /jobs/{id}/result body on a pull)."""
+    """A discovered container (playlist/channel) + its members (POST /jobs/{id}/result body).
+
+    A flat pull lists each member's identity: leaf videos land in `entries`, and
+    sub-containers (a channel's playlists/tabs) land in `child_playlists` as stubs (empty
+    `entries`) the API fans out into their own `container` things to be pulled later.
+    """
     url: str                               # webpage_url
     native_id: Optional[str] = None
     extractor_key: Optional[str] = None
@@ -52,6 +57,7 @@ class PlaylistFull(BaseModel):
     playlist_count: Optional[int] = None
     channel: UlChan = UlChan()
     entries: list[VidFull] = []
+    child_playlists: list["PlaylistFull"] = []   # sub-containers (stubs); pulled on their own
 
 # --- V4 schema (thing / rel / run) -----------------------------------------------------
 # Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
@@ -70,13 +76,19 @@ _UTC_TODAY = text("(now() at time zone 'utc')::date")
 
 
 class Thing(SQLModel, table=True):
-    """The universal entity: playlist, video, or channel [A1, A2, A6, A7]"""
+    """The universal entity: a container (playlist/channel) or a leaf video [A1, A2, A6, A7].
+
+    `container` is the one structural distinction: True = container (has children, refreshed
+    periodically), False = video (leaf, fetched once), NULL = unknown until the first pull
+    classifies it. "Channel-ness" is not a type — it lives in the rel table (`rel.channel`,
+    "this parent is the child's uploader") plus a soft `attrs.kind='channel'` display hint.
+    """
     __table_args__ = (
         Index("thing_native", "backend", "extractor_key", "native_id",
               unique=True, postgresql_where=text("native_id IS NOT NULL")),
         Index("thing_url", "url", unique=True,
               postgresql_where=text("url IS NOT NULL")),
-        Index("thing_try_on", "type", "try_on"),
+        Index("thing_try_on", "container", "try_on"),
     )
     id: uuid.UUID = Field(
         default_factory=uuid.uuid4,
@@ -87,7 +99,8 @@ class Thing(SQLModel, table=True):
     site: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     extractor_key: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     native_id: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
-    type: str = Field(sa_column=Column(sa.Text, nullable=False))
+    container: Optional[bool] = Field(  # True=playlist/channel, False=video, NULL=unknown
+        default=None, sa_column=Column(sa.Boolean, nullable=True))
     title: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     channel: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
     thumbnail_url: Optional[str] = Field(default=None, sa_column=Column(sa.Text, nullable=True))
@@ -115,7 +128,11 @@ class Thing(SQLModel, table=True):
 
 
 class Rel(SQLModel, table=True):
-    """Graph edge between things (playlist<->video, channel<->playlist) [A4]"""
+    """Graph edge between things: one parent->child containment, with a `channel` flag [A4].
+
+    `channel=True` means the parent is the child's channel/uploader (the "special parent");
+    `False` is plain containment / curated membership. One edge per (parent, child) pair.
+    """
     __table_args__ = (Index("rel_child", "child"),)
     parent: uuid.UUID = Field(
         sa_column=Column(postgresql.UUID(as_uuid=True),
@@ -123,7 +140,8 @@ class Rel(SQLModel, table=True):
     child: uuid.UUID = Field(
         sa_column=Column(postgresql.UUID(as_uuid=True),
                          ForeignKey("thing.id"), primary_key=True))
-    type: str = Field(sa_column=Column(sa.Text, primary_key=True))
+    channel: bool = Field(
+        default=False, sa_column=Column(sa.Boolean, nullable=False, server_default=text("false")))
 
 
 class Run(SQLModel, table=True):
@@ -163,7 +181,7 @@ class ThingRead(SQLModel):
     site: Optional[str] = None
     extractor_key: Optional[str] = None
     native_id: Optional[str] = None
-    type: str
+    container: Optional[bool] = None
     title: Optional[str] = None
     channel: Optional[str] = None
     thumbnail_url: Optional[str] = None
@@ -180,9 +198,9 @@ class ThingRead(SQLModel):
 
 
 class RelatedThing(SQLModel):
-    """A thing reachable across one `rel` edge, with the edge's type and direction."""
+    """A thing reachable across one `rel` edge, with the edge's flag and direction."""
     direction: str  # 'parent' = the given thing is parent (this is a child), or 'child'
-    rel_type: str
+    channel: bool   # True iff the edge's parent is the child's channel/uploader
     thing: ThingRead
 
 
@@ -209,7 +227,10 @@ class ThingAdd(BaseModel):
     """add-a-thing-by-URL request (the human entry point)."""
     url: str
     bucket: str              # OI storage bucket; required, no server default [A10]
-    type: str = 'playlist'   # "unknown -> assume playlist"; overridable
+    # Ergonomic hint, mapped server-side onto `container`/`attrs.kind`: 'channel'/'playlist'
+    # -> container=True (channel also tags attrs.kind), 'video' -> False, omitted -> NULL
+    # (unknown; the first pull classifies it). The user need not know the type (#153).
+    type: Optional[str] = None
     rating: Optional[str] = None  # grade letter A/B/C (default C); D/F not allowed at add
     cookies: Optional[bool] = None  # soft hint -> attrs.cookies (suggest cookies) [A11]
     lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (optional library tag) [A11]

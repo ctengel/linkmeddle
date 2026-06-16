@@ -41,7 +41,7 @@ def test_pl_full2things_no_channel_url():
         vid.channel = models.UlChan()  # ...nor any entry
     g = xform.pl_full2things(pl, bucket="b")
     assert g.channels == []
-    assert not any(r.type in ("channel_playlist", "channel_video") for r in g.rels)
+    assert not any(r.channel for r in g.rels)   # no uploader edges without a channel url
 
 
 def test_pl_hash_order_independent():

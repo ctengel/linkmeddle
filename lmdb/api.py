@@ -69,16 +69,32 @@ def _effective_rating(thing: Thing) -> float:
     return 0.0
 
 
+def _container_from_type(type_hint: Optional[str]) -> tuple[Optional[bool], bool]:
+    """Map the optional ergonomic add-time `type` hint to (container, is_channel).
+
+    'channel'/'playlist' -> container True (channel also tags attrs.kind='channel'); 'video'
+    -> False; omitted -> None (unknown; the first pull classifies it, #153).
+    """
+    if type_hint is None:
+        return None, False
+    mapping = {"video": (False, False), "playlist": (True, False), "channel": (True, True)}
+    if type_hint.lower() not in mapping:
+        raise HTTPException(status_code=422,
+                            detail="type must be one of channel/playlist/video")
+    return mapping[type_hint.lower()]
+
+
 def _action_for(thing: Thing) -> str:
     """What the worker should do with this claimed thing (§4.5 dispatch result).
 
-    Playlist -> 'pull' (Stage-1 metadata fan-out). Video -> 'download' (Stage-2 media+metadata)
-    when it clears the B floor, else 'meta' (Stage-2 metadata-only enrichment for a C-band
-    video the flat pull under-described).
+    Container or unknown (`container` is True/NULL) -> 'pull' (Stage-1 metadata fan-out; an
+    unknown URL is classified by the result). A leaf video (`container is False`) ->
+    'download' (Stage-2 media+metadata) when it clears the B floor, else 'meta' (Stage-2
+    metadata-only enrichment for a C-band video the flat pull under-described).
     """
-    if thing.type == "playlist":
-        return "pull"
-    return "download" if _effective_rating(thing) >= _VIDEO_DOWNLOAD_FLOOR else "meta"
+    if thing.container is False:
+        return "download" if _effective_rating(thing) >= _VIDEO_DOWNLOAD_FLOOR else "meta"
+    return "pull"
 
 
 def _set_try_on(session: Session, thing: Thing) -> None:
@@ -122,7 +138,7 @@ def _refresh_info_hint(thing: Thing, info: Optional[dict]) -> None:
     left alone once acquired. (Belongs in xform with INFO_JSON_KEY/enough_to_rate once those
     land there; kept here while xform is mid-reconciliation.)
     """
-    if info is not None and thing.type == "video" and thing.best_oi is None:
+    if info is not None and thing.container is False and thing.best_oi is None:
         thing.attrs = {**(thing.attrs or {}), xform.INFO_JSON_KEY: info}
 
 
@@ -133,12 +149,12 @@ def _related(session: Session, thing_id: uuid.UUID,
     if direction in (None, "child"):
         for rel, thing in session.exec(
                 select(Rel, Thing).where(Rel.parent == thing_id, Rel.child == Thing.id)).all():
-            out.append(RelatedThing(direction="child", rel_type=rel.type,
+            out.append(RelatedThing(direction="child", channel=rel.channel,
                                     thing=ThingRead.model_validate(thing)))
     if direction in (None, "parent"):
         for rel, thing in session.exec(
                 select(Rel, Thing).where(Rel.child == thing_id, Rel.parent == Thing.id)).all():
-            out.append(RelatedThing(direction="parent", rel_type=rel.type,
+            out.append(RelatedThing(direction="parent", channel=rel.channel,
                                     thing=ThingRead.model_validate(thing)))
     return out
 
@@ -149,11 +165,13 @@ def _related(session: Session, thing_id: uuid.UUID,
 def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get_session)):
     """Add a thing by URL (the human entry point).
 
-    Stores the URL with a default rating of C (override A/B); `type` defaults to
-    'playlist' ("unknown -> assume playlist"). `bucket` (OI storage home) is required —
-    no server default ([A10]). Optional `cookies`/`lpm_lib` are stored as soft hints in
-    `attrs` ([A11]). extractor_key/native_id are filled in later by the worker. Idempotent
-    on URL (returns the existing thing with 200, bucket unchanged — bucket is immutable).
+    Stores the URL with a default rating of C (override A/B). The user need not know the
+    kind: `type` is an optional hint mapped to `container` (channel/playlist -> True, video
+    -> False, omitted -> NULL = unknown, classified on first pull, #153); 'channel' also
+    tags `attrs.kind='channel'`. `bucket` (OI storage home) is required — no server default
+    ([A10]). Optional `cookies`/`lpm_lib` are stored as soft hints in `attrs` ([A11]).
+    extractor_key/native_id are filled in later by the worker. Idempotent on URL (returns
+    the existing thing with 200, bucket unchanged — bucket is immutable).
     """
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
@@ -163,12 +181,15 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     if grade not in ADD_GRADES:
         raise HTTPException(status_code=422,
                             detail=f"rating must be one of {sorted(ADD_GRADES)} at add time")
+    container, is_channel = _container_from_type(item.type)
     attrs: dict = {}
+    if is_channel:
+        attrs["kind"] = "channel"
     if item.cookies is not None:
         attrs["cookies"] = item.cookies
     if item.lpm_lib is not None:
         attrs["lpm_lib"] = item.lpm_lib
-    thing = Thing(url=item.url, type=item.type, human_rating=GRADE_VALUES[grade],
+    thing = Thing(url=item.url, container=container, human_rating=GRADE_VALUES[grade],
                   bucket=item.bucket, attrs=attrs or None)
     session.add(thing)
     try:
@@ -196,7 +217,19 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
     """
     stmt = select(Thing)
     if type is not None:
-        stmt = stmt.where(Thing.type == type)
+        # 'type' is an ergonomic alias over the boolean + display hint: 'video' -> leaf,
+        # 'playlist' -> container, 'channel' -> container tagged attrs.kind='channel'.
+        t = type.lower()
+        if t == "video":
+            stmt = stmt.where(Thing.container == False)  # noqa: E712
+        elif t == "playlist":
+            stmt = stmt.where(Thing.container == True)  # noqa: E712
+        elif t == "channel":
+            stmt = stmt.where(Thing.container == True,  # noqa: E712
+                              Thing.attrs["kind"].astext == "channel")
+        else:
+            raise HTTPException(status_code=422,
+                                detail="type must be one of channel/playlist/video")
     if url is not None:
         stmt = stmt.where(Thing.url == url)
     if extractor is not None:
@@ -327,7 +360,7 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
 
 def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan,
                           extractor_key: Optional[str]) -> None:
-    """Upsert the video's uploader `thing` + `channel_video` rel (the flat-pull omits it).
+    """Upsert the video's uploader container + a `channel=True` rel (the flat-pull omits it).
 
     Mirrors the Stage-1 channel fan-out, used when a `meta` job's full extract discovers the
     uploader a flat playlist pull left out. No-op if the uploader has no URL.
@@ -344,7 +377,7 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan,
     else:
         chan_id = existing.id
     session.execute(pg_insert(Rel).values(
-        parent=chan_id, child=video.id, type="channel_video").on_conflict_do_nothing())
+        parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
 
 
 def _apply_video_metadata(session: Session, video: Thing, pull: models.VidFull) -> None:
@@ -364,10 +397,10 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     """Prioritized dispatch: claim the single highest-priority due job (§4.2/§4.5).
 
     The API owns ordering (the runner never queries `thing`): one ordering spans both job
-    types — playlist-before-video, then rating DESC, then `try_on` ASC. The row is claimed
-    with `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent workers never get the same thing
-    (correct the day a 2nd worker appears; single worker in 4.0). On a hit the run is created
-    here (`success=NULL` in-progress marker, `worker` set) and its id returned; 204 if
+    types — container/unknown-before-video, then rating DESC, then `try_on` ASC. The row is
+    claimed with `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent workers never get the same
+    thing (correct the day a 2nd worker appears; single worker in 4.0). On a hit the run is
+    created here (`success=NULL` in-progress marker, `worker` set) and its id returned; 204 if
     nothing is due.
 
     Machine rating is read from the stored column via COALESCE; compute-on-read is Task 2.2.
@@ -376,24 +409,26 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     # an unrated video clears the C-band `meta_branch` (NULL would fail every comparison).
     rating = func.coalesce(Thing.human_rating, Thing.machine_rating, 0.0)
     today = _today()
-    # Stage-1 playlist pull: grade >= C band, due, not already succeeded today.
-    playlist_branch = sa.and_(
-        Thing.type == "playlist", rating >= _PLAYLIST_FLOOR, Thing.try_on <= today,
+    # Stage-1 pull: a container or an unknown thing (`container` is True/NULL), grade >= C
+    # band, due, not already succeeded today.
+    stage1_branch = sa.and_(
+        Thing.container.isnot(False), rating >= _PLAYLIST_FLOOR, Thing.try_on <= today,
         or_(Thing.last_success_dt == None,  # noqa: E711  (SQL IS NULL)
             func.date(Thing.last_success_dt) < today))
-    # Stage-2 video download: grade >= B band, never acquired, due.
+    # Stage-2 video download: a leaf (container False), grade >= B band, never acquired, due.
     video_branch = sa.and_(
-        Thing.type == "video", rating >= _VIDEO_DOWNLOAD_FLOOR,
+        Thing.container == False, rating >= _VIDEO_DOWNLOAD_FLOOR,  # noqa: E712
         Thing.best_oi == None, Thing.try_on <= today)  # noqa: E711
-    # Stage-2 video meta-only: C-band video the flat pull under-described (no human-decision
+    # Stage-2 video meta-only: C-band leaf the flat pull under-described (no human-decision
     # metadata yet, last_success_dt NULL). Fetches metadata only — no media, no best_oi.
     meta_branch = sa.and_(
-        Thing.type == "video", rating >= _PLAYLIST_FLOOR, rating < _VIDEO_DOWNLOAD_FLOOR,
+        Thing.container == False, rating >= _PLAYLIST_FLOOR,  # noqa: E712
+        rating < _VIDEO_DOWNLOAD_FLOOR,
         Thing.last_success_dt == None, Thing.best_oi == None,  # noqa: E711
         Thing.try_on <= today)
     stmt = (select(Thing)
-            .where(or_(playlist_branch, video_branch, meta_branch))
-            .order_by(sa.desc(Thing.type == "playlist"), rating.desc(), Thing.try_on.asc())
+            .where(or_(stage1_branch, video_branch, meta_branch))
+            .order_by(sa.desc(Thing.container.isnot(False)), rating.desc(), Thing.try_on.asc())
             .limit(1).with_for_update(skip_locked=True))
     thing = session.exec(stmt).first()
     if thing is None:
@@ -424,12 +459,14 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
                   session: Session = Depends(get_session)):
     """Stage-1 ingest: record a run's result and upsert the thing/rel graph it found.
 
-    The V4 rewrite of V3's POST /playlist-run, one endpoint for both job kinds. A Stage-2
-    *video* download result sets `best_oi` (the OI file UUID), backfills NULL identity
-    (extractor_key/native_id) from the download, and marks the thing acquired (`try_on=NULL`).
-    A Stage-1 *playlist* pull, on success, fans out into a stub `thing` per entry (+ channels)
-    and the `rel` edges (#137), backfilling NULL fields we already knew (#147); on failure it
-    records the failure only (C8). The Fibonacci `try_on` backoff is Task 1.4.
+    The V4 rewrite of V3's POST /playlist-run, one endpoint for both job kinds. The result
+    body decides the path: a `video` body (or a legacy known leaf) is the Stage-2 path —
+    sets `best_oi` (the OI file UUID) on a download, backfills NULL identity, marks acquired
+    (`try_on=NULL`), and classifies the thing `container=False` (also how an unknown URL that
+    resolved to a single video gets classified, #153). A `playlist` body is the Stage-1
+    container pull — classifies `container=True`, fans out into a stub `thing` per member
+    (videos + sub-containers + uploader channels) and the `rel` edges (#137), backfilling
+    NULL fields we already knew (#147); on failure it records the failure only (C8).
     """
     run = session.get(Run, run_id)
     if run is None:
@@ -456,14 +493,19 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         # TODO still try to get metadata from a failed download?
 
     # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
-    # (distinct from the Stage-1 playlist fan-out below). Both forward the full single-video
-    # `video`; the outcome diverges on `best_oi` (media acquired => download, else meta).
-    if pl_thing is not None and pl_thing.type == "video":
+    # (distinct from the Stage-1 container fan-out below). Identified by a `video` body, or
+    # legacy by the dispatched thing already being a known leaf. A `video` body on an unknown
+    # thing is also how a single-video discovery is classified (container=False, #153). Both
+    # forward the full single-video `video`; outcome diverges on `best_oi` (download vs meta).
+    is_video_result = item.video is not None or (
+        item.playlist is None and pl_thing is not None and pl_thing.container is False)
+    if pl_thing is not None and is_video_result:
+        pl_thing.container = False             # classify (discovery) / affirm a leaf
         if item.video is not None:
             _apply_video_metadata(session, pl_thing, item.video)  # display+identity+channel
         else:  # legacy / video omitted: identity-only fallback (#147)
             _apply_backfill(session, pl_thing,
-                            Thing(type="video", bucket=pl_thing.bucket,
+                            Thing(container=False, bucket=pl_thing.bucket,
                                   extractor_key=item.extractor_key, native_id=item.native_id))
         pl_thing.last_success_dt = now
         pl_thing.last_failure_dt = None
@@ -480,44 +522,53 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
 
     if item.playlist is None:
         raise HTTPException(status_code=422,
-                            detail="playlist is required on a successful playlist run")
-    # Stubs inherit the dispatched playlist thing's bucket (immutable, [A10]) and its
-    # propagated soft hints (attrs.cookies/lpm_lib -> video stubs, [A11]).
+                            detail="playlist or video is required on a successful run")
+    # Stubs inherit the dispatched container's bucket (immutable, [A10]) and its propagated
+    # soft hints (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
     graph = xform.pl_full2things(item.playlist, bucket=pl_thing.bucket,
                                  parent_attrs=pl_thing.attrs)
 
-    run.entries_hash = xform.pl_hash(item.playlist.entries)
+    run.entries_hash = xform.pl_hash(item.playlist.entries, item.playlist.child_playlists)
     run.playlist_count = xform.reconcile_count(item.playlist)
 
-    # The dispatched thing IS the playlist: backfill it, correct its type, mark success.
+    # The dispatched thing IS the container: backfill it, classify it, mark success.
     _apply_backfill(session, pl_thing, graph.playlist)
-    pl_thing.type = graph.playlist.type
+    pl_thing.container = True
     pl_thing.last_success_dt = now
+    # A container that is its own videos' uploader or owns sub-containers is acting as a
+    # channel — tag the display hint (any channel=True edge it parents, idempotent).
+    if (any(r.parent == graph.playlist.id and r.channel for r in graph.rels)
+            and (pl_thing.attrs or {}).get("kind") != "channel"):
+        pl_thing.attrs = {**(pl_thing.attrs or {}), "kind": "channel"}
 
     remap = {graph.playlist.id: pl_thing.id}
-    for stub in graph.videos + graph.channels:
+    for stub in graph.videos + graph.channels + graph.child_playlists:
         existing = _find_thing(session, stub)
         if existing is not None:
             _apply_backfill(session, existing, stub)
             _refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
-            # Metadata-complete once the extracted fields are enough for a human to rate it;
-            # decided API-side from the stored fields (§Stage 1). Set once, when still NULL.
-            if (existing.type == "video" and existing.last_success_dt is None
+            # Carry a freshly-discovered channel hint onto a pre-existing container.
+            if ((stub.attrs or {}).get("kind") == "channel"
+                    and (existing.attrs or {}).get("kind") != "channel"):
+                existing.attrs = {**(existing.attrs or {}), "kind": "channel"}
+            # A video is metadata-complete once its fields are enough to rate (a present
+            # title); decided API-side (§Stage 1). Set once, when still NULL.
+            if (existing.container is False and existing.last_success_dt is None
                     and xform.enough_to_rate(existing)):
                 existing.last_success_dt = now
             remap[stub.id] = existing.id
         else:
-            if stub.type == "video" and xform.enough_to_rate(stub):
+            if stub.container is False and xform.enough_to_rate(stub):
                 stub.last_success_dt = now   # else NULL -> a `meta` job enriches it later
             session.add(stub)
             remap[stub.id] = stub.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
-    # Bulk upsert the edges: the (parent, child, type) PK dedups, so no per-edge SELECT.
+    # Bulk upsert the edges: the (parent, child) PK dedups, so no per-edge SELECT.
     for rel in graph.rels:
         session.execute(pg_insert(Rel).values(
             parent=remap[rel.parent], child=remap[rel.child],
-            type=rel.type).on_conflict_do_nothing())
+            channel=rel.channel).on_conflict_do_nothing())
 
-    _set_try_on(session, pl_thing)   # successful playlist run -> next backoff date (§4.4)
+    _set_try_on(session, pl_thing)   # successful container run -> next backoff date (§4.4)
     return _finish(session, run)
