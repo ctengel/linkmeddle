@@ -10,7 +10,7 @@ app = typer.Typer(help="CLI to add things by URL to the LinkMeddle API (POST /th
 
 
 @app.command("add-thing")
-def add(url: str, rating: str = "B", thing_type: str = "playlist") -> None:
+def add(url: str, rating: str = "C", thing_type: str = "playlist") -> None:
     """Add a thing by URL by POSTing to /things/ (V4 form of the old schedule add)."""
     assert LINKMEDDLE_PLAPI is not None, "LINKMEDDLE_PLAPI env var must be set"
     payload = {"url": url, "type": thing_type, "rating": rating}

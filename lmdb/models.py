@@ -1,6 +1,9 @@
 """LinkMeddle data models
 
-Includes DLP-compat and LM-native
+The thin worker->API "pull" contract (UlChan/VidFull/PlaylistFull), the frozen V4
+thing/rel/run schema, and the API I/O views. The worker extracts the pull contract
+straight from the raw yt-dlp info dict (run_bknd.extract_pull), so nothing here mirrors
+yt-dlp's unstable shape.
 """
 
 import datetime
@@ -12,121 +15,43 @@ from sqlalchemy import Column, ForeignKey, Index, text
 from sqlalchemy.dialects import postgresql
 from sqlmodel import Field, SQLModel
 
-class CommonDLP(BaseModel):
-    """DLP: Elements fon in both playlists and entries thereof"""
-    channel_id: Optional[str] = None
-    channel_url: Optional[str] = None
-    description: Optional[str] = None
-    extractor_key: Optional[str] = None
-    extractor: Optional[str] = None
-    id: str # TODO should this be Optional?
-    original_url: Optional[str] = None
-    playlist_count: Optional[int] = None
-    title: Optional[str] = None
-    uploader_id: Optional[str] = None
-    uploader: Optional[str] = None
-    uploader_url: Optional[str] = None
-    webpage_url_basename: Optional[str] = None
-    webpage_url_domain: Optional[str] = None
-    webpage_url: Optional[str] = None
-
-
-class PlVidDLP(CommonDLP):
-    """DLP: A vid as seen as a playlist entry"""
-    categories: list[str] = []
-    channel: Optional[str] = None
-    display_id: Optional[str] = None
-    duration: Optional[int] = None
-    epoch: Optional[int] = None  # NOTE this is just NOW
-    ext: Optional[str] = None
-    format_id: Optional[str] = None
-    format: Optional[str] = None
-    fulltitle: Optional[str] = None
-    _has_drm: Optional[bool] = False
-    height: Optional[int] = None
-    is_live: Optional[bool] = None
-    language: Optional[str] = None
-    live_status: Optional[str] = None
-    n_entries: Optional[int] = None
-    playlist_autonumber: Optional[int] = None
-    playlist_channel_id: Optional[str] = None
-    playlist_id: Optional[str] = None
-    playlist_index: Optional[int] = None
-    playlist: Optional[str] = None
-    playlist_uploader_id: Optional[str] = None
-    playlist_uploader: Optional[str] = None
-    playlist_webpage_url: Optional[str] = None
-    protocol: Optional[str] = None
-    thumbnail: Optional[str] = None
-    timestamp: Optional[int] = None
-    upload_date: Optional[str] = None  # YYYYMMDD
-    was_live: Optional[bool] = None
-    width: Optional[int] = None
-
-
-class DLPVersion(BaseModel):
-    """DLP version info"""
-    version: str
-    current_git_head: Optional[str] = None
-    release_git_head: str
-    repository: str
-
-class PlaylistDLP(CommonDLP):
-    """A DLP root playlist"""
-    entries: list['PlVidDLP | PlaylistDLP | None'] = []
-    epoch: int  # NOTE this is just NOW
-    modified_date: Optional[str] = None  # YYYYMMDD
-    _type: str  # "playlist
-    _version: DLPVersion
+# --- The thin "pull" contract (worker -> API) ------------------------------------------
+# A Stage-1 playlist pull, reduced to exactly the fields that land in thing/rel plus the
+# per-video Stage-2 load-info hint. The worker extracts these straight from the unstable
+# yt-dlp info dict (run_bknd.extract_pull), so the API and xform never see raw yt-dlp
+# shapes — only this stable contract. Fields the DB never stored (duration, ext, formats,
+# categories, ...) are intentionally absent; they remain in the raw blob (run.data_json
+# and each video's attrs.info_json) if a future column ever needs them.
 
 class UlChan(BaseModel):
-    """Uploader/Channel description"""
-    channel_id: Optional[str] = None
-    uploader_id: Optional[str] = None
-    uploader: Optional[str] = None
-    channel_url: Optional[str] = None
-    uploader_url: Optional[str] = None
-
-class DLPIE(BaseModel):
-    """DLP extractor used"""
-    extractor_key: Optional[str] = None
-    extractor: Optional[str] = None
+    """Minimal uploader/channel identity for channel fan-out (worker pre-resolves)."""
+    url: Optional[str] = None         # best uploader/channel URL (uploader_url or channel_url)
+    native_id: Optional[str] = None   # uploader_id or channel_id
+    title: Optional[str] = None       # uploader
 
 class VidFull(BaseModel):
-    """LM-native full video"""
-    channel: UlChan
-    description: Optional[str] = None
-    extractor: DLPIE
-    id: str
+    """A discovered video: just what thing/rel need + the Stage-2 load-info hint."""
+    url: Optional[str] = None              # webpage_url
+    native_id: str                         # yt-dlp entry id (also the pl_hash key)
+    extractor_key: Optional[str] = None    # normalized lowercase
     title: Optional[str] = None
-    webpage_url: Optional[str] = None
-    categories: list[str] = []
-    duration: Optional[int] = None
-    ext: Optional[str] = None
-    format: Optional[str] = None
-    height: Optional[int] = None
-    is_live: Optional[bool] = None
-    language: Optional[str] = None
-    n_entries: Optional[int] = None
-    thumbnail: Optional[str] = None
-    upload_date:  Optional[datetime.datetime] = None
-    was_live: Optional[bool] = None
-    width: Optional[int] = None
+    thumbnail_url: Optional[str] = None
+    modified: Optional[datetime.datetime] = None   # from timestamp/upload_date
+    channel: UlChan = UlChan()
+    # Faithful raw yt-dlp entry dict, carried so it can become the Stage-2 load-info hint
+    # (attrs.info_json -> process_ie_result). Kept raw because the download needs `formats`.
+    info_json: Optional[dict] = None
 
-class PlaylistCommon(SQLModel):
-    """Common elements"""
-    id: Optional[str] = None
+class PlaylistFull(BaseModel):
+    """A discovered playlist + its entries (the POST /jobs/{id}/result body on a pull)."""
+    url: str                               # webpage_url
+    native_id: Optional[str] = None
+    extractor_key: Optional[str] = None
     title: Optional[str] = None
-    modified_date: Optional[datetime.datetime] = None
-    webpage_url: str
-    # TODO do we ever update playlist count in DB?
+    modified: Optional[datetime.datetime] = None
     playlist_count: Optional[int] = None
-
-class PlaylistFull(PlaylistCommon):
-    """LM-native full playlist"""
-    channel: UlChan
-    entries: list[VidFull]
-    extractor: DLPIE
+    channel: UlChan = UlChan()
+    entries: list[VidFull] = []
 
 # --- V4 schema (thing / rel / run) -----------------------------------------------------
 # Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
@@ -285,7 +210,7 @@ class ThingAdd(BaseModel):
     url: str
     bucket: str              # OI storage bucket; required, no server default [A10]
     type: str = 'playlist'   # "unknown -> assume playlist"; overridable
-    rating: Optional[str] = None  # grade letter A/B/C (default B); D/F not allowed at add
+    rating: Optional[str] = None  # grade letter A/B/C (default C); D/F not allowed at add
     cookies: Optional[bool] = None  # soft hint -> attrs.cookies (suggest cookies) [A11]
     lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (optional library tag) [A11]
 
@@ -318,8 +243,12 @@ class RunResultIn(BaseModel):
     Stage-2 (video download): `best_oi` is the OI file UUID from the upload (info['oi_uuid']),
     with `extractor_key`/`native_id` for identity backfill. `data_json` carries the raw yt-dlp
     output; `input_json` records the per-run decisions (e.g. whether cookies were used).
+    Stage-2 (video *meta*): `video` is the single-video metadata fetched for a C-band video
+    that the flat pull couldn't describe richly enough for a human to rate (no media, no
+    `best_oi`) — the meta-job counterpart of `playlist`.
     """
     playlist: Optional[PlaylistFull] = None
+    video: Optional[VidFull] = None
     best_oi: Optional[uuid.UUID] = None
     extractor_key: Optional[str] = None
     native_id: Optional[str] = None

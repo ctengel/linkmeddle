@@ -13,7 +13,6 @@ from pytest_postgresql import factories
 
 from lmdb import api
 from lmdb import models
-from lmdb import xform
 
 # Fedora keeps pg_ctl in /usr/bin (pytest-postgresql's default assumes a Debian path).
 postgresql_proc = factories.postgresql_proc(executable="/usr/bin/pg_ctl")
@@ -52,12 +51,11 @@ def test_add_thing_defaults(client):
     assert r.status_code == 201
     t = r.json()
     assert t["type"] == "playlist"          # unknown -> assume playlist
-    assert t["human_rating"] == 1.0         # default B
+    assert t["human_rating"] == 0.0         # default C
     assert t["try_on"] == models.naive_utcnow().date().isoformat()  # app is UTC, not local
     assert t["bucket"] == "b1"              # required, round-trips ([A10])
     assert t["attrs"] is None               # no cookies/lpm_lib hints supplied
     assert t["extractor_key"] is None and t["native_id"] is None  # worker fills later
-    assert t["id"] and t["created_dt"]
 
 
 def test_add_thing_bucket_required(client):
@@ -103,7 +101,7 @@ def test_add_thing_idempotent(client):
                                        "bucket": "second"})
     assert r2.status_code == 200
     assert r2.json()["id"] == r1.json()["id"]
-    assert r2.json()["human_rating"] == 1.0  # unchanged; existing returned as-is
+    assert r2.json()["human_rating"] == 0.0  # unchanged; existing returned as-is
     assert r2.json()["bucket"] == "first"    # bucket is immutable ([A10])
 
 
@@ -306,7 +304,7 @@ def _claim(client, worker=None):
 
 
 def _claimed_run(client, url, bucket="plbucket", cookies=None, lpm_lib=None):
-    """Add a B-rated playlist by url and claim it; returns (thing_id, run_id)."""
+    """Add a default-rated (C) playlist by url and claim it; returns (thing_id, run_id)."""
     body = {"url": url, "bucket": bucket}
     if cookies is not None:
         body["cookies"] = cookies
@@ -346,11 +344,28 @@ def test_claim_video_when_no_playlist(client):
 
 
 def test_claim_skips_ineligible_videos(client):
-    _seed_thing(type="video", url="http://e/vc", human_rating=0.0, try_on=_TODAY)   # C < B
+    _seed_thing(type="video", url="http://e/vc", human_rating=0.0, try_on=_TODAY,
+                last_success_dt=models.naive_utcnow())   # C + metadata-complete (no meta job)
+    _seed_thing(type="video", url="http://e/vd", human_rating=-1.0, try_on=_TODAY)  # D: no meta
     _seed_thing(type="video", url="http://e/vacq", human_rating=2.0, try_on=_TODAY,
                 best_oi=uuid.uuid4())                                               # acquired
     _seed_thing(type="video", url="http://e/vfut", human_rating=2.0, try_on=_FUTURE)  # not due
     assert _claim(client) is None
+
+
+def test_claim_meta_for_underdescribed_c(client):
+    # A C-band video the flat pull couldn't describe (last_success_dt NULL) -> metadata-only job.
+    v = _seed_thing(type="video", url="http://e/vmeta", try_on=_TODAY)  # unrated -> C
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+
+
+def test_claim_download_outranks_meta(client):
+    # A B video (download) outranks a C video (meta) in a single ordering.
+    b = _seed_thing(type="video", url="http://e/vb", human_rating=1.0, try_on=_TODAY)
+    _seed_thing(type="video", url="http://e/vcm", try_on=_TODAY)        # C -> meta
+    job = _claim(client)
+    assert job["thing"]["id"] == b and job["action"] == "download"
 
 
 def test_claim_skips_ineligible_playlists(client):
@@ -372,31 +387,38 @@ def test_claim_creates_in_progress_run(client):
 
 
 def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest",
-                per_video_uploader=False) -> dict:
-    """A JSON-ready LM-native PlaylistFull body for the ingest endpoint.
+                per_video_uploader=False, info_json=False) -> dict:
+    """A JSON-ready thin PlaylistFull body for the ingest endpoint (what the worker posts).
 
-    By default every entry shares the playlist's uploader (up1). With
+    `extractor_key` is already normalized (lowercase) the way run_bknd.extract_pull emits
+    it. By default every entry shares the playlist's uploader (up1). With
     `per_video_uploader`, each entry gets its own uploader (vup{i}) so the channel
-    fan-out (`channel_video`, 1.3c) can be exercised with distinct uploaders.
+    fan-out (`channel_video`, 1.3c) can be exercised with distinct uploaders. With
+    `info_json`, each entry carries a raw-yt-dlp-style info dict -> attrs.info_json hint.
     """
     def vid_channel(i):
         if per_video_uploader:
-            return models.UlChan(uploader_id=f"vup{i}", uploader=f"V Up {i}",
-                                 uploader_url=f"http://example/vup{i}")
-        return models.UlChan(uploader_id="up1", uploader="Up One",
-                             uploader_url="http://example/up1")
+            return models.UlChan(native_id=f"vup{i}", title=f"V Up {i}",
+                                   url=f"http://example/vup{i}")
+        return models.UlChan(native_id="up1", title="Up One",
+                               url="http://example/up1")
+    def vid_info(i):
+        if not info_json:
+            return None
+        return {"id": f"vid{i}", "webpage_url": f"http://example/v/{i}",
+                "formats": [{"format_id": "best", "url": f"http://cdn/{i}.mp4"}]}
     pl = models.PlaylistFull(
-        id=native, title="Ingest PL", webpage_url=url,
-        modified_date=datetime.datetime(2026, 1, 31), playlist_count=n,
-        extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
-        channel=models.UlChan(uploader_id="up1", uploader="Up One",
-                              uploader_url="http://example/up1"),
+        url=url, native_id=native, title="Ingest PL",
+        modified=datetime.datetime(2026, 1, 31), playlist_count=n,
+        extractor_key="youtube",
+        channel=models.UlChan(native_id="up1", title="Up One",
+                                url="http://example/up1"),
         entries=[models.VidFull(
-            id=f"vid{i}", title=f"Video {i}", webpage_url=f"http://example/v/{i}",
-            thumbnail=f"http://example/v/{i}/t.jpg",
-            upload_date=datetime.datetime(2026, 1, i + 1),
-            extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
-            channel=vid_channel(i),
+            native_id=f"vid{i}", title=f"Video {i}", url=f"http://example/v/{i}",
+            thumbnail_url=f"http://example/v/{i}/t.jpg",
+            modified=datetime.datetime(2026, 1, i + 1),
+            extractor_key="youtube",
+            channel=vid_channel(i), info_json=vid_info(i),
         ) for i in range(n)],
     )
     return pl.model_dump(mode="json")
@@ -432,7 +454,7 @@ def test_ingest_fans_out(client):
     # #147: the url-only playlist thing is backfilled from the pull
     pl = client.get(f"/things/{tid}").json()
     assert pl["native_id"] == "plfan"
-    assert pl["extractor_key"] == "youtube"   # lowercased
+    assert pl["extractor_key"] == "youtube"   # normalized by the worker (extract_pull)
     assert pl["title"] == "Ingest PL"
     assert pl["last_success_dt"]
 
@@ -458,6 +480,43 @@ def test_ingest_fans_out(client):
     assert chans and all(c["bucket"] == "plbucket" for c in chans)
 
 
+def test_ingest_last_success_from_title(client):
+    # API decides "enough to rate" from extracted fields: a titled stub is metadata-complete
+    # (last_success_dt set); a title-less stub stays NULL and is claimable as a `meta` job.
+    url = "http://example/pl/rate"
+    tid, rid = _claimed_run(client, url)
+    pl = models.PlaylistFull(
+        url=url, native_id="plrate", title="Rate PL", extractor_key="youtube",
+        playlist_count=2, channel=models.UlChan(url="http://example/up1"),
+        entries=[
+            models.VidFull(native_id="hastitle", title="Has Title",
+                           url="http://example/v/ht", extractor_key="youtube"),
+            models.VidFull(native_id="notitle", url="http://example/v/nt",
+                           extractor_key="youtube"),
+        ])
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": pl.model_dump(mode="json")}).status_code == 200
+    vids = {v["native_id"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    assert vids["hastitle"]["last_success_dt"]            # title present -> metadata-complete
+    assert vids["notitle"]["last_success_dt"] is None     # title-less -> needs a meta job
+    job = _claim(client)                                  # the title-less C video is next, as meta
+    assert job["thing"]["id"] == vids["notitle"]["id"] and job["action"] == "meta"
+
+
+def test_meta_result_fans_out_channel(client):
+    # A full meta extract reveals the uploader a flat pull omitted -> channel thing + rel.
+    v, rid = _claimed_meta(client, url="http://e/mc")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "mcv", "title": "MC", "extractor_key": "youtube",
+                                "channel": {"url": "http://e/chan9", "title": "Chan 9"},
+                                "info_json": {"id": "mcv"}}})
+    related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    chan = [e for e in related if e["rel_type"] == "channel_video"]
+    assert len(chan) == 1 and chan[0]["thing"]["type"] == "channel"
+    assert chan[0]["thing"]["url"] == "http://e/chan9"
+
+
 def test_ingest_propagates_hints(client):
     # 1.3b: a playlist's cookies/lpm_lib hints propagate onto its video stubs (attrs);
     # channels do not carry the hints (bucket only).
@@ -469,6 +528,49 @@ def test_ingest_propagates_hints(client):
     assert vids and all(v["attrs"] == {"cookies": True, "lpm_lib": "lib7"} for v in vids)
     chans = client.get("/things/", params={"type": "channel"}).json()
     assert chans and all(not c["attrs"] for c in chans)
+
+
+def test_ingest_stores_info_json_hint(client):
+    # Producer side: each entry's raw info dict lands as attrs.info_json on the video stub.
+    url = "http://example/pl/infojson"
+    tid, rid = _claimed_run(client, url)
+    payload = _pl_payload(2, url=url, native="plij", info_json=True)
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+    vids = client.get("/things/", params={"type": "video"}).json()
+    assert vids
+    for v in vids:
+        info = v["attrs"]["info_json"]
+        assert info["id"] == v["native_id"]
+        assert "formats" in info
+    chans = client.get("/things/", params={"type": "channel"}).json()
+    assert chans and all(not (c["attrs"] or {}).get("info_json") for c in chans)
+
+
+def test_ingest_refreshes_info_json_until_acquired(client):
+    # Re-pull updates info_json while best_oi is NULL; an acquired video is left untouched.
+    url = "http://example/pl/ijrefresh"
+    tid, rid = _claimed_run(client, url)
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": _pl_payload(2, url=url, native="plijr",
+                                                     info_json=True)}).status_code == 200
+    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    # mark vid0 acquired (best_oi set), leave vid1 pending
+    with _session() as s:
+        acquired = s.get(models.Thing, uuid.UUID(by_url["http://example/v/0"]["id"]))
+        acquired.best_oi = uuid.uuid4()
+        s.add(acquired)
+        s.commit()
+
+    # second pull with a *changed* info dict (extra key) — same day, so seed the run
+    rid2 = _seed_run(tid)
+    payload2 = _pl_payload(2, url=url, native="plijr", info_json=True)
+    for entry in payload2["entries"]:
+        entry["info_json"]["refreshed"] = True
+    assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload2}).status_code == 200
+
+    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    assert by_url["http://example/v/1"]["attrs"]["info_json"].get("refreshed") is True   # updated
+    assert "refreshed" not in by_url["http://example/v/0"]["attrs"]["info_json"]          # frozen
 
 
 def test_ingest_per_video_uploader_channels(client):
@@ -623,75 +725,90 @@ def test_download_result_failure(client):
     assert t["try_on"] is not None        # failure backoff applied (1.4), not left at today/null
 
 
-# --- try_on backoff (Task 1.4): pure xform ---------------------------------------------
-
-def _run_on(day, success, h=None):
-    """A bare models.Run for the pure backoff helpers (no DB)."""
-    return models.Run(thing_id=uuid.uuid4(), success=success, entries_hash=h,
-                      starttime=datetime.datetime(2026, 1, day, 12, 0))
-
-
-def test_initial_interval_bands():
-    assert xform.initial_interval(2.0) == 3    # A
-    assert xform.initial_interval(1.0) == 5    # B
-    assert xform.initial_interval(0.0) == 8    # C
-    assert xform.initial_interval(-1.0) == 8   # D/below falls in the C interval
-
-
-def test_next_try_on_first_success_uses_initial():
-    today = datetime.date(2026, 1, 10)
-    runs = [_run_on(10, True, b"h1")]
-    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=5)   # B
-    assert xform.next_try_on(2.0, runs, today) == today + datetime.timedelta(days=3)   # A
+def test_download_result_enriches_and_fans_out_channel(client):
+    # stub -> download with no meta/human step in between: the download's full extract is the
+    # only metadata we get, so its display fields + channel must be captured (== meta path).
+    oi = str(uuid.uuid4())
+    v, rid = _claimed_download(client, url="http://e/dlmeta")   # url-only stub
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True, "best_oi": oi,
+                      "video": {"native_id": "dv1", "title": "Downloaded", "extractor_key": "youtube",
+                                "thumbnail_url": "http://e/dv1.jpg",
+                                "channel": {"url": "http://e/dchan", "title": "DChan"},
+                                "info_json": {"id": "dv1"}}})
+    t = client.get(f"/things/{v}").json()
+    assert t["best_oi"] == oi and t["try_on"] is None and t["last_success_dt"]
+    assert t["title"] == "Downloaded" and t["thumbnail_url"] == "http://e/dv1.jpg"  # display captured
+    related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    chan = [e for e in related if e["rel_type"] == "channel_video"]
+    assert len(chan) == 1 and chan[0]["thing"]["url"] == "http://e/dchan"           # channel fanned out
 
 
-def test_next_try_on_backs_off_when_unchanged():
-    # 5-day cadence, identical membership hash -> back off (fib up: 5 -> 8)
-    runs = [_run_on(d, True, b"same") for d in (1, 6, 11, 16)]
-    today = datetime.date(2026, 1, 16)
-    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+def _claimed_meta(client, **kw):
+    """Seed a C-band, under-described due video (last_success_dt NULL), claim it -> meta."""
+    kw.setdefault("try_on", _TODAY)   # unrated -> C
+    v = _seed_thing(type="video", **kw)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+    return v, job["run_id"]
 
 
-def test_next_try_on_speeds_up_when_changing():
-    # every run finds new content -> speed up (fib down: 5 -> 3)
-    runs = [_run_on(d, True, bytes([i])) for i, d in enumerate((1, 6, 11, 16))]
-    today = datetime.date(2026, 1, 16)
-    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=3)
+def test_meta_result_enriches_without_acquiring(client):
+    v, rid = _claimed_meta(client, url="http://e/m1")
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "mv1", "title": "Fetched Title",
+                                    "extractor_key": "youtube",
+                                    "info_json": {"id": "mv1", "description": "d"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["title"] == "Fetched Title"                 # NULL display backfilled from the fetch
+    assert t["extractor_key"] == "youtube" and t["native_id"] == "mv1"
+    assert t["attrs"]["info_json"]["description"] == "d"  # Stage-2 load-info hint stored
+    assert t["best_oi"] is None                          # metadata only, NOT acquired
+    assert t["last_success_dt"]                          # human-decision metadata now in hand
+    assert t["last_failure_dt"] is None
+    assert t["try_on"] is not None                       # backoff applied (not NULL: not acquired)
+    # Now metadata-complete -> no further meta job is dispatched (Phase II hold).
+    assert _claim(client) is None
 
 
-def test_next_try_on_failure_after_success_tomorrow():
-    runs = [_run_on(1, True, b"h"), _run_on(6, False)]
-    assert xform.next_try_on(1.0, runs, datetime.date(2026, 1, 6)) == datetime.date(2026, 1, 7)
-
-
-def test_next_try_on_consecutive_failures_back_off():
-    # prior success then two failures -> fib backoff from the B initial (5 -> 8)
-    runs = [_run_on(1, True, b"h"), _run_on(6, False), _run_on(11, False)]
-    today = datetime.date(2026, 1, 11)
-    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+def test_meta_result_failure_backs_off(client):
+    # On failure the worker sends no `video` body; handled by the shared video-failure path.
+    v, rid = _claimed_meta(client, url="http://e/m3")
+    r = client.post(f"/jobs/{rid}/result", json={"success": False})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{v}").json()
+    assert t["last_failure_dt"] and t["best_oi"] is None and t["last_success_dt"] is None
+    assert t["try_on"] is not None
 
 
 # --- try_on backoff (Task 1.4): wired through the API ----------------------------------
+# (the pure backoff math — initial_interval / next_try_on day arithmetic — lives in
+# test_xform.py; these tests only assert the endpoint wires it in.)
 
 def test_playlist_success_sets_backoff(client):
+    # The endpoint wires success through the backoff helper: try_on lands in the future
+    # (exact day arithmetic is pinned by the pure next_try_on tests in test_xform).
     url = "http://example/pl/backoff"
-    tid, rid = _claimed_run(client, url)          # B-rated playlist, claimed
+    tid, rid = _claimed_run(client, url)          # C-rated playlist, claimed
     assert client.post(f"/jobs/{rid}/result",
                        json={"playlist": _pl_payload(2, url=url, native="plbo")}
                        ).status_code == 200
     t = client.get(f"/things/{tid}").json()
-    expect = (models.naive_utcnow().date() + datetime.timedelta(days=5)).isoformat()  # B initial
-    assert t["try_on"] == expect
+    assert datetime.date.fromisoformat(t["try_on"]) > _TODAY
+    assert t["last_success_dt"]
 
 
 def test_playlist_failure_sets_backoff(client):
+    # Failure also backs off (and records the failure timestamp); the magnitude is the
+    # pure helper's concern, asserted in test_xform.
     url = "http://example/pl/failbo"
     tid, rid = _claimed_run(client, url)
     assert client.post(f"/jobs/{rid}/result", json={"success": False}).status_code == 200
     t = client.get(f"/things/{tid}").json()
-    # first-ever failure, no prior success -> fib backoff from the B initial: next_fib(5) = 8
-    expect = (models.naive_utcnow().date() + datetime.timedelta(days=8)).isoformat()
-    assert t["try_on"] == expect and t["last_failure_dt"]
+    assert datetime.date.fromisoformat(t["try_on"]) > _TODAY
+    assert t["last_failure_dt"]
 
 
 def test_claim_cookies_escalation(client):

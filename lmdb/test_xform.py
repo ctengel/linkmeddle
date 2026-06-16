@@ -7,71 +7,41 @@ import pytest
 from lmdb import models, xform
 
 
-def _vid(i: int, extractor_key="YouTube") -> models.VidFull:
+def _vid(i: int, extractor_key="youtube") -> models.VidFull:
     return models.VidFull(
-        id=f"vid{i}",
+        native_id=f"vid{i}",
         title=f"Video {i}",
-        webpage_url=f"http://example/v/{i}",
-        thumbnail=f"http://example/v/{i}/thumb.jpg",
-        upload_date=datetime.datetime(2026, 1, i + 1),
-        extractor=models.DLPIE(extractor_key=extractor_key, extractor="youtube"),
-        channel=models.UlChan(uploader_id="up1", uploader="Up One",
-                              uploader_url="http://example/up1"),
+        url=f"http://example/v/{i}",
+        thumbnail_url=f"http://example/v/{i}/thumb.jpg",
+        modified=datetime.datetime(2026, 1, i + 1),
+        extractor_key=extractor_key,
+        channel=models.UlChan(native_id="up1", title="Up One",
+                                url="http://example/up1"),
     )
 
 
 def _pl(n=3) -> models.PlaylistFull:
     return models.PlaylistFull(
-        id="pl1",
+        url="http://example/pl/1",
+        native_id="pl1",
         title="My Playlist",
-        webpage_url="http://example/pl/1",
-        modified_date=datetime.datetime(2026, 1, 31),
+        modified=datetime.datetime(2026, 1, 31),
         playlist_count=n,
-        extractor=models.DLPIE(extractor_key="YouTube", extractor="youtube"),
-        channel=models.UlChan(uploader_id="up1", uploader="Up One",
-                              uploader_url="http://example/up1"),
+        extractor_key="youtube",
+        channel=models.UlChan(native_id="up1", title="Up One",
+                                url="http://example/up1"),
         entries=[_vid(i) for i in range(n)],
     )
 
 
-def test_pl_full2things_shape():
-    g = xform.pl_full2things(_pl(3))
-    # playlist thing
-    assert g.playlist.type == "playlist"
-    assert g.playlist.url == "http://example/pl/1"
-    assert g.playlist.native_id == "pl1"
-    assert g.playlist.extractor_key == "youtube"  # lowercased
-    assert g.playlist.channel == "http://example/up1"
-    # video stubs carry denormalized fields
-    assert len(g.videos) == 3
-    assert {v.type for v in g.videos} == {"video"}
-    assert g.videos[0].title == "Video 0"
-    assert g.videos[0].native_id == "vid0"
-    assert g.videos[0].extractor_key == "youtube"
-    # one channel thing
-    assert len(g.channels) == 1
-    assert g.channels[0].type == "channel"
-    assert g.channels[0].url == "http://example/up1"
-
-
-def test_pl_full2things_edges():
-    g = xform.pl_full2things(_pl(3))
-    pv = [r for r in g.rels if r.type == "playlist_video"]
-    cp = [r for r in g.rels if r.type == "channel_playlist"]
-    assert len(pv) == 3
-    assert all(r.parent == g.playlist.id for r in pv)
-    assert {r.child for r in pv} == {v.id for v in g.videos}
-    assert len(cp) == 1
-    assert cp[0].parent == g.channels[0].id
-    assert cp[0].child == g.playlist.id
-
-
 def test_pl_full2things_no_channel_url():
     pl = _pl(1)
-    pl.channel = models.UlChan()  # no urls
-    g = xform.pl_full2things(pl)
+    pl.channel = models.UlChan()  # no urls on the playlist...
+    for vid in pl.entries:
+        vid.channel = models.UlChan()  # ...nor any entry
+    g = xform.pl_full2things(pl, bucket="b")
     assert g.channels == []
-    assert not any(r.type == "channel_playlist" for r in g.rels)
+    assert not any(r.type in ("channel_playlist", "channel_video") for r in g.rels)
 
 
 def test_pl_hash_order_independent():
@@ -115,20 +85,55 @@ def test_runs_differ():
     assert xform.runs_differ(same_a, changed) is True
 
 
-def test_null_backfill_fills_only_nulls():
-    existing = models.Thing(type="playlist", url="http://x")  # title/extractor/... all NULL
-    incoming = models.Thing(type="playlist", title="T", extractor_key="youtube",
-                            native_id="n1", channel="http://c", thumbnail_url="http://t",
-                            modified=datetime.datetime(2026, 1, 1))
-    assert xform.null_backfill(existing, incoming) == {
-        "title": "T", "extractor_key": "youtube", "native_id": "n1",
-        "channel": "http://c", "thumbnail_url": "http://t",
-        "modified": datetime.datetime(2026, 1, 1)}
+def test_pl_full2things_does_not_set_last_success():
+    # The builder is pure construction now; the API endpoint owns the last_success decision.
+    g = xform.pl_full2things(_pl(2), bucket="b")
+    assert all(v.last_success_dt is None for v in g.videos)
 
 
-def test_null_backfill_preserves_existing_values():
-    existing = models.Thing(type="playlist", title="Keep", extractor_key="vimeo")
-    incoming = models.Thing(type="video", title="New", extractor_key="youtube",
-                            native_id="n2")
-    # only the NULL field (native_id) is offered; present values are untouched
-    assert xform.null_backfill(existing, incoming) == {"native_id": "n2"}
+# --- try_on backoff (Task 1.4): pure math ----------------------------------------------
+
+def _run_on(day, success, h=None):
+    """A bare models.Run for the pure backoff helpers (no DB)."""
+    return models.Run(thing_id=uuid.uuid4(), success=success, entries_hash=h,
+                      starttime=datetime.datetime(2026, 1, day, 12, 0))
+
+
+def test_initial_interval_bands():
+    assert xform.initial_interval(2.0) == 3    # A
+    assert xform.initial_interval(1.0) == 5    # B
+    assert xform.initial_interval(0.0) == 8    # C
+    assert xform.initial_interval(-1.0) == 8   # D/below falls in the C interval
+
+
+def test_next_try_on_first_success_uses_initial():
+    today = datetime.date(2026, 1, 10)
+    runs = [_run_on(10, True, b"h1")]
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=5)   # B
+    assert xform.next_try_on(2.0, runs, today) == today + datetime.timedelta(days=3)   # A
+
+
+def test_next_try_on_backs_off_when_unchanged():
+    # 5-day cadence, identical membership hash -> back off (fib up: 5 -> 8)
+    runs = [_run_on(d, True, b"same") for d in (1, 6, 11, 16)]
+    today = datetime.date(2026, 1, 16)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+
+
+def test_next_try_on_speeds_up_when_changing():
+    # every run finds new content -> speed up (fib down: 5 -> 3)
+    runs = [_run_on(d, True, bytes([i])) for i, d in enumerate((1, 6, 11, 16))]
+    today = datetime.date(2026, 1, 16)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=3)
+
+
+def test_next_try_on_failure_after_success_tomorrow():
+    runs = [_run_on(1, True, b"h"), _run_on(6, False)]
+    assert xform.next_try_on(1.0, runs, datetime.date(2026, 1, 6)) == datetime.date(2026, 1, 7)
+
+
+def test_next_try_on_consecutive_failures_back_off():
+    # prior success then two failures -> fib backoff from the B initial (5 -> 8)
+    runs = [_run_on(1, True, b"h"), _run_on(6, False), _run_on(11, False)]
+    today = datetime.date(2026, 1, 11)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)

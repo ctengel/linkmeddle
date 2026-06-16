@@ -14,7 +14,7 @@ import os
 import socket
 import warnings
 import requests
-from . import run_bknd, models, xform
+from . import run_bknd, xform
 
 LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 # TODO add pid
@@ -35,29 +35,21 @@ def claim_job(api_base: str, worker: str) -> dict | None:
     return resp.json()
 
 
-def _playlist_full_json(pl: models.PlaylistFull) -> dict:
-    """Serialize an LM-native playlist to JSON-safe dict (datetimes -> ISO)."""
-    body = pl.model_dump()
-    body['modified_date'] = body['modified_date'].isoformat() if body['modified_date'] else None
-    for entry in body['entries']:
-        entry['upload_date'] = entry['upload_date'].isoformat() if entry['upload_date'] else None
-    return body
-
-
 def post_result(api_base: str, run_id: str, info: dict | None, *,
-                download: bool, use_cookies: bool = False,
+                action: str, use_cookies: bool = False,
                 worker: str | None = None) -> dict:
-    """Push a run's result to POST /jobs/{run_id}/result (one path for both job kinds).
+    """Push a run's result to POST /jobs/{run_id}/result (one path for all job kinds).
 
-    `info` is the sanitized yt-dlp output, or None when extraction failed. `download`
-    distinguishes the two kinds (it's the same boolean that drove init_download — the server
-    itself re-derives the kind from thing.type, so no separate 'action' is sent):
+    `info` is the sanitized yt-dlp output, or None when extraction failed. `action` shapes the
+    body (the server re-derives the kind from thing.type, but the result body differs):
 
-    - download=False (Stage-1 pull): info is converted DLP -> PlaylistFull (the fan-out
+    - 'pull' (Stage-1 metadata): info is extracted into the thin PlaylistFull (the fan-out
       body); a non-None info means success (extraction failure already surfaced as None).
-    - download=True (Stage-2 download): the OI file UUID is read from info['oi_uuid'] (set by
-      ObjIdxUploadPP) as `best_oi`, plus extractor/id for identity backfill. Success is
-      `oi_uuid is not None`, NOT merely `info is not None`: _ydl uses
+    - 'meta' / 'download' (Stage-2): both extract the full single-video metadata into a thin
+      VidFull (`video`) so the server enriches the stub identically (display + channel). 'meta'
+      stops there (no media, no OI; success is `info is not None`). 'download' additionally
+      reads the OI file UUID from info['oi_uuid'] (set by ObjIdxUploadPP) as `best_oi`; its
+      success is `oi_uuid is not None`, NOT merely `info is not None`: _ydl uses
       ignoreerrors='only_download', so yt-dlp returns an info dict even when the media
       download failed (the upload PP then never ran, leaving no oi_uuid).
 
@@ -70,13 +62,14 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
         body['data_json'] = info
         body['extractor_key'] = (info.get('extractor') or '').lower() or None
         body['native_id'] = info.get('id')
-        if download:
-            oi_uuid = info.get('oi_uuid')
-            success = oi_uuid is not None
-            body['best_oi'] = str(oi_uuid) if oi_uuid else None
-        else:
-            pl = xform.pl_dlp2lm(models.PlaylistDLP.model_validate(info))
-            body['playlist'] = _playlist_full_json(pl)
+        if action == 'pull':
+            body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
+        else:  # 'download' or 'meta' -> single-video metadata (common); download adds best_oi
+            body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
+            if action == 'download':
+                oi_uuid = info.get('oi_uuid')
+                success = oi_uuid is not None
+                body['best_oi'] = str(oi_uuid) if oi_uuid else None
     body['success'] = success
     resp = requests.post(f"{api_base.rstrip('/')}/jobs/{run_id}/result",
                          json=body, timeout=RESULT_TIMEOUT)
@@ -87,23 +80,31 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
 def initiate_job(api_base: str, job: dict, worker: str) -> None:
     """Run one claimed job and report its result — one common path for both job kinds.
 
-    Stage-1 'pull' (metadata only) and Stage-2 'download' (real download + OI upload) differ
-    only in a few parameters: `download`, and the download-only `oibucket`/`lpmlib`. `cookies`
-    is the server's per-job suggestion (§4.7). A failed run (init_download returns None) posts
-    success=False — fail-whole, no partial resume (§4.7).
+    Three job kinds differ only in a few parameters: Stage-1 'pull' and Stage-2 'meta' both
+    fetch metadata only (`download=False`); Stage-2 'download' also fetches media + uploads to
+    OI (the download-only `oibucket`/`lpmlib`). `cookies` is the server's per-job suggestion
+    (§4.7). A failed run (init_download returns None) posts success=False — fail-whole, no
+    partial resume (§4.7).
+
+    `attrs.info_json`, when present, is a pre-extracted yt-dlp info dict the worker downloads
+    straight from (like `yt-dlp --load-info-json`) instead of re-extracting `thing.url`; it
+    applies to all stages.
     """
     run_id, thing, action = job["run_id"], job["thing"], job["action"]
-    if action not in ("pull", "download"):
+    if action not in ("pull", "download", "meta"):
         warnings.warn(f"Unknown job action {action!r}; skipping {thing.get('url')}")
         return
     download = action == "download"
     cookies = job.get("cookies", False)
+    attrs = thing.get("attrs") or {}
     info = run_bknd.init_download(
         thing["url"], download=download,
         oibucket=thing["bucket"] if download else None,
-        lpmlib=(thing.get("attrs") or {}).get("lpm_lib") if download else None,
-        use_cookies=cookies)
-    post_result(api_base, run_id, info, download=download,
+        lpmlib=attrs.get("lpm_lib") if download else None,
+        use_cookies=cookies,
+        flat=action == "pull",   # flatten only the playlist pull; meta/download stay full
+        info_dict=attrs.get(xform.INFO_JSON_KEY))
+    post_result(api_base, run_id, info, action=action,
                 use_cookies=cookies, worker=worker)
 
 

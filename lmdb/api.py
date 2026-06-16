@@ -17,6 +17,7 @@ from typing import Optional
 from contextlib import asynccontextmanager
 import sqlalchemy as sa
 from sqlalchemy import func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from fastapi import FastAPI, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -24,8 +25,11 @@ from . import models, xform
 from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
                      RunRead, ThingAdd, ThingPatch, ClaimRequest, JobClaim, RunResultIn)
 
-# What the worker should do with a claimed thing, by its type (§4.5 dispatch result).
-ACTION_BY_TYPE = {"playlist": "pull", "video": "download"}
+# Effective-rating floor for fetching a video's *media* (Stage-2 download); below it (C band)
+# a video only gets a metadata-only `meta` job.
+_VIDEO_DOWNLOAD_FLOOR = 0.5
+# Run-eligibility floor for playlists/other (the C band): below it nothing is dispatched.
+_PLAYLIST_FLOOR = -0.5
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -67,8 +71,20 @@ def _effective_rating(thing: Thing) -> float:
 
 def _is_eligible(thing_type: str, rating: float) -> bool:
     """Does `rating` clear the run-eligibility floor for this thing type (§4.5)?"""
-    floor = 0.5 if thing_type == "video" else -0.5   # video=B, playlist/other=C
+    floor = _VIDEO_DOWNLOAD_FLOOR if thing_type == "video" else _PLAYLIST_FLOOR  # video=B, else C
     return rating >= floor
+
+
+def _action_for(thing: Thing) -> str:
+    """What the worker should do with this claimed thing (§4.5 dispatch result).
+
+    Playlist -> 'pull' (Stage-1 metadata fan-out). Video -> 'download' (Stage-2 media+metadata)
+    when it clears the B floor, else 'meta' (Stage-2 metadata-only enrichment for a C-band
+    video the flat pull under-described).
+    """
+    if thing.type == "playlist":
+        return "pull"
+    return "download" if _effective_rating(thing) >= _VIDEO_DOWNLOAD_FLOOR else "meta"
 
 
 def _set_try_on(session: Session, thing: Thing) -> None:
@@ -97,6 +113,25 @@ def _run_read(run: Run) -> RunRead:
                    endtime=run.endtime, success=run.success)
 
 
+def _finish(session: Session, run: Run) -> RunRead:
+    """Commit the in-progress run and return its serialized view (the submit_result tail)."""
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _run_read(run)
+
+
+def _refresh_info_hint(thing: Thing, info: Optional[dict]) -> None:
+    """Stamp the Stage-2 load-info hint onto a video still pending download (best_oi NULL).
+
+    yt-dlp info dicts go stale, so the hint is refreshed while the media is unacquired and
+    left alone once acquired. (Belongs in xform with INFO_JSON_KEY/enough_to_rate once those
+    land there; kept here while xform is mid-reconciliation.)
+    """
+    if info is not None and thing.type == "video" and thing.best_oi is None:
+        thing.attrs = {**(thing.attrs or {}), xform.INFO_JSON_KEY: info}
+
+
 def _related(session: Session, thing_id: uuid.UUID,
              direction: Optional[str]) -> list[RelatedThing]:
     """rel neighbors in both directions (or one if direction is 'child'/'parent')."""
@@ -120,7 +155,7 @@ def _related(session: Session, thing_id: uuid.UUID,
 def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get_session)):
     """Add a thing by URL (the human entry point).
 
-    Stores the URL with a default rating of B (override A/C); `type` defaults to
+    Stores the URL with a default rating of C (override A/B); `type` defaults to
     'playlist' ("unknown -> assume playlist"). `bucket` (OI storage home) is required —
     no server default ([A10]). Optional `cookies`/`lpm_lib` are stored as soft hints in
     `attrs` ([A11]). extractor_key/native_id are filled in later by the worker. Idempotent
@@ -130,7 +165,7 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     if existing:
         response.status_code = status.HTTP_200_OK
         return existing
-    grade = (item.rating or "B").upper()
+    grade = (item.rating or "C").upper()
     if grade not in ADD_GRADES:
         raise HTTPException(status_code=422,
                             detail=f"rating must be one of {sorted(ADD_GRADES)} at add time")
@@ -295,6 +330,39 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
         setattr(existing, key, value)
 
 
+def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan,
+                          extractor_key: Optional[str]) -> None:
+    """Upsert the video's uploader `thing` + `channel_video` rel (the flat-pull omits it).
+
+    Mirrors the Stage-1 channel fan-out, used when a `meta` job's full extract discovers the
+    uploader a flat playlist pull left out. No-op if the uploader has no URL.
+    """
+    stub = xform.thing_from_chan(chan, extractor_key)
+    if stub is None:
+        return
+    existing = _find_thing(session, stub)
+    if existing is None:
+        stub.bucket = video.bucket
+        session.add(stub)
+        session.flush()      # need the id for the rel FK
+        chan_id = stub.id
+    else:
+        chan_id = existing.id
+    session.execute(pg_insert(Rel).values(
+        parent=chan_id, child=video.id, type="channel_video").on_conflict_do_nothing())
+
+
+def _apply_video_metadata(session: Session, video: Thing, pull: models.VidFull) -> None:
+    """Enrich a video thing from a full single-video extract — shared by meta + download.
+
+    NULL-backfills identity + display fields (#147) and fans out the uploader's channel
+    (thing + channel_video rel) the flat pull omitted. Does NOT touch best_oi/try_on/
+    last_success — those per-outcome decisions stay with the caller.
+    """
+    _apply_backfill(session, video, xform.thing_from_vid(pull))
+    _fanout_video_channel(session, video, pull.channel, pull.extractor_key)
+
+
 @app.post("/jobs/claim", response_model=JobClaim,
           responses={204: {"description": "Nothing due"}})
 def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
@@ -309,19 +377,27 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
 
     Machine rating is read from the stored column via COALESCE; compute-on-read is Task 2.2.
     """
-    rating = func.coalesce(Thing.human_rating, Thing.machine_rating)
+    # Effective rating, defaulting an unrated thing to 0.0 (C) — mirrors _effective_rating, so
+    # an unrated video clears the C-band `meta_branch` (NULL would fail every comparison).
+    rating = func.coalesce(Thing.human_rating, Thing.machine_rating, 0.0)
     today = _today()
     # Stage-1 playlist pull: grade >= C band, due, not already succeeded today.
     playlist_branch = sa.and_(
-        Thing.type == "playlist", rating >= -0.5, Thing.try_on <= today,
+        Thing.type == "playlist", rating >= _PLAYLIST_FLOOR, Thing.try_on <= today,
         or_(Thing.last_success_dt == None,  # noqa: E711  (SQL IS NULL)
             func.date(Thing.last_success_dt) < today))
     # Stage-2 video download: grade >= B band, never acquired, due.
     video_branch = sa.and_(
-        Thing.type == "video", rating >= 0.5,
+        Thing.type == "video", rating >= _VIDEO_DOWNLOAD_FLOOR,
         Thing.best_oi == None, Thing.try_on <= today)  # noqa: E711
+    # Stage-2 video meta-only: C-band video the flat pull under-described (no human-decision
+    # metadata yet, last_success_dt NULL). Fetches metadata only — no media, no best_oi.
+    meta_branch = sa.and_(
+        Thing.type == "video", rating >= _PLAYLIST_FLOOR, rating < _VIDEO_DOWNLOAD_FLOOR,
+        Thing.last_success_dt == None, Thing.best_oi == None,  # noqa: E711
+        Thing.try_on <= today)
     stmt = (select(Thing)
-            .where(or_(playlist_branch, video_branch))
+            .where(or_(playlist_branch, video_branch, meta_branch))
             .order_by(sa.desc(Thing.type == "playlist"), rating.desc(), Thing.try_on.asc())
             .limit(1).with_for_update(skip_locked=True))
     thing = session.exec(stmt).first()
@@ -344,7 +420,7 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
                 and not (last_done.input_json or {}).get("cookies")):
             cookies = True
     return JobClaim(run_id=run.id, thing=ThingRead.model_validate(thing),
-                    action=ACTION_BY_TYPE[thing.type], cookies=cookies)
+                    action=_action_for(thing), cookies=cookies)
 
 
 @app.post("/jobs/{run_id}/result", response_model=RunRead)
@@ -374,32 +450,34 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
 
     pl_thing = session.get(Thing, run.thing_id)
 
-    # Stage-2 (video download) result — distinct from the Stage-1 playlist fan-out below.
-    if pl_thing is not None and pl_thing.type == "video":
-        if item.success:
-            incoming = Thing(type="video", bucket=pl_thing.bucket,
-                             extractor_key=item.extractor_key, native_id=item.native_id)
-            _apply_backfill(session, pl_thing, incoming)  # NULL-only identity backfill (#147)
-            pl_thing.best_oi = item.best_oi
-            pl_thing.last_success_dt = now
-            pl_thing.last_failure_dt = None
-            pl_thing.try_on = None       # acquired; never re-fetch (§2.5)
-        else:
-            pl_thing.last_failure_dt = now
-            _set_try_on(session, pl_thing)   # failure backoff (§4.4)
-        session.add(run)
-        session.commit()
-        session.refresh(run)
-        return _run_read(run)
-
+    # Failure is handled identically for every job kind (record + backoff), so do it once
+    # up front before the per-kind success paths below (§4.4).
     if not item.success:
         if pl_thing is not None:
             pl_thing.last_failure_dt = now
-            _set_try_on(session, pl_thing)   # failure backoff (§4.4)
-        session.add(run)
-        session.commit()
-        session.refresh(run)
-        return _run_read(run)
+            _set_try_on(session, pl_thing)
+        return _finish(session, run)
+
+    # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
+    # (distinct from the Stage-1 playlist fan-out below). Both forward the full single-video
+    # `video`; the outcome diverges on `best_oi` (media acquired => download, else meta).
+    if pl_thing is not None and pl_thing.type == "video":
+        if item.video is not None:
+            _apply_video_metadata(session, pl_thing, item.video)  # display+identity+channel
+        else:  # legacy / video omitted: identity-only fallback (#147)
+            _apply_backfill(session, pl_thing,
+                            Thing(type="video", bucket=pl_thing.bucket,
+                                  extractor_key=item.extractor_key, native_id=item.native_id))
+        pl_thing.last_success_dt = now
+        pl_thing.last_failure_dt = None
+        if item.best_oi is not None:          # download: media acquired
+            pl_thing.best_oi = item.best_oi
+            pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
+        else:                                 # meta: metadata only, still pending acquisition
+            info = item.video.info_json if item.video is not None else None
+            _refresh_info_hint(pl_thing, info)   # keep the Stage-2 load-info hint fresh
+            _set_try_on(session, pl_thing)       # backoff (§4.4)
+        return _finish(session, run)
 
     if item.playlist is None:
         raise HTTPException(status_code=422,
@@ -422,18 +500,25 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         existing = _find_thing(session, stub)
         if existing is not None:
             _apply_backfill(session, existing, stub)
+            _refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
+            # Metadata-complete once the extracted fields are enough for a human to rate it;
+            # decided API-side from the stored fields (§Stage 1). Set once, when still NULL.
+            if (existing.type == "video" and existing.last_success_dt is None
+                    and xform.enough_to_rate(existing)):
+                existing.last_success_dt = now
             remap[stub.id] = existing.id
         else:
+            if stub.type == "video" and xform.enough_to_rate(stub):
+                stub.last_success_dt = now   # else NULL -> a `meta` job enriches it later
             session.add(stub)
             remap[stub.id] = stub.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
+    # Bulk upsert the edges: the (parent, child, type) PK dedups, so no per-edge SELECT.
     for rel in graph.rels:
-        parent, child = remap[rel.parent], remap[rel.child]
-        if session.get(Rel, (parent, child, rel.type)) is None:
-            session.add(Rel(parent=parent, child=child, type=rel.type))
+        session.execute(pg_insert(Rel).values(
+            parent=remap[rel.parent], child=remap[rel.child],
+            type=rel.type).on_conflict_do_nothing())
 
     _set_try_on(session, pl_thing)   # successful playlist run -> next backoff date (§4.4)
-    session.commit()
-    session.refresh(run)
-    return _run_read(run)
+    return _finish(session, run)

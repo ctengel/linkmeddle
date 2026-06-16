@@ -10,6 +10,8 @@ from . import models
 
 FIB = [1, 2, 3, 5, 8, 13, 21, 34]
 
+INFO_JSON_KEY = "info_json"   # attrs key carrying a video stub's raw yt-dlp entry (Stage-2 hint)
+
 def next_fib(existing: int | float | None, up: bool) -> int:
     """Next fibonacci number up or down"""
     if existing is None:
@@ -31,7 +33,7 @@ def adjust(existing: list[int], up: bool) -> int:
 
 def entry2text(entry: models.VidFull) -> str:
     """Change a pl entry into single unique string"""
-    return entry.id
+    return entry.native_id
 
 def pl2txt(entries: list[models.VidFull]) -> str:
     """Change playlist entries into a string
@@ -49,92 +51,6 @@ def pl_hash(entries: list[models.VidFull]) -> bytes:
     hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
 
-def newest(entries: list[models.VidFull]) -> models.VidFull:
-    """Find newest playlist entry"""
-    return sorted(entries, key=lambda x: x.upload_date or datetime.datetime.min, reverse=True)[0]
-
-def pl_dlp2lm(dlpin: models.PlaylistDLP) -> models.PlaylistFull:
-    """Raw DLP playlist to LM-native playlist"""
-    assert dlpin.webpage_url is not None  # we need this until we ger lmpl id
-    # TODO use model_validate?
-    retv = models.PlaylistFull(id=dlpin.id,
-                               title=dlpin.title,
-                               modified_date=datetime.datetime.strptime(dlpin.modified_date, "%Y%m%d") if dlpin.modified_date else None,
-                               webpage_url=dlpin.webpage_url,
-                               playlist_count=dlpin.playlist_count,  # TODO
-                               channel=models.UlChan(channel_id=dlpin.channel_id,
-                                                     uploader_id=dlpin.uploader_id,
-                                                     uploader=dlpin.uploader,
-                                                     channel_url=dlpin.channel_url,
-                                                     uploader_url=dlpin.uploader_url),
-                               entries=[models.VidFull(channel=models.UlChan(channel_id=x.channel_id,
-                                                                             uploader_id=x.uploader_id,
-                                                                             uploader=x.uploader,
-                                                                             channel_url=x.channel_url,
-                                                                             uploader_url=x.uploader_url),
-                                                       description=x.description,
-                                                       id=x.id,
-                                                       title=x.title,
-                                                       webpage_url=x.webpage_url,
-                                                       duration=x.duration,
-                                                       ext=x.ext,
-                                                       format=x.format,
-                                                       height=x.height,
-                                                       width=x.width,
-                                                       extractor=models.DLPIE(extractor_key=x.extractor_key,
-                                                                              extractor=x.extractor),
-                                                       categories=x.categories,
-                                                       is_live=x.is_live,
-                                                       was_live=x.was_live,
-                                                       language=x.language,
-                                                       n_entries=x.n_entries,  # huh,
-                                                       thumbnail=x.thumbnail,
-                                                       upload_date=datetime.datetime.fromtimestamp(x.timestamp) if x.timestamp else None)  # is this right
-                                        for x in dlpin.entries if isinstance(x, models.PlVidDLP)],
-                               extractor=models.DLPIE(extractor_key=dlpin.extractor_key,
-                                                      extractor=dlpin.extractor))
-    for pl_entry in dlpin.entries:
-        if not isinstance(pl_entry, models.PlaylistDLP):
-            continue
-        for sub_entry in pl_entry.entries:
-            if sub_entry is None:
-                continue
-            assert isinstance(sub_entry, models.PlVidDLP)
-            retv.entries.append(models.VidFull(channel=models.UlChan(channel_id=sub_entry.channel_id,
-                                                                     uploader_id=sub_entry.uploader_id,
-                                                                     uploader=sub_entry.uploader,
-                                                                     channel_url=sub_entry.channel_url,
-                                                                     uploader_url=sub_entry.uploader_url),
-                                               description=sub_entry.description,
-                                               id=sub_entry.id,
-                                               title=sub_entry.title,
-                                               webpage_url=sub_entry.webpage_url,
-                                               duration=sub_entry.duration,
-                                               ext=sub_entry.ext,
-                                               format=sub_entry.format,
-                                               height=sub_entry.height,
-                                               width=sub_entry.width,
-                                               extractor=models.DLPIE(extractor_key=sub_entry.extractor_key,
-                                                                      extractor=sub_entry.extractor),
-                                               categories=sub_entry.categories,
-                                               is_live=sub_entry.is_live,
-                                               was_live=sub_entry.was_live,
-                                               language=sub_entry.language,
-                                               n_entries=sub_entry.n_entries,  # huh,
-                                               thumbnail=sub_entry.thumbnail,
-                                               upload_date=datetime.datetime.fromtimestamp(sub_entry.timestamp) if sub_entry.timestamp else None)  # is this right
-                             )
-    return retv
-
-def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
-    """Get uploader URL from video"""
-    if vid.channel.uploader_url:
-        return vid.channel.uploader_url
-    if vid.channel.channel_url:
-        return vid.channel.channel_url
-    return None
-
-
 # --- V4 layer: DLP/LM-native -> thing/rel/run ------------------------------------------
 # These convert the (reused) DLP boundary models into the frozen thing/rel/run schema
 # (LM-V4-DESIGN.md Part 2). They are pure constructors — no DB/session — so the actual
@@ -142,51 +58,48 @@ def vid_uploader_url(vid: models.VidFull) -> Optional[str]:
 # SQLModel select gotcha for the query side (LM-V4-DESIGN.md §6.4): use `col == None` /
 # `is_(None)`, never Python `is not None`, in filters on nullable columns.
 
-def _norm_extractor(extractor: models.DLPIE) -> Optional[str]:
-    """Canonical lowercased extractor key for a thing (key, falling back to name)."""
-    ek = extractor.extractor_key or extractor.extractor
-    return ek.lower() if ek else None
-
-
-def chan_url(chan: models.UlChan) -> Optional[str]:
-    """Best URL for an uploader/channel."""
-    return chan.uploader_url or chan.channel_url
-
-
 def thing_from_vid(vid: models.VidFull) -> models.Thing:
     """Build a stub video `thing` with whatever the playlist pull told us (#137 sidestep)."""
-    return models.Thing(url=vid.webpage_url,
-                        extractor_key=_norm_extractor(vid.extractor),
-                        native_id=vid.id,
+    return models.Thing(url=vid.url,
+                        extractor_key=vid.extractor_key,
+                        native_id=vid.native_id,
                         type='video',
                         title=vid.title,
-                        channel=vid_uploader_url(vid),
-                        thumbnail_url=vid.thumbnail,
-                        modified=vid.upload_date)
+                        channel=vid.channel.url,
+                        thumbnail_url=vid.thumbnail_url,
+                        modified=vid.modified)
 
 
 def thing_from_pl(pl: models.PlaylistFull) -> models.Thing:
     """Build the playlist `thing`."""
-    return models.Thing(url=pl.webpage_url,
-                        extractor_key=_norm_extractor(pl.extractor),
-                        native_id=pl.id,
+    return models.Thing(url=pl.url,
+                        extractor_key=pl.extractor_key,
+                        native_id=pl.native_id,
                         type='playlist',
                         title=pl.title,
-                        channel=chan_url(pl.channel),
-                        modified=pl.modified_date)
+                        channel=pl.channel.url,
+                        modified=pl.modified)
 
 
 def thing_from_chan(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
     """Build a channel `thing` from an uploader/channel descriptor, or None if no URL."""
-    url = chan_url(chan)
-    if not url:
+    if not chan.url:
         return None
-    return models.Thing(url=url,
+    return models.Thing(url=chan.url,
                         extractor_key=extractor_key,
-                        native_id=chan.uploader_id or chan.channel_id,
+                        native_id=chan.native_id,
                         type='channel',
-                        title=chan.uploader,
-                        channel=url)
+                        title=chan.title,
+                        channel=chan.url)
+
+
+def enough_to_rate(thing: models.Thing) -> bool:
+    """Is a video stub described well enough for a human to rate it? (API-side, §1).
+
+    Decided from stored fields only (a present `title`) — never by peeking at raw yt-dlp
+    JSON — so the API stays stable against yt-dlp shape changes. Drives `last_success_dt`.
+    """
+    return bool(thing.title)
 
 
 class ThingGraph(NamedTuple):
@@ -235,14 +148,13 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
     channels_by_url: dict[str, models.Thing] = {}
 
     def channel_for(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
-        url = chan_url(chan)
-        if not url:
+        if not chan.url:
             return None
-        existing = channels_by_url.get(url)
+        existing = channels_by_url.get(chan.url)
         if existing is None:
             existing = thing_from_chan(chan, extractor_key)
             existing.bucket = bucket
-            channels_by_url[url] = existing
+            channels_by_url[chan.url] = existing
         return existing
 
     pl_chan = channel_for(pl.channel, pl_thing.extractor_key)
@@ -252,12 +164,15 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
     for vid in pl.entries:
         vid_thing = thing_from_vid(vid)
         vid_thing.bucket = bucket
-        if hints is not None:
-            vid_thing.attrs = dict(hints)
+        attrs = dict(hints) if hints is not None else {}
+        if vid.info_json is not None:
+            attrs[INFO_JSON_KEY] = vid.info_json   # Stage-2 load-info hint (§2.1)
+        if attrs:
+            vid_thing.attrs = attrs
         videos.append(vid_thing)
         rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id,
                                type='playlist_video'))
-        vid_chan = channel_for(vid.channel, _norm_extractor(vid.extractor))
+        vid_chan = channel_for(vid.channel, vid.extractor_key)
         if vid_chan is not None:
             rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id,
                                    type='channel_video'))

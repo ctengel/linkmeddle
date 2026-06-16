@@ -3,9 +3,11 @@ Minimal script to download a URL using yt_dlp programmatically (no subprocess).
 """
 
 from typing import Optional
+import datetime
 import warnings
 import os
 import io
+import json
 import argparse
 import time
 import requests
@@ -13,7 +15,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
-from . import ytdl_arch_oi
+from . import models, ytdl_arch_oi
 
 
 def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
@@ -23,9 +25,10 @@ def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
         return f"live stream excluded: {info_dict.get('id', 'unknown')}"
     return None
 
-def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> YoutubeDL:
+def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
+         extract_flat: bool = False) -> YoutubeDL:
     # TODO user, password
-    # TODO extract_flat:in_playlist, simulate, skip_download
+    # TODO simulate, skip_download
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
     # TODO "format": "best", "noplaylist": True, "quiet": False, "no_warnings": True,
@@ -37,6 +40,9 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None) -> Y
             'max_sleep_interval': 32,
             'restrictfilenames': True,
             'match_filter': _exclude_live}
+    if extract_flat:
+        # Flat playlist pull: list entries (ids/urls/titles) without a per-video page fetch.
+        opts['extract_flat'] = 'in_playlist'
     if cookies is not None:
         opts['cookiefile'] = cookies
     return YoutubeDL(opts)
@@ -65,23 +71,101 @@ def get_cookies(url: str) -> str:
     resp.raise_for_status()
     return resp.json()['jar']['cookies']
 
+# --- yt-dlp info dict -> thin pull contract --------------------------------------------
+# The single place on the worker that touches yt-dlp's unstable shape: pull only the fields
+# that land in thing/rel (xform stays free of raw yt-dlp knowledge). Replaces V3's
+# PlaylistDLP.model_validate + xform.pl_dlp2lm.
+
+def _norm_extractor(info: dict) -> Optional[str]:
+    """Canonical lowercased extractor key (key, then extractor name, then flat-entry ie_key)."""
+    ek = info.get("extractor_key") or info.get("extractor") or info.get("ie_key")
+    return ek.lower() if ek else None
+
+
+def _pull_chan(info: dict) -> models.UlChan:
+    """Resolve the best uploader/channel identity from a playlist or entry dict."""
+    return models.UlChan(url=info.get("uploader_url") or info.get("channel_url"),
+                           native_id=info.get("uploader_id") or info.get("channel_id"),
+                           title=info.get("uploader"))
+
+
+def _pull_vid(entry: dict) -> models.VidFull:
+    """Build a thin VidFull from a raw yt-dlp entry, carrying the raw entry as the hint."""
+    ts = entry.get("timestamp")
+    return models.VidFull(
+        # Flat entries carry `url` (not `webpage_url`); full entries carry both.
+        url=entry.get("webpage_url") or entry.get("url"),
+        native_id=entry["id"],
+        extractor_key=_norm_extractor(entry),
+        title=entry.get("title"),
+        thumbnail_url=entry.get("thumbnail"),
+        modified=datetime.datetime.fromtimestamp(ts) if ts else None,
+        channel=_pull_chan(entry),
+        # Faithful copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
+        info_json={k: v for k, v in entry.items() if k != "info_json"})
+
+
+def extract_pull(info: dict) -> models.PlaylistFull:
+    """Extract the thin pull contract from a raw yt-dlp playlist info dict.
+
+    Nested playlists are flattened into one entries list (matching V3 pl_dlp2lm): a
+    playlist-typed entry contributes its sub-videos, a plain entry contributes itself.
+    """
+    assert info.get("webpage_url") is not None  # needed until we get an lmpl id
+    entries: list[models.VidFull] = []
+    for entry in info.get("entries") or []:
+        if entry is None:
+            continue
+        if entry.get("_type") == "playlist" or entry.get("entries"):
+            entries.extend(_pull_vid(sub) for sub in (entry.get("entries") or [])
+                           if sub is not None)
+            continue
+        entries.append(_pull_vid(entry))
+    modified = info.get("modified_date")
+    return models.PlaylistFull(
+        url=info["webpage_url"],
+        native_id=info.get("id"),
+        extractor_key=_norm_extractor(info),
+        title=info.get("title"),
+        modified=datetime.datetime.strptime(modified, "%Y%m%d") if modified else None,
+        playlist_count=info.get("playlist_count"),
+        channel=_pull_chan(info),
+        entries=entries)
+
+
+def extract_pull_video(info: dict) -> models.VidFull:
+    """Extract the thin pull contract for a *single* video (the meta-job result).
+
+    Reuses `_pull_vid` so a single-video info dict maps exactly like a playlist entry — the
+    one place that touches raw yt-dlp fields stays `_pull_vid`/`_pull_chan`.
+    """
+    return _pull_vid(info)
+
+
 def init_download(url: str, *,
                   download: bool = True,
                   oibucket: str | None = None,
                   lpmlib: str | None = None,
-                  use_cookies: bool = False) -> Optional[dict]:
+                  use_cookies: bool = False,
+                  flat: bool = False,
+                  info_dict: dict | None = None) -> Optional[dict]:
     """Run yt-dlp for the given URL — the worker's single yt-dlp code path.
 
     download=False -> Stage-1 metadata-only pull (no OI required); download=True -> Stage-2
     real download with OI upload (the `ObjIdxUploadPP` sets info['oi_uuid'], which the caller
-    reads back as `best_oi` — no separate OI lookup). Returns the sanitized info dict on
-    success, or None on a caught YoutubeDLError (callers treat None as a failed run). No
-    LinkMeddlePlaylistPP — the worker owns the metadata push (job_runner.post_result).
+    reads back as `best_oi` — no separate OI lookup). flat -> flatten a playlist pull
+    (`extract_flat`, minimal site calls); set only for a playlist `pull`, never for a
+    single-video `meta`/`download` (those need a full extract). Returns the sanitized info
+    dict on success, or None on a caught YoutubeDLError (callers treat None as a failed run).
+    No LinkMeddlePlaylistPP — the worker owns the metadata push (job_runner.post_result).
 
     URL: the URL to download
     oibucket: if provided (download only), enables ObjIdx upload postprocessor with this bucket
     lpmlib: if provided, provided to OI
     use_cookies: if True, fetch cookies from Crustula and pass to yt-dlp
+    info_dict: if provided, download straight from this pre-extracted yt-dlp info dict
+        (like `yt-dlp --load-info-json`) instead of re-extracting `url`. See the
+        process_ie_result branch below.
 
     For now, env variables can control behavior:
     OBJIDX_URL=
@@ -90,7 +174,6 @@ def init_download(url: str, *,
     """
 
     # TODO consider extractor_id and id (of playlist) instead of URL
-    # TODO consider input_params for arbitrary download options
 
     cookies = None
 
@@ -112,12 +195,21 @@ def init_download(url: str, *,
 
     # TODO download_archive on download mode only to prevent yt-dlp skipping playlist items we already have
     # TODO flat playlist or similar to reduce calls?
-    with _ydl(download_archive=download_archive, cookies=cookies) as ydl:
+    with _ydl(download_archive=download_archive, cookies=cookies, extract_flat=flat) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if download and oibucket:
                 ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
-            info = ydl.extract_info(url, download=download)
+            if info_dict is not None:
+                # Download straight from a supplied info dict, like
+                # `yt-dlp --load-info-json`. This is what download_with_info_file() wraps,
+                # but called directly so we keep the processed info dict (the file helper
+                # returns only a retcode) — post_result still reads oi_uuid/extractor/id off it.
+                info = ydl.process_ie_result(
+                    ydl.sanitize_info(info_dict, ydl.params.get('clean_infojson', True)),
+                    download=download)
+            else:
+                info = ydl.extract_info(url, download=download)
         except YoutubeDLError as e:
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
@@ -143,12 +235,21 @@ def cli():
                         default=None)
     parser.add_argument("--lpmlib", help="LinkMeddle library name for OI postprocessor", default=None)
     parser.add_argument("--use-cookies", action="store_true", help="Enable cookie usage (not yet implemented)")
+    parser.add_argument("--info-json",
+                        help="Download from this info.json file instead of extracting the URL "
+                             "(like yt-dlp --load-info-json)",
+                        default=None)
     args = parser.parse_args()
+    info_dict = None
+    if args.info_json:
+        with open(args.info_json, encoding="utf-8") as fobj:
+            info_dict = json.load(fobj)
     init_download(url=args.url,
                   download=True,
                   oibucket=args.oibucket,
                   lpmlib=args.lpmlib,
-                  use_cookies=args.use_cookies)
+                  use_cookies=args.use_cookies,
+                  info_dict=info_dict)
     return 0
 
 if __name__ == "__main__":
