@@ -277,7 +277,7 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
         new_rating = _effective_rating(thing)
         # all things are subject only to playlist floor as maybe a metadata job is needed
         if (thing.best_oi is None and new_rating > old_rating
-                and new_rating > _PLAYLIST_FLOOR:
+                and new_rating > _PLAYLIST_FLOOR):
             thing.try_on = _today()
     session.add(thing)
     session.commit()
@@ -471,7 +471,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.best_oi = item.best_oi
             pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
             # clears thing hints since we don't need it anymore
-            pl_thing.attrs = {**(pl_thing.attrs or {}), xform.INFO_JSON_KEY: info}
+            pl_thing.attrs = {**(pl_thing.attrs or {}), xform.INFO_JSON_KEY: None}
         else:                                 # meta: metadata only, still pending acquisition
             info = item.video.info_json if item.video is not None else None
             _refresh_info_hint(pl_thing, info)   # keep the Stage-2 load-info hint fresh

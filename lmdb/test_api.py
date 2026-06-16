@@ -260,11 +260,22 @@ def test_patch_downgrade_does_not_pull_forward(client):
     assert r.json()["try_on"] == _FUTURE.isoformat()
 
 
-def test_patch_raise_to_still_ineligible(client):
-    tid = _seed_thing(type="video", url="http://e/still-inelig",
-                      human_rating=-1.0, try_on=None)  # D video
-    r = client.patch(f"/things/{tid}", json={"grade": "C"})  # 0.0 < 0.5 video floor
-    assert r.json()["try_on"] is None
+def test_patch_raise_d_to_c_no_meta_opens_meta_job(client):
+    # D video with no metadata (last_success_dt NULL) → raise to C → eligible for meta job
+    tid = _seed_thing(type="video", url="http://e/d-to-c-no-meta",
+                      human_rating=-1.0, try_on=None)
+    r = client.patch(f"/things/{tid}", json={"grade": "C"})
+    assert r.json()["try_on"] == _TODAY.isoformat()
+
+
+def test_patch_raise_d_to_c_with_meta_still_sets_try_on(client):
+    # D video that already has metadata → raise to C → try_on set, but dispatcher won't
+    # claim it for meta (last_success_dt IS NOT NULL); harmless until it reaches B for download
+    tid = _seed_thing(type="video", url="http://e/d-to-c-with-meta",
+                      human_rating=-1.0, try_on=None,
+                      last_success_dt=models.naive_utcnow())
+    r = client.patch(f"/things/{tid}", json={"grade": "C"})
+    assert r.json()["try_on"] == _TODAY.isoformat()
 
 
 def test_patch_human_rating_out_of_range(client):
