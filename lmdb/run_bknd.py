@@ -89,7 +89,7 @@ def _pull_chan(info: dict) -> models.UlChan:
                            title=info.get("uploader"))
 
 
-def _pull_vid(entry: dict) -> models.VidFull:
+def extract_pull_video(info: dict) -> models.VidFull:
     """Build a thin VidFull from a raw yt-dlp entry, carrying the raw entry as the hint."""
     ts = entry.get("timestamp")
     return models.VidFull(
@@ -117,7 +117,7 @@ def extract_pull(info: dict) -> models.PlaylistFull:
         if entry is None:
             continue
         if entry.get("_type") == "playlist" or entry.get("entries"):
-            entries.extend(_pull_vid(sub) for sub in (entry.get("entries") or [])
+            entries.extend(extract_pull_video(sub) for sub in (entry.get("entries") or [])
                            if sub is not None)
             continue
         entries.append(_pull_vid(entry))
@@ -131,15 +131,6 @@ def extract_pull(info: dict) -> models.PlaylistFull:
         playlist_count=info.get("playlist_count"),
         channel=_pull_chan(info),
         entries=entries)
-
-
-def extract_pull_video(info: dict) -> models.VidFull:
-    """Extract the thin pull contract for a *single* video (the meta-job result).
-
-    Reuses `_pull_vid` so a single-video info dict maps exactly like a playlist entry — the
-    one place that touches raw yt-dlp fields stays `_pull_vid`/`_pull_chan`.
-    """
-    return _pull_vid(info)
 
 
 def init_download(url: str, *,
@@ -193,8 +184,6 @@ def init_download(url: str, *,
         assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to download"
         download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
 
-    # TODO download_archive on download mode only to prevent yt-dlp skipping playlist items we already have
-    # TODO flat playlist or similar to reduce calls?
     with _ydl(download_archive=download_archive, cookies=cookies, extract_flat=flat) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
