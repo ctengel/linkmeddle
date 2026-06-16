@@ -69,12 +69,6 @@ def _effective_rating(thing: Thing) -> float:
     return 0.0
 
 
-def _is_eligible(thing_type: str, rating: float) -> bool:
-    """Does `rating` clear the run-eligibility floor for this thing type (§4.5)?"""
-    floor = _VIDEO_DOWNLOAD_FLOOR if thing_type == "video" else _PLAYLIST_FLOOR  # video=B, else C
-    return rating >= floor
-
-
 def _action_for(thing: Thing) -> str:
     """What the worker should do with this claimed thing (§4.5 dispatch result).
 
@@ -281,8 +275,9 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
         thing.try_on = data["try_on"]
     else:  # raise-to-eligible side-effect (§2.5) — explicit try_on overrides this
         new_rating = _effective_rating(thing)
+        # all things are subject only to playlist floor as maybe a metadata job is needed
         if (thing.best_oi is None and new_rating > old_rating
-                and _is_eligible(thing.type, new_rating)):
+                and new_rating > _PLAYLIST_FLOOR:
             thing.try_on = _today()
     session.add(thing)
     session.commit()
@@ -408,6 +403,7 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     session.add(run)
     session.commit()
     session.refresh(run)
+    # TODO split this out to a more robust try-other-things-upon-failure logic
     # Per-job cookies suggestion: the attrs.cookies hint, OR escalation after a cookieless
     # failure — the last completed run failed without cookies (§4.7) [A11]. (The just-created
     # in-progress run is excluded by the `success != None` filter.)
@@ -457,6 +453,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.last_failure_dt = now
             _set_try_on(session, pl_thing)
         return _finish(session, run)
+        # TODO still try to get metadata from a failed download?
 
     # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
     # (distinct from the Stage-1 playlist fan-out below). Both forward the full single-video
@@ -473,6 +470,8 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         if item.best_oi is not None:          # download: media acquired
             pl_thing.best_oi = item.best_oi
             pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
+            # clears thing hints since we don't need it anymore
+            pl_thing.attrs = {**(pl_thing.attrs or {}), xform.INFO_JSON_KEY: info}
         else:                                 # meta: metadata only, still pending acquisition
             info = item.video.info_json if item.video is not None else None
             _refresh_info_hint(pl_thing, info)   # keep the Stage-2 load-info hint fresh
