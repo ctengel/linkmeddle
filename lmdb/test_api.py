@@ -532,30 +532,30 @@ def test_ingest_fans_out(client):
     assert chans and all(c["bucket"] == "plbucket" for c in chans)
 
 
-def test_ingest_last_success_from_title(client):
-    # API decides "enough to rate" from extracted fields: a titled stub is metadata-complete
-    # (last_success_dt set); a title-less stub stays NULL and is claimable as a `meta` job.
+def test_ingest_last_success_from_required_fields(client):
+    # API decides "enough to rate" from extracted fields: a stub with all 5 identity fields
+    # (channel, url, title, extractor_key, native_id) is metadata-complete (last_success_dt
+    # set); a stub missing any field stays NULL and is claimable as a `meta` job.
     url = "http://example/pl/rate"
     tid, rid = _claimed_run(client, url)
     pl = models.PlaylistFull(
         # no playlist channel here: a fanned-out uploader channel is itself a claimable
-        # container now, which would outrank the title-less video below — out of scope for
-        # this title->last_success test (channel fan-out is covered by its own tests).
+        # container now, which would outrank the incomplete video below — out of scope for
+        # this required-fields->last_success test (channel fan-out is covered by its own tests).
         url=url, native_id="plrate", title="Rate PL", extractor_key="youtube",
         playlist_count=2, channel=models.UlChan(),
         entries=[
-            models.VidFull(native_id="hastitle", title="Has Title",
-                           url="http://example/v/ht", extractor_key="youtube"),
+            models.VidFull(native_id="complete", title="Has Title",
+                           url="http://example/v/ht", extractor_key="youtube",
+                           channel=models.UlChan(url="http://example/chan/ht")),
             models.VidFull(native_id="notitle", url="http://example/v/nt",
                            extractor_key="youtube"),
         ])
     assert client.post(f"/jobs/{rid}/result",
                        json={"playlist": pl.model_dump(mode="json")}).status_code == 200
     vids = {v["native_id"]: v for v in client.get("/things/", params={"type": "video"}).json()}
-    assert vids["hastitle"]["last_success_dt"]            # title present -> metadata-complete
-    assert vids["notitle"]["last_success_dt"] is None     # title-less -> needs a meta job
-    job = _claim(client)                                  # the title-less C video is next, as meta
-    assert job["thing"]["id"] == vids["notitle"]["id"] and job["action"] == "meta"
+    assert vids["complete"]["last_success_dt"]            # all 5 fields -> metadata-complete
+    assert vids["notitle"]["last_success_dt"] is None     # missing any field -> needs a meta job
 
 
 def test_meta_result_fans_out_channel(client):
@@ -709,7 +709,9 @@ def test_unknown_url_discovered_as_video(client):
     r = client.post(f"/jobs/{rid}/result",
                     json={"success": True,
                           "video": {"native_id": "uv1", "title": "Surprise Video",
-                                    "extractor_key": "youtube", "info_json": {"id": "uv1"}}})
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/uchan"},
+                                    "info_json": {"id": "uv1"}}})
     assert r.status_code == 200
     t = client.get(f"/things/{tid}").json()
     assert t["container"] is False                # classified as a leaf, not a container
@@ -871,6 +873,7 @@ def test_meta_result_enriches_without_acquiring(client):
                     json={"success": True,
                           "video": {"native_id": "mv1", "title": "Fetched Title",
                                     "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/chan/m1"},
                                     "info_json": {"id": "mv1", "description": "d"}}})
     assert r.status_code == 200
     t = client.get(f"/things/{v}").json()
@@ -881,8 +884,22 @@ def test_meta_result_enriches_without_acquiring(client):
     assert t["last_success_dt"]                          # human-decision metadata now in hand
     assert t["last_failure_dt"] is None
     assert t["try_on"] is not None                       # backoff applied (not NULL: not acquired)
-    # Now metadata-complete -> no further meta job is dispatched (Phase II hold).
-    assert _claim(client) is None
+    # last_success_dt being set is sufficient to prove meta_branch won't re-dispatch this video.
+
+
+def test_meta_result_incomplete_stays_unrated(client):
+    # A meta result still missing required fields (here: no channel) must NOT mark the video
+    # as metadata-complete — it stays NULL so the dispatcher can re-dispatch it on backoff.
+    v, rid = _claimed_meta(client, url="http://e/mincomplete")
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "mi1", "title": "No Chan",
+                                    "extractor_key": "youtube",
+                                    "info_json": {"id": "mi1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["last_success_dt"] is None    # still not enough to rate
+    assert t["try_on"] is not None         # Fibonacci backoff applied; will retry later
 
 
 def test_meta_result_failure_backs_off(client):

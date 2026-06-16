@@ -107,10 +107,13 @@ def thing_from_chan(chan: models.UlChan, extractor_key: Optional[str]) -> Option
 def enough_to_rate(thing: models.Thing) -> bool:
     """Is a video stub described well enough for a human to rate it? (API-side, §1).
 
-    Decided from stored fields only (a present `title`) — never by peeking at raw yt-dlp
-    JSON — so the API stays stable against yt-dlp shape changes. Drives `last_success_dt`.
+    Decided from stored fields only — never by peeking at raw yt-dlp JSON — so the
+    API stays stable against yt-dlp shape changes. Drives `last_success_dt`.
+    All five identity fields must be present: channel URL, webpage URL, title,
+    extractor key, and native ID.
     """
-    return bool(thing.title)
+    return bool(thing.title and thing.url and thing.native_id
+                and thing.extractor_key and thing.channel)
 
 
 class ThingGraph(NamedTuple):

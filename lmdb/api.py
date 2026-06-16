@@ -507,14 +507,16 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             _apply_backfill(session, pl_thing,
                             Thing(container=False, bucket=pl_thing.bucket,
                                   extractor_key=item.extractor_key, native_id=item.native_id))
-        pl_thing.last_success_dt = now
         pl_thing.last_failure_dt = None
-        if item.best_oi is not None:          # download: media acquired
+        if item.best_oi is not None:          # download: media acquired → always complete
+            pl_thing.last_success_dt = now
             pl_thing.best_oi = item.best_oi
             pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
             # clears thing hints since we don't need it anymore
             pl_thing.attrs = {**(pl_thing.attrs or {}), xform.INFO_JSON_KEY: None}
         else:                                 # meta: metadata only, still pending acquisition
+            if xform.enough_to_rate(pl_thing):   # all five identity fields present
+                pl_thing.last_success_dt = now   # else stays NULL → re-dispatch on backoff
             info = item.video.info_json if item.video is not None else None
             _refresh_info_hint(pl_thing, info)   # keep the Stage-2 load-info hint fresh
             _set_try_on(session, pl_thing)       # backoff (§4.4)
