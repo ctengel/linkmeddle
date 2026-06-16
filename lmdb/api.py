@@ -16,7 +16,8 @@ import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 import sqlalchemy as sa
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, case
+from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from fastapi import FastAPI, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
@@ -60,13 +61,61 @@ def _today() -> datetime.date:
     return models.naive_utcnow().date()
 
 
-def _effective_rating(thing: Thing) -> float:
-    """Effective rating = human, else machine, else 0.0 (C) — COALESCE in Python (§2.4)."""
+def _machine_rating_expr():
+    """SQL machine rating (§2.4, compute-on-read, Task 2.2): MAX of every parent container's
+    human rating (video and container alike); a container with no human-rated parent falls back
+    to the AVG of its directly-human-rated children. One hop each side, NULL when nothing applies.
+
+    Reads only *human* ratings one hop away, so video and container never reference each other's
+    machine rating -- no recursion. The stored `machine_rating` column is intentionally unread.
+    """
+    parent, child = aliased(Thing), aliased(Thing)
+    parent_mr = (select(func.max(parent.human_rating))
+                 .where(Rel.child == Thing.id, Rel.parent == parent.id)
+                 .correlate(Thing).scalar_subquery())
+    child_mr = (select(func.avg(child.human_rating))
+                .where(Rel.parent == Thing.id, Rel.child == child.id,
+                       child.human_rating != None)  # noqa: E711
+                .correlate(Thing).scalar_subquery())
+    return case((Thing.container == False, parent_mr),  # noqa: E712  video: parents only
+                (Thing.container == True, func.coalesce(parent_mr, child_mr)),  # noqa: E712
+                else_=None)
+
+
+def _effective_rating_expr(default=None):
+    """SQL effective rating = COALESCE(human, machine[, default]) (§2.4)."""
+    args = [Thing.human_rating, _machine_rating_expr()]
+    if default is not None:
+        args.append(default)
+    return func.coalesce(*args)
+
+
+def _machine_rating_value(session: Session, thing: Thing) -> Optional[float]:
+    """Computed machine rating for one thing (None if no human-rated relatives apply)."""
+    return session.exec(select(_machine_rating_expr()).where(Thing.id == thing.id)).one()
+
+
+def _effective_rating_value(session: Session, thing: Thing) -> float:
+    """Effective rating of a thing instance = human, else computed machine, else 0.0 (C).
+
+    The instance form of `_effective_rating_expr(default=0.0)`, for callers that hold a loaded
+    `thing` and need its rating for a Python decision (dispatch action, backoff band, §2.4).
+    """
     if thing.human_rating is not None:
         return thing.human_rating
-    if thing.machine_rating is not None:
-        return thing.machine_rating
-    return 0.0
+    machine = _machine_rating_value(session, thing)
+    return machine if machine is not None else 0.0
+
+
+def _read_with_ratings(thing: Thing, machine: Optional[float]) -> ThingRead:
+    """ThingRead with computed machine/effective ratings. Human rating is authoritative: when
+    present, machine is treated as NULL and effective is the human rating (§2.4)."""
+    tr = ThingRead.model_validate(thing)
+    if thing.human_rating is not None:
+        tr.machine_rating, tr.effective_rating = None, thing.human_rating
+    else:
+        tr.machine_rating = tr.effective_rating = machine
+    return tr
 
 
 def _container_from_type(type_hint: Optional[str]) -> tuple[Optional[bool], bool]:
@@ -84,26 +133,27 @@ def _container_from_type(type_hint: Optional[str]) -> tuple[Optional[bool], bool
     return mapping[type_hint.lower()]
 
 
-def _action_for(thing: Thing) -> str:
+def _action_for(thing: Thing, eff_rating: float) -> str:
     """What the worker should do with this claimed thing (§4.5 dispatch result).
 
     Container or unknown (`container` is True/NULL) -> 'pull' (Stage-1 metadata fan-out; an
     unknown URL is classified by the result). A leaf video (`container is False`) ->
-    'download' (Stage-2 media+metadata) when it clears the B floor, else 'meta' (Stage-2
-    metadata-only enrichment for a C-band video the flat pull under-described).
+    'download' (Stage-2 media+metadata) when its effective rating clears the B floor, else
+    'meta' (Stage-2 metadata-only enrichment for a C-band video the flat pull under-described).
     """
     if thing.container is False:
-        return "download" if _effective_rating(thing) >= _VIDEO_DOWNLOAD_FLOOR else "meta"
+        return "download" if eff_rating >= _VIDEO_DOWNLOAD_FLOOR else "meta"
     return "pull"
 
 
 def _set_try_on(session: Session, thing: Thing) -> None:
     """Advance thing.try_on from its run history via the Fibonacci backoff (§4.4, Task 1.4).
 
-    Re-queries the thing's runs (the just-recorded run is autoflushed in, so it counts).
+    Re-queries the thing's runs (the just-recorded run is autoflushed in, so it counts). The
+    backoff band uses the effective rating, so a machine-rated thing schedules correctly.
     """
     runs = session.exec(select(Run).where(Run.thing_id == thing.id)).all()
-    thing.try_on = xform.next_try_on(_effective_rating(thing), runs)
+    thing.try_on = xform.next_try_on(_effective_rating_value(session, thing), runs)
 
 
 def get_thing_or_404(session: Session, thing_id: uuid.UUID) -> Thing:
@@ -144,18 +194,22 @@ def _refresh_info_hint(thing: Thing, info: Optional[dict]) -> None:
 
 def _related(session: Session, thing_id: uuid.UUID,
              direction: Optional[str]) -> list[RelatedThing]:
-    """rel neighbors in both directions (or one if direction is 'child'/'parent')."""
+    """rel neighbors in both directions (or one if direction is 'child'/'parent'), each with
+    its computed machine/effective rating (the subquery correlates to the neighbor, §2.4)."""
+    machine = _machine_rating_expr().label("machine_rating")
     out: list[RelatedThing] = []
     if direction in (None, "child"):
-        for rel, thing in session.exec(
-                select(Rel, Thing).where(Rel.parent == thing_id, Rel.child == Thing.id)).all():
+        for rel, thing, mr in session.exec(
+                select(Rel, Thing, machine).where(
+                    Rel.parent == thing_id, Rel.child == Thing.id)).all():
             out.append(RelatedThing(direction="child", channel=rel.channel,
-                                    thing=ThingRead.model_validate(thing)))
+                                    thing=_read_with_ratings(thing, mr)))
     if direction in (None, "parent"):
-        for rel, thing in session.exec(
-                select(Rel, Thing).where(Rel.child == thing_id, Rel.parent == Thing.id)).all():
+        for rel, thing, mr in session.exec(
+                select(Rel, Thing, machine).where(
+                    Rel.child == thing_id, Rel.parent == Thing.id)).all():
             out.append(RelatedThing(direction="parent", channel=rel.channel,
-                                    thing=ThingRead.model_validate(thing)))
+                                    thing=_read_with_ratings(thing, mr)))
     return out
 
 
@@ -207,6 +261,7 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
 
 @app.get("/things/", response_model=list[ThingRead])
 def list_things(type: Optional[str] = None, rating: Optional[str] = None,
+                min_rating: Optional[str] = None,
                 due: bool = False, needs_rating: bool = False, new: bool = False,
                 failing: bool = False, url: Optional[str] = None,
                 extractor: Optional[str] = None, native_id: Optional[str] = None,
@@ -214,8 +269,11 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
     """List/search things. Backs every list view + the status dashboard.
 
     `extractor` + `native_id` is the V4 replacement for V3 GET /videos/{ex}/{id} (#102).
+    `rating` filters the exact *human* grade; `min_rating` filters the *effective* rating
+    (human else computed machine, §2.4) at the grade's band floor — e.g. `min_rating=B`
+    returns everything effectively B-or-better.
     """
-    stmt = select(Thing)
+    stmt = select(Thing, _machine_rating_expr().label("machine_rating"))
     if type is not None:
         # 'type' is an ergonomic alias over the boolean + display hint: 'video' -> leaf,
         # 'playlist' -> container, 'channel' -> container tagged attrs.kind='channel'.
@@ -242,6 +300,12 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
             raise HTTPException(status_code=422,
                                 detail="invalid rating grade")
         stmt = stmt.where(Thing.human_rating == GRADE_VALUES[grade])
+    if min_rating is not None:
+        grade = min_rating.upper()
+        if grade not in GRADE_VALUES:
+            raise HTTPException(status_code=422, detail="invalid rating grade")
+        # Band floor: round-direction-safe form of "effective grade >= X" (§2.4).
+        stmt = stmt.where(_effective_rating_expr(default=0.0) >= GRADE_VALUES[grade] - 0.5)
     if needs_rating:
         stmt = stmt.where(Thing.human_rating == None)  # noqa: E711  (SQL IS NULL)
     if due:
@@ -254,7 +318,7 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
         cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
         stmt = stmt.where(Thing.created_dt >= cutoff)
     stmt = stmt.order_by(Thing.created_dt.desc())
-    return session.exec(stmt).all()
+    return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
 
 
 @app.get("/things/{thing_id}", response_model=ThingWithRelated)
@@ -262,8 +326,9 @@ def get_thing(thing_id: uuid.UUID, include: Optional[str] = None,
               session: Session = Depends(get_session)):
     """Get one thing; `?include=related` also returns its rel neighbors."""
     thing = get_thing_or_404(session, thing_id)
+    machine = _machine_rating_value(session, thing)
     related = _related(session, thing_id, None) if include == "related" else []
-    return ThingWithRelated(**ThingRead.model_validate(thing).model_dump(), related=related)
+    return ThingWithRelated(**_read_with_ratings(thing, machine).model_dump(), related=related)
 
 
 @app.get("/things/{thing_id}/related", response_model=list[RelatedThing])
@@ -295,7 +360,7 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
     """
     thing = get_thing_or_404(session, thing_id)
     data = item.model_dump(exclude_unset=True)
-    old_rating = _effective_rating(thing)
+    old_rating = _effective_rating_value(session, thing)
     grade = data.pop("grade", None)
     if grade is not None:
         if grade.upper() not in GRADE_VALUES:
@@ -307,7 +372,7 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
     if "try_on" in data:  # explicit; null acknowledges permafail
         thing.try_on = data["try_on"]
     else:  # raise-to-eligible side-effect (§2.5) — explicit try_on overrides this
-        new_rating = _effective_rating(thing)
+        new_rating = _effective_rating_value(session, thing)
         # all things are subject only to playlist floor as maybe a metadata job is needed
         if (thing.best_oi is None and new_rating > old_rating
                 and new_rating > _PLAYLIST_FLOOR):
@@ -403,11 +468,12 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     created here (`success=NULL` in-progress marker, `worker` set) and its id returned; 204 if
     nothing is due.
 
-    Machine rating is read from the stored column via COALESCE; compute-on-read is Task 2.2.
+    The machine rating is computed on read (Task 2.2, §2.4): an unrated video under a B+
+    container assesses as B and reaches `video_branch`; an under-rated container drops out.
     """
-    # Effective rating, defaulting an unrated thing to 0.0 (C) — mirrors _effective_rating, so
-    # an unrated video clears the C-band `meta_branch` (NULL would fail every comparison).
-    rating = func.coalesce(Thing.human_rating, Thing.machine_rating, 0.0)
+    # Effective rating, defaulting an unrated thing to 0.0 (C) — mirrors _effective_rating_value,
+    # so an unrated video clears the C-band `meta_branch` (NULL would fail every comparison).
+    rating = _effective_rating_expr(default=0.0)
     today = _today()
     # Stage-1 pull: a container or an unknown thing (`container` is True/NULL), grade >= C
     # band, due, not already succeeded today.
@@ -450,8 +516,11 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
         if (last_done is not None and last_done.success is False
                 and not (last_done.input_json or {}).get("cookies")):
             cookies = True
-    return JobClaim(run_id=run.id, thing=ThingRead.model_validate(thing),
-                    action=_action_for(thing), cookies=cookies)
+    machine = _machine_rating_value(session, thing)
+    eff = thing.human_rating if thing.human_rating is not None else (
+        machine if machine is not None else 0.0)
+    return JobClaim(run_id=run.id, thing=_read_with_ratings(thing, machine),
+                    action=_action_for(thing, eff), cookies=cookies)
 
 
 @app.post("/jobs/{run_id}/result", response_model=RunRead)

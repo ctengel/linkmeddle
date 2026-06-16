@@ -412,6 +412,101 @@ def test_claim_creates_in_progress_run(client):
     assert runs[0]["success"] is None and runs[0]["worker"] == "w1"   # in-progress marker
 
 
+# --- machine ratings: compute-on-read (Task 2.2 / §2.4) --------------------------------
+
+def _seed_rel(parent: str, child: str, channel: bool = False) -> None:
+    """Insert one parent->child rel edge directly (the Phase-1 ingest can't be poked piecemeal)."""
+    with _session() as s:
+        s.add(models.Rel(parent=uuid.UUID(parent), child=uuid.UUID(child), channel=channel))
+        s.commit()
+
+
+def test_machine_rating_propagates_to_dispatch(client):
+    # An unrated video under a B-rated playlist assesses as B -> claimed for download (§2.4).
+    pl = _seed_thing(type="playlist", url="http://e/mr-pl", human_rating=1.0, try_on=None)
+    v = _seed_thing(type="video", url="http://e/mr-v", try_on=_TODAY)   # unrated
+    _seed_rel(pl, v)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["action"] == "download"
+
+
+def test_unrated_video_no_parent_is_meta(client):
+    # No rated relative -> effective C -> metadata-only, never a download.
+    v = _seed_thing(type="video", url="http://e/mr-orphan", try_on=_TODAY)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+
+
+def test_video_machine_rating_max_across_parents(client):
+    # MAX over all parents, including the channel edge: C playlist + A channel -> A.
+    cpl = _seed_thing(type="playlist", url="http://e/max-c", human_rating=0.0)
+    achan = _seed_thing(type="channel", url="http://e/max-a", human_rating=2.0)
+    v = _seed_thing(type="video", url="http://e/max-v")
+    _seed_rel(cpl, v, channel=False)
+    _seed_rel(achan, v, channel=True)
+    got = client.get(f"/things/{v}").json()
+    assert got["machine_rating"] == 2.0 and got["effective_rating"] == 2.0
+
+
+def test_container_inherits_parent_over_children(client):
+    # A playlist owned by an A channel inherits A even though its own child averages lower.
+    achan = _seed_thing(type="channel", url="http://e/ci-chan", human_rating=2.0)
+    pl = _seed_thing(type="playlist", url="http://e/ci-pl")                   # unrated
+    child = _seed_thing(type="video", url="http://e/ci-child", human_rating=0.0)  # C
+    _seed_rel(achan, pl, channel=True)
+    _seed_rel(pl, child)
+    got = client.get(f"/things/{pl}").json()
+    assert got["machine_rating"] == 2.0 and got["effective_rating"] == 2.0
+
+
+def test_container_child_avg_fallback(client):
+    # No human-rated parent -> AVG of human-rated children (A + C -> 1.0); unrated ignored.
+    pl = _seed_thing(type="playlist", url="http://e/avg-pl")
+    _seed_rel(pl, _seed_thing(type="video", url="http://e/avg-a", human_rating=2.0))
+    _seed_rel(pl, _seed_thing(type="video", url="http://e/avg-c", human_rating=0.0))
+    _seed_rel(pl, _seed_thing(type="video", url="http://e/avg-none"))  # unrated -> ignored
+    got = client.get(f"/things/{pl}").json()
+    assert got["machine_rating"] == 1.0 and got["effective_rating"] == 1.0
+
+
+def test_human_rating_hides_machine(client):
+    # Human rating is authoritative: machine reported NULL, effective = human (§2.4).
+    t = _seed_thing(type="video", url="http://e/hr", human_rating=2.0)
+    got = client.get(f"/things/{t}").json()
+    assert got["machine_rating"] is None and got["effective_rating"] == 2.0
+
+
+def test_machine_rating_null_when_no_relatives(client):
+    t = _seed_thing(type="video", url="http://e/no-rel")
+    got = client.get(f"/things/{t}").json()
+    assert got["machine_rating"] is None and got["effective_rating"] is None
+
+
+def test_related_things_carry_computed_ratings(client):
+    # A neighbor's machine/effective rating is computed too (the subquery follows the neighbor).
+    bpl = _seed_thing(type="playlist", url="http://e/rel-pl", human_rating=1.0)
+    v = _seed_thing(type="video", url="http://e/rel-v")
+    _seed_rel(bpl, v)
+    rel = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    assert len(rel) == 1 and rel[0]["thing"]["id"] == bpl
+    assert rel[0]["thing"]["effective_rating"] == 1.0   # the parent's own human rating
+
+
+def test_min_rating_filter_uses_effective(client):
+    # human-A and machine-derived-B clear min_rating=B; a C video does not (§2.4 band floor).
+    a = _seed_thing(type="video", url="http://e/min-a", human_rating=2.0)
+    bpl = _seed_thing(type="playlist", url="http://e/min-bpl", human_rating=1.0)
+    bv = _seed_thing(type="video", url="http://e/min-bv")               # machine B via parent
+    _seed_rel(bpl, bv)
+    c = _seed_thing(type="video", url="http://e/min-c", human_rating=0.0)  # C, excluded
+    ids = {t["id"] for t in client.get("/things/", params={"min_rating": "B"}).json()}
+    assert a in ids and bv in ids and c not in ids
+
+
+def test_min_rating_invalid_grade(client):
+    assert client.get("/things/", params={"min_rating": "Z"}).status_code == 422
+
+
 def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest",
                 per_video_uploader=False, info_json=False) -> dict:
     """A JSON-ready thin PlaylistFull body for the ingest endpoint (what the worker posts).

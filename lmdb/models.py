@@ -188,6 +188,7 @@ class ThingRead(SQLModel):
     modified: Optional[datetime.datetime] = None
     human_rating: Optional[float] = None
     machine_rating: Optional[float] = None
+    effective_rating: Optional[float] = None  # COALESCE(human, machine); computed on read (§2.4)
     last_success_dt: Optional[datetime.datetime] = None
     last_failure_dt: Optional[datetime.datetime] = None
     try_on: Optional[datetime.date] = None
