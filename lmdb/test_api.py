@@ -1044,3 +1044,67 @@ def test_claim_cookies_escalation(client):
         s.commit()
     job = _claim(client)
     assert job["thing"]["id"] == v and job["cookies"] is True
+
+
+# --- 3.1 recent-activity feed (GET /runs/) --------------------------------------------
+
+def _seed_run_at(thing_id: str, success, offset_secs: int,
+                 data_json=None) -> str:
+    """Insert a run for a thing with an explicit success state and starttime offset."""
+    with _session() as s:
+        run = models.Run(thing_id=uuid.UUID(thing_id), success=success, data_json=data_json,
+                         starttime=models.naive_utcnow() + datetime.timedelta(seconds=offset_secs),
+                         endtime=None if success is None else models.naive_utcnow())
+        s.add(run)
+        s.commit()
+        s.refresh(run)
+        return str(run.id)
+
+
+def test_runs_feed_empty(client):
+    assert client.get("/runs/").json() == []
+
+
+def test_runs_feed_recent_first_with_thing_fields(client):
+    older = _seed_thing(type="playlist", url="http://e/act1", title="Older PL")
+    newer = _seed_thing(type="playlist", url="http://e/act2", title="Newer PL")
+    r_old = _seed_run_at(older, True, 0, data_json={"raw": 1})
+    r_new = _seed_run_at(newer, False, 10)
+
+    feed = client.get("/runs/").json()
+    assert [r["id"] for r in feed] == [r_new, r_old]        # newest first
+    top = feed[0]
+    assert top["thing_id"] == newer and top["thing_url"] == "http://e/act2"
+    assert top["thing_title"] == "Newer PL"
+    assert top["container"] is True and top["success"] is False
+    assert "data_json" not in top and "input_json" not in top   # slim feed
+
+
+def test_runs_feed_includes_active(client):
+    # the default (unfiltered) feed includes active/in-progress runs (success/endtime NULL)
+    t = _seed_thing(type="playlist", url="http://e/active", title="Active PL")
+    r_done = _seed_run_at(t, True, 0)
+    r_active = _seed_run_at(t, None, 10)   # claimed, still running
+
+    feed = client.get("/runs/").json()
+    assert {r["id"] for r in feed} == {r_done, r_active}
+    active = next(r for r in feed if r["id"] == r_active)
+    assert active["success"] is None and active["endtime"] is None
+
+
+def test_runs_feed_success_and_in_progress_filters(client):
+    t = _seed_thing(type="playlist", url="http://e/filt", title="Filt PL")
+    r_prog = _seed_run_at(t, None, 0)
+    r_fail = _seed_run_at(t, False, 10)
+    r_ok = _seed_run_at(t, True, 20)
+
+    assert {r["id"] for r in client.get("/runs/", params={"success": False}).json()} == {r_fail}
+    assert {r["id"] for r in client.get("/runs/", params={"success": True}).json()} == {r_ok}
+    assert {r["id"] for r in client.get("/runs/", params={"in_progress": True}).json()} == {r_prog}
+
+
+def test_runs_feed_limit(client):
+    t = _seed_thing(type="playlist", url="http://e/lim", title="Lim PL")
+    for i in range(3):
+        _seed_run_at(t, True, i)
+    assert len(client.get("/runs/", params={"limit": 2}).json()) == 2

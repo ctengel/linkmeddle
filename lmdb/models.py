@@ -224,6 +224,26 @@ class RunRead(SQLModel):
     success: Optional[bool] = None
 
 
+class RunActivity(SQLModel):
+    """Slim run + its thing's display fields for the recent-activity feed (§3.1).
+
+    Deliberately omits the heavy data_json/input_json JSONB (RunRead carries those); a feed
+    ships only what a dashboard row renders. The run's "action" is derived, not stored, so the
+    feed exposes container/best_oi and the FE infers the label.
+    """
+    id: uuid.UUID
+    thing_id: uuid.UUID
+    thing_title: Optional[str] = None
+    thing_url: Optional[str] = None
+    container: Optional[bool] = None
+    best_oi: Optional[uuid.UUID] = None
+    worker: Optional[str] = None
+    playlist_count: Optional[int] = None
+    starttime: datetime.datetime
+    endtime: Optional[datetime.datetime] = None
+    success: Optional[bool] = None
+
+
 class ThingAdd(BaseModel):
     """add-a-thing-by-URL request (the human entry point)."""
     url: str

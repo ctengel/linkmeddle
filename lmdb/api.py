@@ -24,7 +24,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
 from . import models, xform
 from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
-                     RunRead, ThingAdd, ThingPatch, ClaimRequest, JobClaim, RunResultIn)
+                     RunRead, RunActivity, ThingAdd, ThingPatch, ClaimRequest, JobClaim,
+                     RunResultIn)
 
 # Effective-rating floor for fetching a video's *media* (Stage-2 download); below it (C band)
 # a video only gets a metadata-only `meta` job.
@@ -346,6 +347,30 @@ def get_thing_runs(thing_id: uuid.UUID, session: Session = Depends(get_session))
     runs = session.exec(
         select(Run).where(Run.thing_id == thing_id).order_by(Run.starttime.desc())).all()
     return [_run_read(r) for r in runs]
+
+
+@app.get("/runs/", response_model=list[RunActivity])
+def list_runs(limit: int = 50, success: Optional[bool] = None,
+              in_progress: bool = False, session: Session = Depends(get_session)):
+    """Global recent-activity feed: every thing's runs newest-first (§3.1 "recent activity").
+
+    Backs the status dashboard's activity panel (new things / failures are served by
+    GET /things/?new and ?failing). The default feed includes active/in-progress runs inline
+    (success IS NULL, endtime IS NULL). `success` filters to failures (false) or completed
+    (true); `in_progress` narrows to only the claimed-but-unfinished runs.
+    """
+    limit = max(1, min(limit, 200))
+    stmt = select(Run, Thing).where(Run.thing_id == Thing.id)
+    if in_progress:
+        stmt = stmt.where(Run.success == None)  # noqa: E711  (SQL IS NULL)
+    elif success is not None:
+        stmt = stmt.where(Run.success == success)  # noqa: E712
+    stmt = stmt.order_by(Run.starttime.desc()).limit(limit)
+    return [RunActivity(id=r.id, thing_id=r.thing_id, thing_title=t.title, thing_url=t.url,
+                        container=t.container, best_oi=t.best_oi, worker=r.worker,
+                        playlist_count=r.playlist_count, starttime=r.starttime,
+                        endtime=r.endtime, success=r.success)
+            for r, t in session.exec(stmt).all()]
 
 
 @app.patch("/things/{thing_id}", response_model=ThingRead)
