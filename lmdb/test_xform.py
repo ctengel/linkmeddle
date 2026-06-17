@@ -58,31 +58,12 @@ def test_pl_hash_changes_on_membership():
     assert xform.pl_hash(base.entries) != xform.pl_hash(more.entries)
 
 
-def test_full2run():
-    tid = uuid.uuid4()
-    run = xform.full2run(_pl(3), thing_id=tid)
-    assert run.thing_id == tid
-    assert run.success is True
-    assert run.playlist_count == 3
-    assert run.entries_hash == xform.pl_hash(_pl(3).entries)
-    assert run.starttime is not None
-
-
-def test_full2run_count_mismatch_warns():
+def test_reconcile_count_mismatch_warns():
     pl = _pl(3)
     pl.playlist_count = 5
     with pytest.warns(UserWarning):
-        run = xform.full2run(pl, thing_id=uuid.uuid4())
-    assert run.playlist_count == 5  # provided wins
-
-
-def test_runs_differ():
-    tid = uuid.uuid4()
-    same_a = xform.full2run(_pl(3), thing_id=tid)
-    same_b = xform.full2run(_pl(3), thing_id=tid)
-    changed = xform.full2run(_pl(4), thing_id=tid)
-    assert xform.runs_differ(same_a, same_b) is False
-    assert xform.runs_differ(same_a, changed) is True
+        count = xform.reconcile_count(pl)
+    assert count == 5  # provided wins
 
 
 def test_pl_full2things_does_not_set_last_success():

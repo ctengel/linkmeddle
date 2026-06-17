@@ -2,7 +2,6 @@
 
 import statistics
 import datetime
-import uuid
 from typing import NamedTuple, Optional
 import hashlib
 import warnings
@@ -107,6 +106,21 @@ def thing_from_chan(chan: models.UlChan) -> Optional[models.Thing]:
                         title=chan.title,
                         channel=chan.url,
                         attrs=attrs)
+
+
+def merge_attr(thing: models.Thing, key: str, value) -> None:
+    """Set one key on a thing's `attrs` JSONB, preserving the rest (handles attrs=None)."""
+    thing.attrs = {**(thing.attrs or {}), key: value}
+
+
+def refresh_info_hint(thing: models.Thing, info: Optional[dict]) -> None:
+    """Stamp the Stage-2 load-info hint onto a video still pending download (best_oi NULL).
+
+    yt-dlp info dicts go stale, so the hint is refreshed while the media is unacquired and
+    left alone once acquired.
+    """
+    if info is not None and thing.container is False and thing.best_oi is None:
+        merge_attr(thing, INFO_JSON_KEY, info)
 
 
 def enough_to_rate(thing: models.Thing) -> bool:
@@ -242,8 +256,8 @@ def reconcile_count(pl: models.PlaylistFull) -> int:
     """Reconcile a container's reported `playlist_count` against its actual members.
 
     Members = leaf videos + sub-containers (so a channel's count covers both). Returns the
-    count to record (provided count wins on mismatch), warning on disagreement. Shared by
-    `full2run` and the Stage-1 ingest endpoint.
+    count to record (provided count wins on mismatch), warning on disagreement. Used by
+    the Stage-1 ingest endpoint.
     """
     count = len(pl.entries) + len(pl.child_playlists)
     if pl.playlist_count is None:
@@ -253,21 +267,6 @@ def reconcile_count(pl: models.PlaylistFull) -> int:
                       f"length of {count}; will record provided.")
         count = pl.playlist_count
     return count
-
-
-def full2run(pl: models.PlaylistFull,
-             thing_id: uuid.UUID,
-             success: bool = True) -> models.Run:
-    """Build a `run` record for a playlist (Stage-1) pull.
-
-    `entries_hash` (reusing `pl_hash`) is the change-detection fingerprint; the raw
-    yt-dlp output rides in `data_json` (caller supplies it later if desired).
-    """
-    return models.Run(thing_id=thing_id,
-                     entries_hash=pl_hash(pl.entries, pl.child_playlists),
-                     playlist_count=reconcile_count(pl),
-                     success=success,
-                     starttime=models.naive_utcnow())
 
 
 # Fields backfilled onto an existing thing from a fresher pull when they are still NULL
@@ -291,28 +290,23 @@ def null_backfill(existing: models.Thing, incoming: models.Thing) -> dict:
     return out
 
 
-def runs_differ(prev: models.Run, new: models.Run) -> bool:
-    """Did a playlist change between runs? (LM-V4-DESIGN.md §2.3)
-
-    True iff the new run's membership fingerprint differs from the most recent prior
-    *successful* run's. Caller is responsible for passing that prior successful run.
-    """
-    return prev.entries_hash != new.entries_hash
-
-
 # --- V4 try_on backoff (Task 1.4) ------------------------------------------------------
 # Reworks V3's add_new_run/next_run/rec_adjust_freq onto the V4 `run` table: there is no
 # stored freq_days, so the "current interval" is derived from run.starttime gaps and the
 # result is written to thing.try_on (§4.4, §2.5). Pure: operates on `run` rows, no DB.
+
+# Effective-rating floor for each grade band (§2.4): the single source of truth for the
+# band boundaries, consumed by the backoff here and the dispatch floors in api.py.
+BAND_FLOOR = {"A": 1.5, "B": 0.5, "C": -0.5}
 
 INITIAL_INTERVAL = {"A": 3, "B": 5, "C": 8}   # 2nd-run interval by rating band (§4.4)
 
 
 def initial_interval(rating: float) -> int:
     """Initial backoff interval (days) for a rating, by grade band (§2.4/§4.4)."""
-    if rating >= 1.5:           # A band
+    if rating >= BAND_FLOOR["A"]:
         return INITIAL_INTERVAL["A"]
-    if rating >= 0.5:           # B band
+    if rating >= BAND_FLOOR["B"]:
         return INITIAL_INTERVAL["B"]
     return INITIAL_INTERVAL["C"]   # C and below
 

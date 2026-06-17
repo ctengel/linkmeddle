@@ -63,7 +63,7 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     success = info is not None
     if info is not None:
         body['data_json'] = info
-        if info.get("_type") == "playlist" or info.get("entries") is not None:
+        if run_bknd.is_container(info):
             body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
         else:
             body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")

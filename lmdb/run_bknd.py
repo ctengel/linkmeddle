@@ -124,6 +124,11 @@ def extract_pull_pl_stub(info: dict) -> Optional[models.PlaylistFull]:
         channel=_pull_chan(info))
 
 
+def is_container(info: dict) -> bool:
+    """Does a raw yt-dlp info dict describe a container (playlist/channel) vs a single video?"""
+    return info.get("_type") == "playlist" or info.get("entries") is not None
+
+
 def extract_pull(info: dict) -> models.PlaylistFull:
     """Extract the thin pull contract from a raw yt-dlp container info dict.
 
@@ -137,7 +142,7 @@ def extract_pull(info: dict) -> models.PlaylistFull:
     for entry in info.get("entries") or []:
         if entry is None:
             continue
-        if entry.get("_type") == "playlist" or entry.get("entries") is not None:
+        if is_container(entry):
             stub = extract_pull_pl_stub(entry)
             if stub is not None:
                 child_playlists.append(stub)

@@ -28,10 +28,10 @@ from .models import (Thing, Rel, Run, ThingRead, RelatedThing,
                      RunResultIn)
 
 # Effective-rating floor for fetching a video's *media* (Stage-2 download); below it (C band)
-# a video only gets a metadata-only `meta` job.
-_VIDEO_DOWNLOAD_FLOOR = 0.5
+# a video only gets a metadata-only `meta` job. The §2.4 band boundaries live in xform.
+_VIDEO_DOWNLOAD_FLOOR = xform.BAND_FLOOR["B"]
 # Run-eligibility floor for playlists/other (the C band): below it nothing is dispatched.
-_PLAYLIST_FLOOR = -0.5
+_PLAYLIST_FLOOR = xform.BAND_FLOOR["C"]
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -156,17 +156,6 @@ def _finish(session: Session, run: Run) -> RunRead:
     session.commit()
     session.refresh(run)
     return RunRead.model_validate(run)
-
-
-def _refresh_info_hint(thing: Thing, info: Optional[dict]) -> None:
-    """Stamp the Stage-2 load-info hint onto a video still pending download (best_oi NULL).
-
-    yt-dlp info dicts go stale, so the hint is refreshed while the media is unacquired and
-    left alone once acquired. (Belongs in xform with INFO_JSON_KEY/enough_to_rate once those
-    land there; kept here while xform is mid-reconciliation.)
-    """
-    if info is not None and thing.container is False and thing.best_oi is None:
-        thing.attrs = {**(thing.attrs or {}), xform.INFO_JSON_KEY: info}
 
 
 def _related(session: Session, thing_id: uuid.UUID,
@@ -555,12 +544,11 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.best_oi = item.best_oi
             pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
             # clears thing hints since we don't need it anymore
-            pl_thing.attrs = {**(pl_thing.attrs or {}), xform.INFO_JSON_KEY: None}
+            xform.merge_attr(pl_thing, xform.INFO_JSON_KEY, None)
         else:                                 # meta: metadata only, still pending acquisition
             if xform.enough_to_rate(pl_thing):   # all five identity fields present
                 pl_thing.last_success_dt = now   # else stays NULL → re-dispatch on backoff
-            info = item.video.info_json if item.video is not None else None
-            _refresh_info_hint(pl_thing, info)   # keep the Stage-2 load-info hint fresh
+            xform.refresh_info_hint(pl_thing, item.video.info_json)  # keep Stage-2 hint fresh
             _set_try_on(session, pl_thing)       # backoff (§4.4)
         return _finish(session, run)
 
@@ -581,38 +569,37 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     pl_thing.last_success_dt = now
     # A container that is its own videos' uploader or owns sub-containers is acting as a
     # channel — tag the display hint (any channel=True edge it parents, idempotent).
-    if (any(r.parent == graph.playlist.id and r.channel for r in graph.rels)
-            and (pl_thing.attrs or {}).get("kind") != "channel"):
-        pl_thing.attrs = {**(pl_thing.attrs or {}), "kind": "channel"}
+    if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):
+        xform.merge_attr(pl_thing, "kind", "channel")
 
     remap = {graph.playlist.id: pl_thing.id}
     for stub in graph.videos + graph.channels + graph.child_playlists:
         existing = _find_thing(session, stub)
         if existing is not None:
+            thing = existing
             _apply_backfill(session, existing, stub)
-            _refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
+            xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
             # Carry a freshly-discovered channel hint onto a pre-existing container.
-            if ((stub.attrs or {}).get("kind") == "channel"
-                    and (existing.attrs or {}).get("kind") != "channel"):
-                existing.attrs = {**(existing.attrs or {}), "kind": "channel"}
-            # A video is metadata-complete once its fields are enough to rate (a present
-            # title); decided API-side (§Stage 1). Set once, when still NULL.
-            if (existing.container is False and existing.last_success_dt is None
-                    and xform.enough_to_rate(existing)):
-                existing.last_success_dt = now
-            remap[stub.id] = existing.id
+            if (stub.attrs or {}).get("kind") == "channel":
+                xform.merge_attr(existing, "kind", "channel")
         else:
-            if stub.container is False and xform.enough_to_rate(stub):
-                stub.last_success_dt = now   # else NULL -> a `meta` job enriches it later
+            thing = stub
             session.add(stub)
-            remap[stub.id] = stub.id
+        # A video is metadata-complete once its fields are enough to rate (a present title);
+        # decided API-side (§Stage 1). Set once, when still NULL (a fresh stub always is);
+        # else it stays NULL and a `meta` job enriches it later.
+        if (thing.container is False and thing.last_success_dt is None
+                and xform.enough_to_rate(thing)):
+            thing.last_success_dt = now
+        remap[stub.id] = thing.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
-    # Bulk upsert the edges: the (parent, child) PK dedups, so no per-edge SELECT.
-    for rel in graph.rels:
-        session.execute(pg_insert(Rel).values(
-            parent=remap[rel.parent], child=remap[rel.child],
-            channel=rel.channel).on_conflict_do_nothing())
+    # Bulk upsert the edges in one statement: the (parent, child) PK dedups (DO NOTHING also
+    # tolerates in-batch duplicates), so no per-edge SELECT or round-trip.
+    rows = [{"parent": remap[rel.parent], "child": remap[rel.child], "channel": rel.channel}
+            for rel in graph.rels]
+    if rows:
+        session.execute(pg_insert(Rel).values(rows).on_conflict_do_nothing())
 
     _set_try_on(session, pl_thing)   # successful container run -> next backoff date (§4.4)
     return _finish(session, run)
