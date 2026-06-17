@@ -259,9 +259,11 @@ class ThingAdd(BaseModel):
 
 
 class ThingPatch(BaseModel):
-    """PATCH a thing: set rating, or acknowledge permafail (try_on=null)."""
+    """PATCH a thing: set rating, acknowledge permafail (try_on=null), or edit soft hints."""
     human_rating: Optional[float] = Field(default=None, ge=-2, le=2)  # -2..+2 numeric (§2.4)
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
+    cookies: Optional[bool] = None  # soft hint -> attrs.cookies (null clears it) [A11]
+    lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (null clears it) [A11]
 
 
 class ClaimRequest(BaseModel):

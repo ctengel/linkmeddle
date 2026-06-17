@@ -231,6 +231,19 @@ def test_patch_404(client):
     assert r.status_code == 404
 
 
+def test_patch_soft_hints(client):
+    # V3 PATCH-schedule parity: edit cookies/lpm_lib hints after creation ([A11]).
+    tid = client.post("/things/", json={"url": "http://example/patch-hints",
+                                        "bucket": "b", "rating": 1.0}).json()["id"]
+    r = client.patch(f"/things/{tid}", json={"cookies": True, "lpm_lib": "x"})
+    assert r.status_code == 200
+    assert r.json()["attrs"] == {"cookies": True, "lpm_lib": "x"}
+    # Flipping one hint preserves the other and leaves the rating untouched.
+    r = client.patch(f"/things/{tid}", json={"cookies": False})
+    assert r.json()["attrs"] == {"cookies": False, "lpm_lib": "x"}
+    assert r.json()["human_rating"] == 1.0
+
+
 # --- patch: raise-to-eligible try_on side-effect (Task 2.1, §2.5) ----------------------
 
 def test_patch_raise_resurrects_permafail(client):

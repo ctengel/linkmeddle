@@ -338,6 +338,12 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
         if (thing.best_oi is None and new_rating > old_rating
                 and new_rating > _PLAYLIST_FLOOR):
             thing.try_on = _today()
+    # Soft-hint edits (V3 PATCH-schedule parity): write into attrs JSONB, preserving the rest;
+    # an explicit null clears the hint (the merge_attr(..., None) pattern submit_result uses).
+    if "cookies" in data:
+        xform.merge_attr(thing, "cookies", data["cookies"])
+    if "lpm_lib" in data:
+        xform.merge_attr(thing, "lpm_lib", data["lpm_lib"])
     session.add(thing)
     session.commit()
     session.refresh(thing)
