@@ -158,6 +158,27 @@ def test_init_download_uses_process_ie_result_when_info_dict(fake_ydl):
     assert info == payload
 
 
+# --- main(): a raising job is reported as a failure, not just logged --------------------
+
+def test_main_reports_failure_on_raising_job(monkeypatch):
+    # A job that raises while running must be reported as a failure (info=None -> success=False)
+    # so the run is finalized and the thing backs off; otherwise it is re-claimed forever.
+    jobs = iter([{"run_id": "rX", "download": False, "cookies": False,
+                  "thing": {"url": "u", "bucket": "b", "attrs": None}}])
+    monkeypatch.setattr(job_runner, "claim_job", lambda *a, **k: next(jobs, None))
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(job_runner, "initiate_job", boom)
+
+    reported = {}
+    monkeypatch.setattr(job_runner, "post_result",
+                        lambda api, run_id, info, **k: reported.update(run_id=run_id, info=info))
+    rc = job_runner.main()
+    assert rc == 1
+    assert reported["run_id"] == "rX" and reported["info"] is None  # posted a failure
+
+
 def test_init_download_uses_extract_info_without_info_dict(fake_ydl):
     run_bknd.init_download("https://x/v/abc", download=False)
     names = [c[0] for c in fake_ydl.calls]
@@ -190,6 +211,21 @@ def test_extract_pull_handles_flat_entries():
     v = run_bknd.extract_pull(flat_pl).entries[0]
     assert v.native_id == "v1" and v.url == "https://x/v/1"
     assert v.extractor_key == "youtube" and v.title == "V1"
+
+
+def test_extract_pull_url_result_marks_unknown_container():
+    # A flat url-result with a *container* ie_key (a channel tab / sub-playlist) is ambiguous
+    # -> container=None so its own pull classifies it; a plain video url-result is a known leaf.
+    raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
+           "entries": [
+               {"_type": "url", "ie_key": "Youtube", "id": "v1",
+                "url": "https://x/v/1", "title": "V1"},
+               {"_type": "url", "ie_key": "YoutubeTab", "id": "tab1",
+                "url": "https://x/chan/videos", "title": "Videos"},
+           ]}
+    by_id = {v.native_id: v for v in run_bknd.extract_pull(raw).entries}
+    assert by_id["v1"].container is False    # plain video url-result -> known leaf (cheap path)
+    assert by_id["tab1"].container is None   # container ie_key -> unknown, classified later
 
 
 def test_extract_pull_splits_videos_and_child_playlists():

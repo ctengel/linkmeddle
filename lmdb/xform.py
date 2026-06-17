@@ -64,11 +64,12 @@ def pl_hash(entries: list[models.VidFull],
 # `is_(None)`, never Python `is not None`, in filters on nullable columns.
 
 def thing_from_vid(vid: models.VidFull) -> models.Thing:
-    """Build a stub video `thing` (container=False, a leaf) from a playlist pull (#137 sidestep)."""
+    """Build a stub `thing` from a playlist entry: a leaf video (container=False) or, for an
+    ambiguous flat url-result, an unknown stub (container=None) classified on its own pull."""
     return models.Thing(url=vid.url,
                         extractor_key=vid.extractor_key,
                         native_id=vid.native_id,
-                        container=False,
+                        container=vid.container,
                         title=vid.title,
                         channel=vid.channel.url,
                         thumbnail_url=vid.thumbnail_url,

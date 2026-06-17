@@ -99,7 +99,10 @@ def extract_pull_video(info: dict) -> models.VidFull:
         extractor_key=_norm_extractor(info),
         title=info.get("title"),
         thumbnail_url=info.get("thumbnail"),
-        modified=datetime.datetime.fromtimestamp(ts) if ts else None,
+        # yt-dlp `timestamp` is a UTC epoch; store it as a naive-UTC datetime (the V4
+        # convention, models.naive_utcnow) — NOT fromtimestamp()'s worker-local time.
+        modified=(datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
+                  if ts else None),
         channel=_pull_chan(info),
         # Faithful copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
         info_json={k: v for k, v in info.items() if k != "info_json"})
@@ -129,6 +132,18 @@ def is_container(info: dict) -> bool:
     return info.get("_type") == "playlist" or info.get("entries") is not None
 
 
+# yt-dlp `ie_key` fragments that mark a flat url-result as a *container* extractor (a channel
+# tab / sub-playlist) rather than a single video — e.g. `YoutubeTab`, `YoutubePlaylist`,
+# `BilibiliChannel`. Heuristic and easily extended; an unmatched url-result is assumed to be a
+# plain video (the common, cheap flat-pull case), so we never pay a classify pull per video.
+_CONTAINER_IE_KEY_HINTS = ("tab", "playlist", "channel", "user", "album", "series")
+
+
+def _is_container_ie_key(ie_key: Optional[str]) -> bool:
+    """Does this flat-entry `ie_key` look like a container (playlist/channel) extractor?"""
+    return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
+
+
 def extract_pull(info: dict) -> models.PlaylistFull:
     """Extract the thin pull contract from a raw yt-dlp container info dict.
 
@@ -147,7 +162,15 @@ def extract_pull(info: dict) -> models.PlaylistFull:
             if stub is not None:
                 child_playlists.append(stub)
             continue
-        entries.append(extract_pull_video(entry))
+        vid = extract_pull_video(entry)
+        # A flat url-result whose `ie_key` marks it as a container extractor (a channel tab /
+        # sub-playlist) is ambiguous — yt-dlp only handed back a URL pointer. Mark the stub
+        # container=NULL (unknown) so its own pull classifies it, instead of guessing video and
+        # later trying to download a playlist. A plain video url-result stays a known leaf.
+        if (entry.get("_type") in ("url", "url_transparent")
+                and _is_container_ie_key(entry.get("ie_key"))):
+            vid.container = None
+        entries.append(vid)
     modified = info.get("modified_date")
     return models.PlaylistFull(
         url=info["webpage_url"],

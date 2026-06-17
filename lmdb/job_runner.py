@@ -78,6 +78,19 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     return resp.json()
 
 
+def report_failure(api_base: str, job: dict, worker: str) -> None:
+    """Finalize a claimed run as a failure (info=None -> success=False).
+
+    Called when running the job raised before `post_result` reported anything, so the API
+    never saw a result. Without this the Run stays success=NULL (the in-progress marker)
+    forever and the thing is re-claimed on the very next loop — a tight infinite loop on a
+    poison job. Posting a failure lets the server record `last_failure_dt` and back `try_on`
+    off (§4.4/§4.7), so the worker moves on.
+    """
+    post_result(api_base, job["run_id"], None, download=job.get("download", False),
+                use_cookies=job.get("cookies", False), worker=worker)
+
+
 def initiate_job(api_base: str, job: dict, worker: str) -> None:
     """Run one claimed job and report its result — one common path for every job kind.
 
@@ -122,6 +135,13 @@ def main() -> int:
         except Exception as exc:  # never let one job kill the loop
             warnings.warn(f"Job {job.get('run_id')} failed: {exc}")
             status = 1
+            # Report the failure so the run is finalized and the thing backs off, rather than
+            # being re-claimed forever (the API never saw a result). Guard the report itself
+            # so a reporting failure still can't wedge the loop.
+            try:
+                report_failure(LINKMEDDLE_PLAPI, job, WORKER)
+            except Exception as rexc:
+                warnings.warn(f"Could not report failure for run {job.get('run_id')}: {rexc}")
     print(f"Ran {count} job(s); worker={WORKER}.")
     return status
 

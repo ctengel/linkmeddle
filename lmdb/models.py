@@ -38,6 +38,9 @@ class VidFull(BaseModel):
     thumbnail_url: Optional[str] = None
     modified: Optional[datetime.datetime] = None   # from timestamp/upload_date
     channel: UlChan = UlChan()
+    # False = a known leaf video; None = unknown (a flat url-result the pull can't classify as
+    # video-vs-sub-playlist) so the stub's own pull resolves it later (#158).
+    container: Optional[bool] = False
     # Faithful raw yt-dlp entry dict, carried so it can become the Stage-2 load-info hint
     # (attrs.info_json -> process_ie_result). Kept raw because the download needs `formats`.
     info_json: Optional[dict] = None

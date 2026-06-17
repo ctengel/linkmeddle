@@ -34,6 +34,14 @@ def _pl(n=3) -> models.PlaylistFull:
     )
 
 
+def test_thing_from_vid_passes_container_through():
+    # A known leaf defaults to container=False; an ambiguous flat url-result (container=None)
+    # is carried through so its own pull classifies it later (#158).
+    assert xform.thing_from_vid(models.VidFull(native_id="v")).container is False
+    assert xform.thing_from_vid(
+        models.VidFull(native_id="v", container=None)).container is None
+
+
 def test_pl_full2things_no_channel_url():
     pl = _pl(1)
     pl.channel = models.UlChan()  # no urls on the playlist...
