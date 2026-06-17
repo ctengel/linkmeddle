@@ -25,35 +25,36 @@ def _capture_init_download(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("action", ["pull", "download", "meta"])
-def test_initiate_job_forwards_info_json_both_stages(monkeypatch, action):
+@pytest.mark.parametrize("download", [False, True])
+def test_initiate_job_forwards_info_json_both_stages(monkeypatch, download):
     calls = _capture_init_download(monkeypatch)
     payload = {"id": "abc", "webpage_url": "https://example.com/v/abc"}
-    job = {"run_id": "r1", "action": action,
+    job = {"run_id": "r1", "download": download,
            "thing": {"url": "https://example.com/v/abc", "bucket": "b",
                      "attrs": {"info_json": payload}}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["info_dict"] == payload
 
 
-def test_initiate_job_meta_is_metadata_only(monkeypatch):
-    # A 'meta' job fetches metadata only — like 'pull', no media download / OI bucket.
+def test_initiate_job_metadata_only_when_not_download(monkeypatch):
+    # A non-download job (container pull or C-band video enrich) fetches metadata only — no
+    # media download / OI bucket.
     calls = _capture_init_download(monkeypatch)
-    job = {"run_id": "r1", "action": "meta",
+    job = {"run_id": "r1", "download": False,
            "thing": {"url": "https://example.com/v/c", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["download"] is False and calls["oibucket"] is None
 
 
-@pytest.mark.parametrize("action,expected_flat",
-                         [("pull", True), ("meta", False), ("download", False)])
-def test_initiate_job_flat_only_for_pull(monkeypatch, action, expected_flat):
-    # Only the playlist pull flattens; meta/download need a full single-video extract.
+@pytest.mark.parametrize("download", [False, True])
+def test_initiate_job_always_flat(monkeypatch, download):
+    # One extraction mode for every job: always flat. It is a no-op on a single video, so a
+    # download still gets a full extract while a container pull is enumerated cheaply.
     calls = _capture_init_download(monkeypatch)
-    job = {"run_id": "r1", "action": action,
+    job = {"run_id": "r1", "download": download,
            "thing": {"url": "https://example.com/x", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
-    assert calls["flat"] is expected_flat
+    assert calls["flat"] is True
 
 
 class _Resp:
@@ -62,30 +63,31 @@ class _Resp:
     def json(self): return {}
 
 
-def test_post_result_meta_sends_video(monkeypatch):
-    # A meta result posts a single PullVid `video` body — not a `playlist`, no `best_oi`.
+def test_post_result_metadata_only_sends_video(monkeypatch):
+    # A non-download single-video result posts a `video` body — not a `playlist`, no `best_oi`.
     captured = {}
     monkeypatch.setattr(job_runner.requests, "post",
                         lambda url, json=None, timeout=None:
                             captured.update(body=json) or _Resp())
     info = {"id": "vid9", "webpage_url": "https://e/v/9", "extractor": "YouTube",
             "title": "T", "thumbnail": "th", "description": "d"}
-    job_runner.post_result("http://api/", "r9", info, action="meta")
+    job_runner.post_result("http://api/", "r9", info, download=False)
     body = captured["body"]
     assert "video" in body and "playlist" not in body and "best_oi" not in body
     assert body["video"]["native_id"] == "vid9" and body["success"] is True
 
 
 def test_post_result_download_sends_video_and_best_oi(monkeypatch):
-    # A download forwards the same `video` metadata as meta (so the server enriches identically)
-    # plus the OI uuid; success is gated on the upload (oi_uuid), not just extraction.
+    # A download forwards the same `video` metadata as a metadata-only run (so the server
+    # enriches identically) plus the OI uuid; success is gated on the upload (oi_uuid), not
+    # just extraction.
     captured = {}
     monkeypatch.setattr(job_runner.requests, "post",
                         lambda url, json=None, timeout=None:
                             captured.update(body=json) or _Resp())
     info = {"id": "vid9", "webpage_url": "https://e/v/9", "extractor": "YouTube",
             "title": "T", "oi_uuid": "11111111-1111-1111-1111-111111111111"}
-    job_runner.post_result("http://api/", "r9", info, action="download")
+    job_runner.post_result("http://api/", "r9", info, download=True)
     body = captured["body"]
     assert "video" in body and "playlist" not in body
     assert body["video"]["native_id"] == "vid9"
@@ -104,7 +106,7 @@ def test_extract_pull_video_matches_entry_mapping():
 
 def test_initiate_job_info_json_absent_is_none(monkeypatch):
     calls = _capture_init_download(monkeypatch)
-    job = {"run_id": "r1", "action": "download",
+    job = {"run_id": "r1", "download": True,
            "thing": {"url": "https://example.com/v/abc", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["info_dict"] is None
@@ -206,23 +208,24 @@ def test_extract_pull_splits_videos_and_child_playlists():
     assert pl.child_playlists[0].url == "https://x/pl/sub"
 
 
-def test_post_result_pull_single_video_discovers_leaf(monkeypatch):
-    # #153: a 'pull' that resolves to a single video (no entries) is posted as `video`, not
-    # `playlist`, so the server classifies the unknown thing as a leaf (container=False).
+def test_post_result_single_video_discovers_leaf(monkeypatch):
+    # #153: a non-download pull that resolves to a single video (no entries) is posted as
+    # `video`, not `playlist`, so the server classifies the unknown thing as a leaf
+    # (container=False).
     captured = {}
     monkeypatch.setattr(job_runner.requests, "post",
                         lambda url, json=None, timeout=None:
                             captured.update(body=json) or _Resp())
     info = {"id": "solo", "webpage_url": "https://e/v/solo", "extractor": "YouTube",
             "title": "Solo"}
-    job_runner.post_result("http://api/", "r", info, action="pull")
+    job_runner.post_result("http://api/", "r", info, download=False)
     body = captured["body"]
     assert "video" in body and "playlist" not in body
     assert body["video"]["native_id"] == "solo"
 
 
-def test_post_result_pull_container_sends_playlist(monkeypatch):
-    # A 'pull' that resolves to a playlist/channel (has entries) is posted as `playlist`.
+def test_post_result_container_sends_playlist(monkeypatch):
+    # A result that resolves to a playlist/channel (has entries) is posted as `playlist`.
     captured = {}
     monkeypatch.setattr(job_runner.requests, "post",
                         lambda url, json=None, timeout=None:
@@ -231,7 +234,35 @@ def test_post_result_pull_container_sends_playlist(monkeypatch):
             "_type": "playlist",
             "entries": [{"_type": "url", "ie_key": "Youtube", "id": "v1",
                          "url": "https://e/v/1", "title": "V1"}]}
-    job_runner.post_result("http://api/", "r", info, action="pull")
+    job_runner.post_result("http://api/", "r", info, download=False)
+    body = captured["body"]
+    assert "playlist" in body and "video" not in body
+
+
+def test_post_result_empty_playlist_no_type_sends_playlist(monkeypatch):
+    # Regression: entries=[] is falsy, so a naive `or info.get("entries")` check sends
+    # `video` instead of `playlist`, mis-classifying the container. _type absent here to
+    # exercise the fallback arm specifically.
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "empty", "webpage_url": "https://e/empty", "extractor": "YouTube",
+            "entries": []}
+    job_runner.post_result("http://api/", "r", info, download=False)
+    body = captured["body"]
+    assert "playlist" in body and "video" not in body
+
+
+def test_post_result_empty_playlist_with_type_sends_playlist(monkeypatch):
+    # Empty playlist with _type: "playlist" — _type arm should take precedence and send playlist.
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "emptyt", "webpage_url": "https://e/emptyt", "extractor": "YouTube",
+            "_type": "playlist", "entries": []}
+    job_runner.post_result("http://api/", "r", info, download=False)
     body = captured["body"]
     assert "playlist" in body and "video" not in body
 

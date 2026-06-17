@@ -9,7 +9,7 @@ yt-dlp's unstable shape.
 import datetime
 import uuid
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import sqlalchemy as sa
 from sqlalchemy import Column, ForeignKey, Index, text
 from sqlalchemy.dialects import postgresql
@@ -205,11 +205,6 @@ class RelatedThing(SQLModel):
     thing: ThingRead
 
 
-class ThingWithRelated(ThingRead):
-    """A thing plus its `rel` neighbors (for ?include=related / page view-models)."""
-    related: list[RelatedThing] = []
-
-
 class RunRead(SQLModel):
     """Public view of a run (entries_hash hex-encoded for JSON)."""
     id: uuid.UUID
@@ -222,6 +217,12 @@ class RunRead(SQLModel):
     starttime: datetime.datetime
     endtime: Optional[datetime.datetime] = None
     success: Optional[bool] = None
+
+    @field_validator("entries_hash", mode="before")
+    @classmethod
+    def _hex_entries_hash(cls, v):
+        """The Run column is raw bytes; hex-encode it for JSON (None passes through)."""
+        return v.hex() if isinstance(v, (bytes, bytearray)) else v
 
 
 class RunActivity(SQLModel):
@@ -248,19 +249,18 @@ class ThingAdd(BaseModel):
     """add-a-thing-by-URL request (the human entry point)."""
     url: str
     bucket: str              # OI storage bucket; required, no server default [A10]
-    # Ergonomic hint, mapped server-side onto `container`/`attrs.kind`: 'channel'/'playlist'
-    # -> container=True (channel also tags attrs.kind), 'video' -> False, omitted -> NULL
-    # (unknown; the first pull classifies it). The user need not know the type (#153).
-    type: Optional[str] = None
-    rating: Optional[str] = None  # grade letter A/B/C (default C); D/F not allowed at add
+    # Structural hint set directly on `thing.container`: True = container (playlist/channel),
+    # False = video (leaf), omitted -> NULL (unknown; the first pull classifies it). The user
+    # need not supply it (#153); channel-ness is discovered (attrs.kind) on the pull, not at add.
+    container: Optional[bool] = None
+    rating: Optional[float] = Field(default=None, ge=0, le=2)  # -2..+2 numeric; default 0 (C); no D/F at add
     cookies: Optional[bool] = None  # soft hint -> attrs.cookies (suggest cookies) [A11]
     lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (optional library tag) [A11]
 
 
 class ThingPatch(BaseModel):
     """PATCH a thing: set rating, or acknowledge permafail (try_on=null)."""
-    human_rating: Optional[float] = Field(default=None, ge=-2, le=2)  # -2..+2 (§2.4)
-    grade: Optional[str] = None          # grade letter alternative to human_rating
+    human_rating: Optional[float] = Field(default=None, ge=-2, le=2)  # -2..+2 numeric (§2.4)
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
 
 
@@ -271,10 +271,17 @@ class ClaimRequest(BaseModel):
 
 
 class JobClaim(BaseModel):
-    """Prioritized dispatch result: the single highest-priority due job (§4.5)."""
+    """Prioritized dispatch result: the single highest-priority due job (§4.5).
+
+    One worker code path for every job: the worker always extracts as flat as possible
+    (`extract_flat='in_playlist'`, a no-op on a single video) and shapes its result body from
+    what yt-dlp returned (playlist fan-out vs single `video`). `download` is the only knob:
+    True means acquire media + upload to OI and set `best_oi` (a video assessing >= B band);
+    False means metadata only (a container pull, or a C-band video the flat pull
+    under-described). The server decides the flag from the thing's container/rating (§4.2)."""
     run_id: uuid.UUID
     thing: ThingRead
-    action: str          # 'pull' (Stage-1 playlist) | 'download' (Stage-2 video)
+    download: bool = False  # acquire media (>= B video); else metadata-only pull/enrich
     cookies: bool = False  # per-job cookies suggestion the worker acts on (hint-only in 4.0) [A11]
 
 
@@ -282,9 +289,9 @@ class RunResultIn(BaseModel):
     """Worker-owned result push for a run (the V4 rewrite of V3's POST /playlist-run).
 
     Stage-1 (playlist pull): `playlist` is the LM-native pull result (required on success).
-    Stage-2 (video download): `best_oi` is the OI file UUID from the upload (info['oi_uuid']),
-    with `extractor_key`/`native_id` for identity backfill. `data_json` carries the raw yt-dlp
-    output; `input_json` records the per-run decisions (e.g. whether cookies were used).
+    Stage-2 (video download): `video` is the full single-video extract (display + identity +
+    channel) and `best_oi` is the OI file UUID from the upload (info['oi_uuid']). `data_json`
+    carries the raw yt-dlp output; `input_json` records the per-run decisions (e.g. cookies).
     Stage-2 (video *meta*): `video` is the single-video metadata fetched for a C-band video
     that the flat pull couldn't describe richly enough for a human to rate (no media, no
     `best_oi`) — the meta-job counterpart of `playlist`.
@@ -292,8 +299,6 @@ class RunResultIn(BaseModel):
     playlist: Optional[PlaylistFull] = None
     video: Optional[VidFull] = None
     best_oi: Optional[uuid.UUID] = None
-    extractor_key: Optional[str] = None
-    native_id: Optional[str] = None
     success: bool = True
     data_json: Optional[dict] = None
     input_json: Optional[dict] = None

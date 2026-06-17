@@ -87,21 +87,26 @@ def thing_from_pl(pl: models.PlaylistFull) -> models.Thing:
                         modified=pl.modified)
 
 
-def thing_from_chan(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
+def thing_from_chan(chan: models.UlChan) -> Optional[models.Thing]:
     """Build a channel `thing` from an uploader/channel descriptor, or None if no URL.
 
     A channel is just a container (container=True); its channel-ness rides the soft
     `attrs.kind='channel'` display hint plus the `channel=True` rel edges pointing at it.
+    extractor_key is left None — yt-dlp does not provide the channel's sub-extractor in a
+    parent info dict; it is filled in only when a job runs directly on the channel URL.
     """
     if not chan.url:
         return None
+    attrs: dict = {'kind': 'channel'}
+    if chan.native_id is not None:
+        attrs['channel_id'] = chan.native_id
     return models.Thing(url=chan.url,
-                        extractor_key=extractor_key,
-                        native_id=chan.native_id,
+                        extractor_key=None,
+                        native_id=None,
                         container=True,
                         title=chan.title,
                         channel=chan.url,
-                        attrs={'kind': 'channel'})
+                        attrs=attrs)
 
 
 def enough_to_rate(thing: models.Thing) -> bool:
@@ -130,7 +135,7 @@ def _same_identity(parent: models.Thing, chan: models.UlChan) -> bool:
 
     The channel case: the parent IS the uploader, so the parent->child edge is the
     channel/uploader edge (`rel.channel=True`) and no separate uploader node is needed.
-    Matched by `native_id` (extractor assumed shared); URL only when a native_id is absent
+    Matched by `native_id`; URL only when a native_id is absent
     (channel landing-vs-/videos URLs differ — #46 — so native_id is the reliable signal).
     """
     if parent.native_id is not None and chan.native_id is not None:
@@ -183,12 +188,12 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
     # One channel node per uploader URL, shared across the container + its videos.
     channels_by_url: dict[str, models.Thing] = {}
 
-    def channel_for(chan: models.UlChan, extractor_key: Optional[str]) -> Optional[models.Thing]:
+    def channel_for(chan: models.UlChan) -> Optional[models.Thing]:
         if not chan.url:
             return None
         existing = channels_by_url.get(chan.url)
         if existing is None:
-            existing = thing_from_chan(chan, extractor_key)
+            existing = thing_from_chan(chan)
             existing.bucket = bucket
             channels_by_url[chan.url] = existing
         return existing
@@ -197,7 +202,7 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
     # owned by someone else; when the container IS its own uploader (a channel) skip the
     # self-edge.
     if pl.channel.url and not _same_identity(pl_thing, pl.channel):
-        pl_chan = channel_for(pl.channel, pl_thing.extractor_key)
+        pl_chan = channel_for(pl.channel)
         if pl_chan is not None:
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
@@ -214,7 +219,7 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=False))
-            vid_chan = channel_for(vid.channel, vid.extractor_key)
+            vid_chan = channel_for(vid.channel)
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 

@@ -23,7 +23,7 @@ from fastapi import FastAPI, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
 from . import models, xform
-from .models import (Thing, Rel, Run, ThingRead, ThingWithRelated, RelatedThing,
+from .models import (Thing, Rel, Run, ThingRead, RelatedThing,
                      RunRead, RunActivity, ThingAdd, ThingPatch, ClaimRequest, JobClaim,
                      RunResultIn)
 
@@ -35,10 +35,6 @@ _PLAYLIST_FLOOR = -0.5
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
-
-# Letter grade <-> signed float (-2..+2). D/F are not addable (you don't add to suppress).
-GRADE_VALUES = {"A": 2.0, "B": 1.0, "C": 0.0, "D": -1.0, "F": -2.0}
-ADD_GRADES = {"A", "B", "C"}
 
 
 @asynccontextmanager
@@ -91,6 +87,16 @@ def _effective_rating_expr(default=None):
     return func.coalesce(*args)
 
 
+def _effective(human: Optional[float], machine: Optional[float],
+               default: Optional[float] = None) -> Optional[float]:
+    """COALESCE(human, machine, default) (§2.4): human wins, else machine, else default."""
+    if human is not None:
+        return human
+    if machine is not None:
+        return machine
+    return default
+
+
 def _machine_rating_value(session: Session, thing: Thing) -> Optional[float]:
     """Computed machine rating for one thing (None if no human-rated relatives apply)."""
     return session.exec(select(_machine_rating_expr()).where(Thing.id == thing.id)).one()
@@ -102,49 +108,28 @@ def _effective_rating_value(session: Session, thing: Thing) -> float:
     The instance form of `_effective_rating_expr(default=0.0)`, for callers that hold a loaded
     `thing` and need its rating for a Python decision (dispatch action, backoff band, §2.4).
     """
-    if thing.human_rating is not None:
-        return thing.human_rating
-    machine = _machine_rating_value(session, thing)
-    return machine if machine is not None else 0.0
+    return _effective(thing.human_rating, _machine_rating_value(session, thing), 0.0)
 
 
 def _read_with_ratings(thing: Thing, machine: Optional[float]) -> ThingRead:
     """ThingRead with computed machine/effective ratings. Human rating is authoritative: when
     present, machine is treated as NULL and effective is the human rating (§2.4)."""
     tr = ThingRead.model_validate(thing)
-    if thing.human_rating is not None:
-        tr.machine_rating, tr.effective_rating = None, thing.human_rating
-    else:
-        tr.machine_rating = tr.effective_rating = machine
+    tr.machine_rating = None if thing.human_rating is not None else machine
+    tr.effective_rating = _effective(thing.human_rating, machine)
     return tr
 
 
-def _container_from_type(type_hint: Optional[str]) -> tuple[Optional[bool], bool]:
-    """Map the optional ergonomic add-time `type` hint to (container, is_channel).
+def _wants_download(thing: Thing, eff_rating: float) -> bool:
+    """Whether the worker should acquire media for this claimed thing (§4.5 dispatch result).
 
-    'channel'/'playlist' -> container True (channel also tags attrs.kind='channel'); 'video'
-    -> False; omitted -> None (unknown; the first pull classifies it, #153).
+    True only for a leaf video (`container is False`) whose effective rating clears the B floor
+    -- the Stage-2 media+metadata download. Everything else is metadata-only: a container/unknown
+    pull (Stage-1 fan-out; an unknown URL is classified by the result), or a C-band video the
+    flat pull under-described (Stage-2 metadata-only enrichment). The worker uses one extraction
+    path either way (flat, a no-op on a single video); this flag just gates the media download.
     """
-    if type_hint is None:
-        return None, False
-    mapping = {"video": (False, False), "playlist": (True, False), "channel": (True, True)}
-    if type_hint.lower() not in mapping:
-        raise HTTPException(status_code=422,
-                            detail="type must be one of channel/playlist/video")
-    return mapping[type_hint.lower()]
-
-
-def _action_for(thing: Thing, eff_rating: float) -> str:
-    """What the worker should do with this claimed thing (§4.5 dispatch result).
-
-    Container or unknown (`container` is True/NULL) -> 'pull' (Stage-1 metadata fan-out; an
-    unknown URL is classified by the result). A leaf video (`container is False`) ->
-    'download' (Stage-2 media+metadata) when its effective rating clears the B floor, else
-    'meta' (Stage-2 metadata-only enrichment for a C-band video the flat pull under-described).
-    """
-    if thing.container is False:
-        return "download" if eff_rating >= _VIDEO_DOWNLOAD_FLOOR else "meta"
-    return "pull"
+    return thing.container is False and eff_rating >= _VIDEO_DOWNLOAD_FLOOR
 
 
 def _set_try_on(session: Session, thing: Thing) -> None:
@@ -165,21 +150,12 @@ def get_thing_or_404(session: Session, thing_id: uuid.UUID) -> Thing:
     return thing
 
 
-def _run_read(run: Run) -> RunRead:
-    """Serialize a run, hex-encoding the binary entries_hash for JSON."""
-    return RunRead(id=run.id, thing_id=run.thing_id, worker=run.worker,
-                   input_json=run.input_json, data_json=run.data_json,
-                   entries_hash=run.entries_hash.hex() if run.entries_hash else None,
-                   playlist_count=run.playlist_count, starttime=run.starttime,
-                   endtime=run.endtime, success=run.success)
-
-
 def _finish(session: Session, run: Run) -> RunRead:
     """Commit the in-progress run and return its serialized view (the submit_result tail)."""
     session.add(run)
     session.commit()
     session.refresh(run)
-    return _run_read(run)
+    return RunRead.model_validate(run)
 
 
 def _refresh_info_hint(thing: Thing, info: Optional[dict]) -> None:
@@ -220,31 +196,25 @@ def _related(session: Session, thing_id: uuid.UUID,
 def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get_session)):
     """Add a thing by URL (the human entry point).
 
-    Stores the URL with a default rating of C (override A/B). The user need not know the
-    kind: `type` is an optional hint mapped to `container` (channel/playlist -> True, video
-    -> False, omitted -> NULL = unknown, classified on first pull, #153); 'channel' also
-    tags `attrs.kind='channel'`. `bucket` (OI storage home) is required — no server default
-    ([A10]). Optional `cookies`/`lpm_lib` are stored as soft hints in `attrs` ([A11]).
-    extractor_key/native_id are filled in later by the worker. Idempotent on URL (returns
-    the existing thing with 200, bucket unchanged — bucket is immutable).
+    Stores the URL with a default numeric rating of 0.0 / C (override 1.0/2.0; the `ge=0`
+    bound rejects D/F — you don't add to suppress). `container` is an optional structural hint
+    set directly on the row (True/False, omitted -> NULL = unknown, classified on first pull,
+    #153); channel-ness is discovered (attrs.kind) on the pull, not declared here. `bucket`
+    (OI storage home) is required — no server default ([A10]). Optional `cookies`/`lpm_lib`
+    are stored as soft hints in `attrs` ([A11]). extractor_key/native_id are filled in later by
+    the worker. Idempotent on URL (returns the existing thing with 200, bucket unchanged).
     """
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
         response.status_code = status.HTTP_200_OK
         return existing
-    grade = (item.rating or "C").upper()
-    if grade not in ADD_GRADES:
-        raise HTTPException(status_code=422,
-                            detail=f"rating must be one of {sorted(ADD_GRADES)} at add time")
-    container, is_channel = _container_from_type(item.type)
     attrs: dict = {}
-    if is_channel:
-        attrs["kind"] = "channel"
     if item.cookies is not None:
         attrs["cookies"] = item.cookies
     if item.lpm_lib is not None:
         attrs["lpm_lib"] = item.lpm_lib
-    thing = Thing(url=item.url, container=container, human_rating=GRADE_VALUES[grade],
+    thing = Thing(url=item.url, container=item.container,
+                  human_rating=item.rating if item.rating is not None else 0.0,
                   bucket=item.bucket, attrs=attrs or None)
     session.add(thing)
     try:
@@ -261,34 +231,25 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
 
 
 @app.get("/things/", response_model=list[ThingRead])
-def list_things(type: Optional[str] = None, rating: Optional[str] = None,
-                min_rating: Optional[str] = None,
+def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
+                rating: Optional[float] = None, min_rating: Optional[float] = None,
                 due: bool = False, needs_rating: bool = False, new: bool = False,
                 failing: bool = False, url: Optional[str] = None,
                 extractor: Optional[str] = None, native_id: Optional[str] = None,
                 session: Session = Depends(get_session)):
     """List/search things. Backs every list view + the status dashboard.
 
-    `extractor` + `native_id` is the V4 replacement for V3 GET /videos/{ex}/{id} (#102).
-    `rating` filters the exact *human* grade; `min_rating` filters the *effective* rating
-    (human else computed machine, §2.4) at the grade's band floor — e.g. `min_rating=B`
-    returns everything effectively B-or-better.
+    `container` filters the structural boolean (True=container, False=video); `kind` filters
+    the `attrs.kind` display hint (e.g. `kind=channel`). `extractor` + `native_id` is the V4
+    replacement for V3 GET /videos/{ex}/{id} (#102). `rating` filters the exact *human* rating;
+    `min_rating` filters the *effective* rating (human else computed machine, §2.4) at or above
+    a numeric threshold — e.g. `min_rating=1.0` returns everything effectively B-or-better.
     """
     stmt = select(Thing, _machine_rating_expr().label("machine_rating"))
-    if type is not None:
-        # 'type' is an ergonomic alias over the boolean + display hint: 'video' -> leaf,
-        # 'playlist' -> container, 'channel' -> container tagged attrs.kind='channel'.
-        t = type.lower()
-        if t == "video":
-            stmt = stmt.where(Thing.container == False)  # noqa: E712
-        elif t == "playlist":
-            stmt = stmt.where(Thing.container == True)  # noqa: E712
-        elif t == "channel":
-            stmt = stmt.where(Thing.container == True,  # noqa: E712
-                              Thing.attrs["kind"].astext == "channel")
-        else:
-            raise HTTPException(status_code=422,
-                                detail="type must be one of channel/playlist/video")
+    if container is not None:
+        stmt = stmt.where(Thing.container == container)
+    if kind is not None:
+        stmt = stmt.where(Thing.attrs["kind"].astext == kind)
     if url is not None:
         stmt = stmt.where(Thing.url == url)
     if extractor is not None:
@@ -296,17 +257,9 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
     if native_id is not None:
         stmt = stmt.where(Thing.native_id == native_id)
     if rating is not None:
-        grade = rating.upper()
-        if grade not in GRADE_VALUES:
-            raise HTTPException(status_code=422,
-                                detail="invalid rating grade")
-        stmt = stmt.where(Thing.human_rating == GRADE_VALUES[grade])
+        stmt = stmt.where(Thing.human_rating == rating)
     if min_rating is not None:
-        grade = min_rating.upper()
-        if grade not in GRADE_VALUES:
-            raise HTTPException(status_code=422, detail="invalid rating grade")
-        # Band floor: round-direction-safe form of "effective grade >= X" (§2.4).
-        stmt = stmt.where(_effective_rating_expr(default=0.0) >= GRADE_VALUES[grade] - 0.5)
+        stmt = stmt.where(_effective_rating_expr(default=0.0) >= min_rating)
     if needs_rating:
         stmt = stmt.where(Thing.human_rating == None)  # noqa: E711  (SQL IS NULL)
     if due:
@@ -322,14 +275,11 @@ def list_things(type: Optional[str] = None, rating: Optional[str] = None,
     return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
 
 
-@app.get("/things/{thing_id}", response_model=ThingWithRelated)
-def get_thing(thing_id: uuid.UUID, include: Optional[str] = None,
-              session: Session = Depends(get_session)):
-    """Get one thing; `?include=related` also returns its rel neighbors."""
+@app.get("/things/{thing_id}", response_model=ThingRead)
+def get_thing(thing_id: uuid.UUID, session: Session = Depends(get_session)):
+    """Get one thing; fetch its rel neighbors separately via GET /things/{id}/related."""
     thing = get_thing_or_404(session, thing_id)
-    machine = _machine_rating_value(session, thing)
-    related = _related(session, thing_id, None) if include == "related" else []
-    return ThingWithRelated(**_read_with_ratings(thing, machine).model_dump(), related=related)
+    return _read_with_ratings(thing, _machine_rating_value(session, thing))
 
 
 @app.get("/things/{thing_id}/related", response_model=list[RelatedThing])
@@ -346,7 +296,7 @@ def get_thing_runs(thing_id: uuid.UUID, session: Session = Depends(get_session))
     get_thing_or_404(session, thing_id)
     runs = session.exec(
         select(Run).where(Run.thing_id == thing_id).order_by(Run.starttime.desc())).all()
-    return [_run_read(r) for r in runs]
+    return [RunRead.model_validate(r) for r in runs]
 
 
 @app.get("/runs/", response_model=list[RunActivity])
@@ -376,7 +326,7 @@ def list_runs(limit: int = 50, success: Optional[bool] = None,
 @app.patch("/things/{thing_id}", response_model=ThingRead)
 def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
                 session: Session = Depends(get_session)):
-    """Update a thing: set the rating (incl. D/F), or ack permafail (try_on=null).
+    """Update a thing: set the numeric rating (incl. D/F), or ack permafail (try_on=null).
 
     Raising the human rating to an eligible level re-opens the date gate
     (`try_on = today`, guarded by `best_oi IS NULL`) — resurrecting a permafail or pulling
@@ -385,19 +335,16 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
     """
     thing = get_thing_or_404(session, thing_id)
     data = item.model_dump(exclude_unset=True)
-    old_rating = _effective_rating_value(session, thing)
-    grade = data.pop("grade", None)
-    if grade is not None:
-        if grade.upper() not in GRADE_VALUES:
-            raise HTTPException(status_code=422,
-                                detail="invalid grade")
-        thing.human_rating = GRADE_VALUES[grade.upper()]
+    # Machine rating is stable across this patch (rels don't change), so compute it once and
+    # derive both the before/after effective ratings from it — no second SQL query.
+    machine = _machine_rating_value(session, thing)
+    old_rating = _effective(thing.human_rating, machine, 0.0)
     if "human_rating" in data:
         thing.human_rating = data["human_rating"]
     if "try_on" in data:  # explicit; null acknowledges permafail
         thing.try_on = data["try_on"]
     else:  # raise-to-eligible side-effect (§2.5) — explicit try_on overrides this
-        new_rating = _effective_rating_value(session, thing)
+        new_rating = _effective(thing.human_rating, machine, 0.0)
         # all things are subject only to playlist floor as maybe a metadata job is needed
         if (thing.best_oi is None and new_rating > old_rating
                 and new_rating > _PLAYLIST_FLOOR):
@@ -448,14 +395,13 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
         setattr(existing, key, value)
 
 
-def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan,
-                          extractor_key: Optional[str]) -> None:
+def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -> None:
     """Upsert the video's uploader container + a `channel=True` rel (the flat-pull omits it).
 
     Mirrors the Stage-1 channel fan-out, used when a `meta` job's full extract discovers the
     uploader a flat playlist pull left out. No-op if the uploader has no URL.
     """
-    stub = xform.thing_from_chan(chan, extractor_key)
+    stub = xform.thing_from_chan(chan)
     if stub is None:
         return
     existing = _find_thing(session, stub)
@@ -478,7 +424,7 @@ def _apply_video_metadata(session: Session, video: Thing, pull: models.VidFull) 
     last_success — those per-outcome decisions stay with the caller.
     """
     _apply_backfill(session, video, xform.thing_from_vid(pull))
-    _fanout_video_channel(session, video, pull.channel, pull.extractor_key)
+    _fanout_video_channel(session, video, pull.channel)
 
 
 @app.post("/jobs/claim", response_model=JobClaim,
@@ -542,10 +488,9 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
                 and not (last_done.input_json or {}).get("cookies")):
             cookies = True
     machine = _machine_rating_value(session, thing)
-    eff = thing.human_rating if thing.human_rating is not None else (
-        machine if machine is not None else 0.0)
+    eff = _effective(thing.human_rating, machine, 0.0)
     return JobClaim(run_id=run.id, thing=_read_with_ratings(thing, machine),
-                    action=_action_for(thing, eff), cookies=cookies)
+                    download=_wants_download(thing, eff), cookies=cookies)
 
 
 @app.post("/jobs/{run_id}/result", response_model=RunRead)
@@ -554,13 +499,13 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     """Stage-1 ingest: record a run's result and upsert the thing/rel graph it found.
 
     The V4 rewrite of V3's POST /playlist-run, one endpoint for both job kinds. The result
-    body decides the path: a `video` body (or a legacy known leaf) is the Stage-2 path —
-    sets `best_oi` (the OI file UUID) on a download, backfills NULL identity, marks acquired
-    (`try_on=NULL`), and classifies the thing `container=False` (also how an unknown URL that
-    resolved to a single video gets classified, #153). A `playlist` body is the Stage-1
-    container pull — classifies `container=True`, fans out into a stub `thing` per member
-    (videos + sub-containers + uploader channels) and the `rel` edges (#137), backfilling
-    NULL fields we already knew (#147); on failure it records the failure only (C8).
+    body decides the path: a `video` body is the Stage-2 path — sets `best_oi` (the OI file
+    UUID) on a download, backfills NULL identity, marks acquired (`try_on=NULL`), and classifies
+    the thing `container=False` (also how an unknown URL that resolved to a single video gets
+    classified, #153). A `playlist` body is the Stage-1 container pull — classifies
+    `container=True`, fans out into a stub `thing` per member (videos + sub-containers +
+    uploader channels) and the `rel` edges (#137), backfilling NULL fields we already knew
+    (#147); on failure it records the failure only (C8).
     """
     run = session.get(Run, run_id)
     if run is None:
@@ -586,21 +531,24 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         return _finish(session, run)
         # TODO still try to get metadata from a failed download?
 
+    # Mismatch guard: a classified thing must not change type.
+    # video body on a known container, or playlist body on a known leaf → treat as failure.
+    if pl_thing is not None and pl_thing.container is not None:
+        is_video_result = item.video is not None
+        if is_video_result != (pl_thing.container is False):
+            pl_thing.last_failure_dt = now
+            _set_try_on(session, pl_thing)
+            run.success = False
+            return _finish(session, run)
+
     # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
-    # (distinct from the Stage-1 container fan-out below). Identified by a `video` body, or
-    # legacy by the dispatched thing already being a known leaf. A `video` body on an unknown
-    # thing is also how a single-video discovery is classified (container=False, #153). Both
-    # forward the full single-video `video`; outcome diverges on `best_oi` (download vs meta).
-    is_video_result = item.video is not None or (
-        item.playlist is None and pl_thing is not None and pl_thing.container is False)
-    if pl_thing is not None and is_video_result:
+    # (distinct from the Stage-1 container fan-out below). Identified by a `video` body, which
+    # the worker always sends for a successful video job. A `video` body on an unknown thing is
+    # also how a single-video discovery is classified (container=False, #153). Both forward the
+    # full single-video `video`; outcome diverges on `best_oi` (download vs meta).
+    if pl_thing is not None and item.video is not None:
         pl_thing.container = False             # classify (discovery) / affirm a leaf
-        if item.video is not None:
-            _apply_video_metadata(session, pl_thing, item.video)  # display+identity+channel
-        else:  # legacy / video omitted: identity-only fallback (#147)
-            _apply_backfill(session, pl_thing,
-                            Thing(container=False, bucket=pl_thing.bucket,
-                                  extractor_key=item.extractor_key, native_id=item.native_id))
+        _apply_video_metadata(session, pl_thing, item.video)  # display+identity+channel
         pl_thing.last_failure_dt = None
         if item.best_oi is not None:          # download: media acquired → always complete
             pl_thing.last_success_dt = now

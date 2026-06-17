@@ -36,23 +36,25 @@ def claim_job(api_base: str, worker: str) -> dict | None:
 
 
 def post_result(api_base: str, run_id: str, info: dict | None, *,
-                action: str, use_cookies: bool = False,
+                download: bool, use_cookies: bool = False,
                 worker: str | None = None) -> dict:
     """Push a run's result to POST /jobs/{run_id}/result (one path for all job kinds).
 
-    `info` is the sanitized yt-dlp output, or None when extraction failed. `action` shapes the
-    body (the server derives the kind from which body field is set — `playlist` vs `video`):
+    `info` is the sanitized yt-dlp output, or None when extraction failed. The body shape is
+    derived from `info` itself — the server keys off which field is set (`playlist` vs `video`):
 
-    - 'pull' (Stage-1 metadata): info is extracted into the thin PlaylistFull (the fan-out
-      body) when it is a container; an unknown URL that resolves to a single video is sent as
-      `video` instead so the server classifies it as a leaf (#153). Non-None info = success.
-    - 'meta' / 'download' (Stage-2): both extract the full single-video metadata into a thin
-      VidFull (`video`) so the server enriches the stub identically (display + channel). 'meta'
-      stops there (no media, no OI; success is `info is not None`). 'download' additionally
-      reads the OI file UUID from info['oi_uuid'] (set by ObjIdxUploadPP) as `best_oi`; its
-      success is `oi_uuid is not None`, NOT merely `info is not None`: _ydl uses
-      ignoreerrors='only_download', so yt-dlp returns an info dict even when the media
-      download failed (the upload PP then never ran, leaving no oi_uuid).
+    - A container result (yt-dlp `_type == 'playlist'` or any `entries`) is extracted into the
+      thin PlaylistFull (the Stage-1 fan-out body). Non-None info = success.
+    - Otherwise the result is a single video, extracted into a thin VidFull (`video`) so the
+      server enriches the stub identically (display + channel). This covers both an under-
+      described C-band video's metadata-only enrichment and an unknown URL that resolved to a
+      single video (the server classifies it as a leaf, #153). Success is `info is not None`.
+
+    `download` adds the Stage-2 media outcome: the OI file UUID from info['oi_uuid'] (set by
+    ObjIdxUploadPP) as `best_oi`, and success becomes `oi_uuid is not None`, NOT merely
+    `info is not None` — _ydl uses ignoreerrors='only_download', so yt-dlp returns an info dict
+    even when the media download failed (the upload PP then never ran, leaving no oi_uuid).
+    `download` is only ever set for a single-video job, so it never collides with a playlist body.
 
     `data_json` carries the raw output (kept even on a failed download for debugging);
     `input_json` records the per-run cookies decision.
@@ -61,19 +63,11 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     success = info is not None
     if info is not None:
         body['data_json'] = info
-        body['extractor_key'] = (info.get('extractor') or '').lower() or None
-        body['native_id'] = info.get('id')
-        if action == 'pull':
-            # A pull of a known container yields entries; a pull of an unknown thing
-            # (container=None) may resolve to a single video -> send it as `video` so the
-            # server classifies it as a leaf (container=False, the #153 correction).
-            if info.get("_type") == "playlist" or info.get("entries"):
-                body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
-            else:
-                body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
-        else:  # 'download' or 'meta' -> single-video metadata (common); download adds best_oi
+        if info.get("_type") == "playlist" or info.get("entries") is not None:
+            body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
+        else:
             body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
-            if action == 'download':
+            if download:
                 oi_uuid = info.get('oi_uuid')
                 success = oi_uuid is not None
                 body['best_oi'] = str(oi_uuid) if oi_uuid else None
@@ -85,23 +79,21 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
 
 
 def initiate_job(api_base: str, job: dict, worker: str) -> None:
-    """Run one claimed job and report its result — one common path for both job kinds.
+    """Run one claimed job and report its result — one common path for every job kind.
 
-    Three job kinds differ only in a few parameters: Stage-1 'pull' and Stage-2 'meta' both
-    fetch metadata only (`download=False`); Stage-2 'download' also fetches media + uploads to
-    OI (the download-only `oibucket`/`lpmlib`). `cookies` is the server's per-job suggestion
-    (§4.7). A failed run (init_download returns None) posts success=False — fail-whole, no
-    partial resume (§4.7).
+    The only knob is `download`: when False (a container/unknown pull, or a C-band video the
+    flat pull under-described) the worker fetches metadata only; when True (a video >= B) it
+    also fetches media + uploads to OI (the download-only `oibucket`/`lpmlib`). The extract is
+    always flat (`extract_flat='in_playlist'`) — a no-op on a single video, so a download still
+    gets a full extract — letting one yt-dlp call serve both playlist enumeration and per-video
+    fetch. `cookies` is the server's per-job suggestion (§4.7). A failed run (init_download
+    returns None) posts success=False — fail-whole, no partial resume (§4.7).
 
     `attrs.info_json`, when present, is a pre-extracted yt-dlp info dict the worker downloads
     straight from (like `yt-dlp --load-info-json`) instead of re-extracting `thing.url`; it
     applies to all stages.
     """
-    run_id, thing, action = job["run_id"], job["thing"], job["action"]
-    if action not in ("pull", "download", "meta"):
-        warnings.warn(f"Unknown job action {action!r}; skipping {thing.get('url')}")
-        return
-    download = action == "download"
+    run_id, thing, download = job["run_id"], job["thing"], job["download"]
     cookies = job.get("cookies", False)
     attrs = thing.get("attrs") or {}
     info = run_bknd.init_download(
@@ -109,9 +101,9 @@ def initiate_job(api_base: str, job: dict, worker: str) -> None:
         oibucket=thing["bucket"] if download else None,
         lpmlib=attrs.get("lpm_lib") if download else None,
         use_cookies=cookies,
-        flat=action == "pull",   # flatten only the playlist pull; meta/download stay full
+        flat=True,   # flat is a no-op on a single video, so a download still gets a full extract
         info_dict=attrs.get(xform.INFO_JSON_KEY))
-    post_result(api_base, run_id, info, action=action,
+    post_result(api_base, run_id, info, download=download,
                 use_cookies=cookies, worker=worker)
 
 

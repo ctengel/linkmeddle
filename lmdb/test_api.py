@@ -72,33 +72,25 @@ def test_add_thing_hints_stored_in_attrs(client):
     assert r.json()["attrs"] == {"cookies": True, "lpm_lib": "mylib"}
 
 
-@pytest.mark.parametrize("grade,value", [("A", 2.0), ("B", 1.0), ("C", 0.0)])
-def test_add_thing_rating_override(client, grade, value):
-    r = client.post("/things/", json={"url": f"http://example/pl/{grade}", "rating": grade,
+@pytest.mark.parametrize("value", [2.0, 1.0, 0.0])
+def test_add_thing_rating_override(client, value):
+    r = client.post("/things/", json={"url": f"http://example/pl/{value}", "rating": value,
                                       "bucket": "b"})
     assert r.status_code == 201
     assert r.json()["human_rating"] == value
 
 
-def test_add_thing_type_override(client):
-    r = client.post("/things/", json={"url": "http://example/v/1", "type": "video",
+def test_add_thing_container_override(client):
+    r = client.post("/things/", json={"url": "http://example/v/1", "container": False,
                                       "bucket": "b"})
     assert r.status_code == 201
-    assert r.json()["container"] is False   # 'video' hint -> leaf
-
-
-def test_add_thing_channel_tags_kind(client):
-    # 'channel' hint -> a container tagged attrs.kind='channel' (no separate type)
-    r = client.post("/things/", json={"url": "http://example/chan/1", "type": "channel",
-                                      "bucket": "b"})
-    assert r.status_code == 201
-    assert r.json()["container"] is True
-    assert r.json()["attrs"] == {"kind": "channel"}
-    assert client.get("/things/", params={"type": "channel"}).json()[0]["id"] == r.json()["id"]
+    assert r.json()["container"] is False   # leaf
+    assert r.json()["attrs"] is None        # channel-ness is discovered on the pull, not at add
 
 
 def test_add_thing_invalid_rating(client):
-    r = client.post("/things/", json={"url": "http://example/pl/x", "rating": "D",
+    # numeric ratings only; D/F (< 0) are rejected at add time (ge=0)
+    r = client.post("/things/", json={"url": "http://example/pl/x", "rating": -1.0,
                                       "bucket": "b"})
     assert r.status_code == 422
 
@@ -107,7 +99,7 @@ def test_add_thing_idempotent(client):
     # #142: duplicate URL must not create a second row
     r1 = client.post("/things/", json={"url": "http://example/dup", "bucket": "first"})
     assert r1.status_code == 201
-    r2 = client.post("/things/", json={"url": "http://example/dup", "rating": "A",
+    r2 = client.post("/things/", json={"url": "http://example/dup", "rating": 2.0,
                                        "bucket": "second"})
     assert r2.status_code == 200
     assert r2.json()["id"] == r1.json()["id"]
@@ -124,14 +116,14 @@ def test_list_things_empty(client):
 
 
 def test_list_filters(client):
-    client.post("/things/", json={"url": "http://example/p1", "type": "playlist", "bucket": "b"})
-    client.post("/things/", json={"url": "http://example/p2", "type": "playlist",
-                                  "rating": "A", "bucket": "b"})
-    client.post("/things/", json={"url": "http://example/v1", "type": "video", "bucket": "b"})
+    client.post("/things/", json={"url": "http://example/p1", "container": True, "bucket": "b"})
+    client.post("/things/", json={"url": "http://example/p2", "container": True,
+                                  "rating": 2.0, "bucket": "b"})
+    client.post("/things/", json={"url": "http://example/v1", "container": False, "bucket": "b"})
 
-    assert len(client.get("/things/", params={"type": "playlist"}).json()) == 2
-    assert len(client.get("/things/", params={"type": "video"}).json()) == 1
-    assert len(client.get("/things/", params={"rating": "A"}).json()) == 1
+    assert len(client.get("/things/", params={"container": True}).json()) == 2
+    assert len(client.get("/things/", params={"container": False}).json()) == 1
+    assert len(client.get("/things/", params={"rating": 2.0}).json()) == 1
     one = client.get("/things/", params={"url": "http://example/v1"}).json()
     assert len(one) == 1 and one[0]["container"] is False
     # everything added via POST has a human_rating, so needs_rating is empty
@@ -173,14 +165,14 @@ def test_get_thing_and_related(client):
         s.commit()
         pl_id, vid_id = str(pl.id), str(vid.id)
 
-    # plain get: related omitted by default
+    # plain get: just the thing (neighbors are a separate /related call)
     base = client.get(f"/things/{pl_id}").json()
-    assert base["related"] == []
+    assert base["id"] == pl_id and "related" not in base
 
-    # include=related from the playlist -> the video as a child
-    full = client.get(f"/things/{pl_id}", params={"include": "related"}).json()
-    assert len(full["related"]) == 1
-    edge = full["related"][0]
+    # /related from the playlist -> the video as a child
+    full = client.get(f"/things/{pl_id}/related").json()
+    assert len(full) == 1
+    edge = full[0]
     assert edge["direction"] == "child"
     assert edge["channel"] is False         # plain membership, not an uploader edge
     assert edge["thing"]["id"] == vid_id
@@ -214,9 +206,9 @@ def test_thing_runs(client):
 
 # --- patch -----------------------------------------------------------------------------
 
-def test_patch_rating_grade(client):
+def test_patch_rating_positive(client):
     tid = client.post("/things/", json={"url": "http://example/patch1", "bucket": "b"}).json()["id"]
-    r = client.patch(f"/things/{tid}", json={"grade": "A"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 2.0})
     assert r.status_code == 200
     assert r.json()["human_rating"] == 2.0
 
@@ -235,7 +227,7 @@ def test_patch_permafail_ack(client):
 
 
 def test_patch_404(client):
-    r = client.patch(f"/things/{uuid.uuid4()}", json={"grade": "A"})
+    r = client.patch(f"/things/{uuid.uuid4()}", json={"human_rating": 2.0})
     assert r.status_code == 404
 
 
@@ -244,7 +236,7 @@ def test_patch_404(client):
 def test_patch_raise_resurrects_permafail(client):
     tid = _seed_thing(type="playlist", url="http://e/raise-perma",
                       human_rating=-1.0, try_on=None)  # D, permafail-acked
-    r = client.patch(f"/things/{tid}", json={"grade": "B"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 1.0})
     assert r.status_code == 200
     assert r.json()["try_on"] == _TODAY.isoformat()
 
@@ -252,21 +244,21 @@ def test_patch_raise_resurrects_permafail(client):
 def test_patch_raise_pulls_future_forward(client):
     tid = _seed_thing(type="playlist", url="http://e/raise-future",
                       human_rating=0.0, try_on=_FUTURE)  # C, scheduled ahead
-    r = client.patch(f"/things/{tid}", json={"grade": "A"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 2.0})
     assert r.json()["try_on"] == _TODAY.isoformat()
 
 
 def test_patch_raise_skips_acquired(client):
     tid = _seed_thing(type="video", url="http://e/raise-acq", human_rating=1.0,
                       try_on=None, best_oi=uuid.uuid4())  # already acquired
-    r = client.patch(f"/things/{tid}", json={"grade": "A"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 2.0})
     assert r.json()["try_on"] is None   # best_oi guard: never disturbed
 
 
 def test_patch_downgrade_does_not_pull_forward(client):
     tid = _seed_thing(type="playlist", url="http://e/downgrade",
                       human_rating=2.0, try_on=_FUTURE)  # A, scheduled ahead
-    r = client.patch(f"/things/{tid}", json={"grade": "C"})  # still eligible, but a drop
+    r = client.patch(f"/things/{tid}", json={"human_rating": 0.0})  # still eligible, but a drop
     assert r.json()["try_on"] == _FUTURE.isoformat()
 
 
@@ -274,7 +266,7 @@ def test_patch_raise_d_to_c_no_meta_opens_meta_job(client):
     # D video with no metadata (last_success_dt NULL) → raise to C → eligible for meta job
     tid = _seed_thing(type="video", url="http://e/d-to-c-no-meta",
                       human_rating=-1.0, try_on=None)
-    r = client.patch(f"/things/{tid}", json={"grade": "C"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 0.0})
     assert r.json()["try_on"] == _TODAY.isoformat()
 
 
@@ -284,7 +276,7 @@ def test_patch_raise_d_to_c_with_meta_still_sets_try_on(client):
     tid = _seed_thing(type="video", url="http://e/d-to-c-with-meta",
                       human_rating=-1.0, try_on=None,
                       last_success_dt=models.naive_utcnow())
-    r = client.patch(f"/things/{tid}", json={"grade": "C"})
+    r = client.patch(f"/things/{tid}", json={"human_rating": 0.0})
     assert r.json()["try_on"] == _TODAY.isoformat()
 
 
@@ -338,7 +330,7 @@ def _claimed_run(client, url, bucket="plbucket", cookies=None, lpm_lib=None):
         body["lpm_lib"] = lpm_lib
     tid = client.post("/things/", json=body).json()["id"]
     job = _claim(client)
-    assert job and job["thing"]["id"] == tid and job["action"] == "pull"
+    assert job and job["thing"]["id"] == tid and job["download"] is False  # container -> pull
     return tid, job["run_id"]
 
 
@@ -360,13 +352,13 @@ def test_claim_playlist_before_video(client):
     _seed_thing(type="video", url="http://e/v", human_rating=2.0, try_on=_TODAY)     # A video
     p = _seed_thing(type="playlist", url="http://e/p", human_rating=0.0, try_on=_TODAY)  # C pl
     job = _claim(client)
-    assert job["thing"]["id"] == p and job["action"] == "pull"  # playlist wins regardless
+    assert job["thing"]["id"] == p and job["download"] is False  # playlist wins regardless
 
 
 def test_claim_video_when_no_playlist(client):
     v = _seed_thing(type="video", url="http://e/v2", human_rating=1.0, try_on=_TODAY)
     job = _claim(client)
-    assert job["thing"]["id"] == v and job["action"] == "download"
+    assert job["thing"]["id"] == v and job["download"] is True
 
 
 def test_claim_skips_ineligible_videos(client):
@@ -380,18 +372,29 @@ def test_claim_skips_ineligible_videos(client):
 
 
 def test_claim_meta_for_underdescribed_c(client):
-    # A C-band video the flat pull couldn't describe (last_success_dt NULL) -> metadata-only job.
+    # A C-band video the flat pull couldn't describe (last_success_dt NULL) -> metadata-only job
+    # (download False; the worker enriches without acquiring media).
     v = _seed_thing(type="video", url="http://e/vmeta", try_on=_TODAY)  # unrated -> C
     job = _claim(client)
-    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+    assert job and job["thing"]["id"] == v and job["download"] is False
 
 
 def test_claim_download_outranks_meta(client):
-    # A B video (download) outranks a C video (meta) in a single ordering.
+    # A B video (download) outranks a C video (metadata-only) in a single ordering.
     b = _seed_thing(type="video", url="http://e/vb", human_rating=1.0, try_on=_TODAY)
-    _seed_thing(type="video", url="http://e/vcm", try_on=_TODAY)        # C -> meta
+    _seed_thing(type="video", url="http://e/vcm", try_on=_TODAY)        # C -> metadata-only
     job = _claim(client)
-    assert job["thing"]["id"] == b and job["action"] == "download"
+    assert job["thing"]["id"] == b and job["download"] is True
+
+
+def test_claim_unknown_container_never_downloads(client):
+    # container=NULL (unknown) at a B+ rating must dispatch as a metadata-only pull, NOT a
+    # download — a flat pull first classifies it; download is only dispatched on a later claim
+    # once container is known False. Guards the `_wants_download` `is False` check (NULL is
+    # not False), so an actual playlist never arms the download archive on its first run.
+    v = _seed_thing(url="http://e/unknown-b", human_rating=2.0, try_on=_TODAY)  # container NULL
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["download"] is False
 
 
 def test_claim_skips_ineligible_playlists(client):
@@ -406,7 +409,7 @@ def test_claim_skips_ineligible_playlists(client):
 def test_claim_creates_in_progress_run(client):
     p = _seed_thing(type="playlist", url="http://e/run", human_rating=1.0, try_on=_TODAY)
     job = _claim(client, worker="w1")
-    assert job["thing"]["id"] == p and job["action"] == "pull" and job["run_id"]
+    assert job["thing"]["id"] == p and job["download"] is False and job["run_id"]
     runs = client.get(f"/things/{p}/runs").json()
     assert len(runs) == 1 and runs[0]["id"] == job["run_id"]
     assert runs[0]["success"] is None and runs[0]["worker"] == "w1"   # in-progress marker
@@ -427,14 +430,14 @@ def test_machine_rating_propagates_to_dispatch(client):
     v = _seed_thing(type="video", url="http://e/mr-v", try_on=_TODAY)   # unrated
     _seed_rel(pl, v)
     job = _claim(client)
-    assert job and job["thing"]["id"] == v and job["action"] == "download"
+    assert job and job["thing"]["id"] == v and job["download"] is True
 
 
 def test_unrated_video_no_parent_is_meta(client):
     # No rated relative -> effective C -> metadata-only, never a download.
     v = _seed_thing(type="video", url="http://e/mr-orphan", try_on=_TODAY)
     job = _claim(client)
-    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+    assert job and job["thing"]["id"] == v and job["download"] is False
 
 
 def test_video_machine_rating_max_across_parents(client):
@@ -487,7 +490,7 @@ def test_related_things_carry_computed_ratings(client):
     bpl = _seed_thing(type="playlist", url="http://e/rel-pl", human_rating=1.0)
     v = _seed_thing(type="video", url="http://e/rel-v")
     _seed_rel(bpl, v)
-    rel = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    rel = client.get(f"/things/{v}/related").json()
     assert len(rel) == 1 and rel[0]["thing"]["id"] == bpl
     assert rel[0]["thing"]["effective_rating"] == 1.0   # the parent's own human rating
 
@@ -499,11 +502,12 @@ def test_min_rating_filter_uses_effective(client):
     bv = _seed_thing(type="video", url="http://e/min-bv")               # machine B via parent
     _seed_rel(bpl, bv)
     c = _seed_thing(type="video", url="http://e/min-c", human_rating=0.0)  # C, excluded
-    ids = {t["id"] for t in client.get("/things/", params={"min_rating": "B"}).json()}
+    ids = {t["id"] for t in client.get("/things/", params={"min_rating": 1.0}).json()}
     assert a in ids and bv in ids and c not in ids
 
 
-def test_min_rating_invalid_grade(client):
+def test_min_rating_non_numeric(client):
+    # min_rating is numeric now; a non-numeric value is a FastAPI query-validation error
     assert client.get("/things/", params={"min_rating": "Z"}).status_code == 422
 
 
@@ -604,7 +608,7 @@ def test_ingest_fans_out(client):
     assert pl["title"] == "Ingest PL"
     assert pl["last_success_dt"]
 
-    related = client.get(f"/things/{tid}", params={"include": "related"}).json()["related"]
+    related = client.get(f"/things/{tid}/related").json()
     kids = [e for e in related if e["direction"] == "child"]
     parents = [e for e in related if e["direction"] == "parent"]
     assert len(kids) == 3
@@ -616,15 +620,52 @@ def test_ingest_fans_out(client):
     assert parents[0]["thing"]["attrs"]["kind"] == "channel"
 
     # video stubs carry denormalized fields and are eligible for Stage-2 (try_on=today)
-    vids = client.get("/things/", params={"type": "video"}).json()
+    vids = client.get("/things/", params={"container": False}).json()
     assert len(vids) == 3
     assert all(v["title"] for v in vids)
     assert all(v["try_on"] == models.naive_utcnow().date().isoformat() for v in vids)
 
     # 1.3a: stubs inherit the dispatched playlist's bucket (immutable)
     assert all(v["bucket"] == "plbucket" for v in vids)
-    chans = client.get("/things/", params={"type": "channel"}).json()
+    chans = client.get("/things/", params={"kind": "channel"}).json()
     assert chans and all(c["bucket"] == "plbucket" for c in chans)
+
+
+def test_ingest_empty_playlist(client):
+    # An empty playlist (0 entries) must be classified container=True so it is re-pulled.
+    url = "http://example/pl/empty"
+    tid, rid = _claimed_run(client, url)
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"playlist": _pl_payload(0, url=url, native="plempty")})
+    assert r.status_code == 200
+    run = r.json()
+    assert run["success"] is True and run["playlist_count"] == 0
+
+    pl = client.get(f"/things/{tid}").json()
+    assert pl["container"] is True
+    assert pl["last_success_dt"]
+
+    vids = client.get("/things/", params={"container": False}).json()
+    assert vids == []
+
+
+def test_ingest_single_entry_playlist(client):
+    # A 1-entry playlist must be classified container=True (not mistaken for a single video).
+    url = "http://example/pl/single"
+    tid, rid = _claimed_run(client, url)
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"playlist": _pl_payload(1, url=url, native="plsingle")})
+    assert r.status_code == 200
+    run = r.json()
+    assert run["success"] is True and run["playlist_count"] == 1
+
+    pl = client.get(f"/things/{tid}").json()
+    assert pl["container"] is True
+    assert pl["last_success_dt"]
+
+    vids = client.get("/things/", params={"container": False}).json()
+    assert len(vids) == 1
+    assert vids[0]["container"] is False
 
 
 def test_ingest_last_success_from_required_fields(client):
@@ -648,7 +689,7 @@ def test_ingest_last_success_from_required_fields(client):
         ])
     assert client.post(f"/jobs/{rid}/result",
                        json={"playlist": pl.model_dump(mode="json")}).status_code == 200
-    vids = {v["native_id"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    vids = {v["native_id"]: v for v in client.get("/things/", params={"container": False}).json()}
     assert vids["complete"]["last_success_dt"]            # all 5 fields -> metadata-complete
     assert vids["notitle"]["last_success_dt"] is None     # missing any field -> needs a meta job
 
@@ -661,7 +702,7 @@ def test_meta_result_fans_out_channel(client):
                       "video": {"native_id": "mcv", "title": "MC", "extractor_key": "youtube",
                                 "channel": {"url": "http://e/chan9", "title": "Chan 9"},
                                 "info_json": {"id": "mcv"}}})
-    related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    related = client.get(f"/things/{v}/related").json()
     chan = [e for e in related if e["channel"]]
     assert len(chan) == 1 and chan[0]["thing"]["container"] is True
     assert chan[0]["thing"]["attrs"]["kind"] == "channel"
@@ -675,11 +716,12 @@ def test_ingest_propagates_hints(client):
     tid, rid = _claimed_run(client, url, cookies=True, lpm_lib="lib7")
     payload = _pl_payload(2, url=url, native="plhint")
     assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
-    vids = client.get("/things/", params={"type": "video"}).json()
+    vids = client.get("/things/", params={"container": False}).json()
     assert vids and all(v["attrs"] == {"cookies": True, "lpm_lib": "lib7"} for v in vids)
-    chans = client.get("/things/", params={"type": "channel"}).json()
-    # channels carry only the kind hint (no propagated cookies/lpm_lib)
-    assert chans and all(c["attrs"] == {"kind": "channel"} for c in chans)
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    # channels carry kind + optional channel_id hint but NOT propagated cookies/lpm_lib
+    assert chans and all(c["attrs"].get("kind") == "channel" for c in chans)
+    assert all("cookies" not in c["attrs"] and "lpm_lib" not in c["attrs"] for c in chans)
 
 
 def test_ingest_stores_info_json_hint(client):
@@ -688,13 +730,13 @@ def test_ingest_stores_info_json_hint(client):
     tid, rid = _claimed_run(client, url)
     payload = _pl_payload(2, url=url, native="plij", info_json=True)
     assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
-    vids = client.get("/things/", params={"type": "video"}).json()
+    vids = client.get("/things/", params={"container": False}).json()
     assert vids
     for v in vids:
         info = v["attrs"]["info_json"]
         assert info["id"] == v["native_id"]
         assert "formats" in info
-    chans = client.get("/things/", params={"type": "channel"}).json()
+    chans = client.get("/things/", params={"kind": "channel"}).json()
     assert chans and all(not (c["attrs"] or {}).get("info_json") for c in chans)
 
 
@@ -705,7 +747,7 @@ def test_ingest_refreshes_info_json_until_acquired(client):
     assert client.post(f"/jobs/{rid}/result",
                        json={"playlist": _pl_payload(2, url=url, native="plijr",
                                                      info_json=True)}).status_code == 200
-    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    by_url = {v["url"]: v for v in client.get("/things/", params={"container": False}).json()}
     # mark vid0 acquired (best_oi set), leave vid1 pending
     with _session() as s:
         acquired = s.get(models.Thing, uuid.UUID(by_url["http://example/v/0"]["id"]))
@@ -720,7 +762,7 @@ def test_ingest_refreshes_info_json_until_acquired(client):
         entry["info_json"]["refreshed"] = True
     assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload2}).status_code == 200
 
-    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    by_url = {v["url"]: v for v in client.get("/things/", params={"container": False}).json()}
     assert by_url["http://example/v/1"]["attrs"]["info_json"].get("refreshed") is True   # updated
     assert "refreshed" not in by_url["http://example/v/0"]["attrs"]["info_json"]          # frozen
 
@@ -734,16 +776,16 @@ def test_ingest_per_video_uploader_channels(client):
     assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
 
     # 1 playlist uploader (up1) + 3 distinct video uploaders (vup0..2)
-    chans = client.get("/things/", params={"type": "channel"}).json()
+    chans = client.get("/things/", params={"kind": "channel"}).json()
     assert len(chans) == 4
 
     # the playlist's only parent edge is its uploader (channel=True)
-    pl_parents = [e for e in client.get(f"/things/{tid}", params={"include": "related"})
-                  .json()["related"] if e["direction"] == "parent"]
+    pl_parents = [e for e in client.get(f"/things/{tid}/related").json()
+                  if e["direction"] == "parent"]
     assert len(pl_parents) == 1 and pl_parents[0]["channel"] is True
 
     # every video has exactly one uploader (channel=True) parent + its membership (False) parent
-    for vid in client.get("/things/", params={"type": "video"}).json():
+    for vid in client.get("/things/", params={"container": False}).json():
         parents = client.get(f"/things/{vid['id']}/related",
                              params={"direction": "parent"}).json()
         assert sorted(e["channel"] for e in parents) == [False, True]
@@ -758,7 +800,7 @@ def test_ingest_shared_uploader_one_channel(client):
     tid, rid = _claimed_run(client, url)
     payload = _pl_payload(3, url=url, native="plshared")  # all share up1 = pl channel
     assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
-    chans = client.get("/things/", params={"type": "channel"}).json()
+    chans = client.get("/things/", params={"kind": "channel"}).json()
     assert len(chans) == 1
     children = client.get(f"/things/{chans[0]['id']}/related",
                           params={"direction": "child"}).json()
@@ -780,13 +822,13 @@ def test_channel_pull_videos_and_subplaylists(client):
     assert chan["container"] is True
     assert chan["attrs"]["kind"] == "channel"               # acts as a channel -> tagged
 
-    related = client.get(f"/things/{tid}", params={"include": "related"}).json()["related"]
+    related = client.get(f"/things/{tid}/related").json()
     kids = [e for e in related if e["direction"] == "child"]
     assert len(kids) == 4 and all(e["channel"] is True for e in kids)   # uploader/owner edges
     assert not any(e["direction"] == "parent" for e in related)         # no self channel edge
 
     # each direct video has exactly one parent edge, channel=True (no channel=False membership)
-    for v in client.get("/things/", params={"type": "video"}).json():
+    for v in client.get("/things/", params={"container": False}).json():
         parents = client.get(f"/things/{v['id']}/related", params={"direction": "parent"}).json()
         assert len(parents) == 1 and parents[0]["channel"] is True
 
@@ -794,7 +836,7 @@ def test_channel_pull_videos_and_subplaylists(client):
     subs = [e["thing"] for e in kids if e["thing"]["container"] is True]
     assert len(subs) == 2 and all(s["try_on"] for s in subs)
     job = _claim(client)
-    assert job["action"] == "pull" and job["thing"]["id"] in {s["id"] for s in subs}
+    assert job["download"] is False and job["thing"]["id"] in {s["id"] for s in subs}
 
 
 def test_unknown_url_discovered_as_video(client):
@@ -832,24 +874,24 @@ def test_ingest_idempotent(client):
     # second pull the same day: claim would skip it, so seed the run directly
     rid2 = _seed_run(tid)
     assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload}).status_code == 200
-    assert len(client.get("/things/", params={"type": "video"}).json()) == 3   # no dup things
-    assert len(client.get("/things/", params={"type": "channel"}).json()) == 1
+    assert len(client.get("/things/", params={"container": False}).json()) == 3   # no dup things
+    assert len(client.get("/things/", params={"kind": "channel"}).json()) == 1
     assert len(client.get(f"/things/{tid}/runs").json()) == 2                   # but two runs
-    kids = [e for e in client.get(f"/things/{tid}", params={"include": "related"}).json()
-            ["related"] if e["direction"] == "child"]
+    kids = [e for e in client.get(f"/things/{tid}/related").json()
+            if e["direction"] == "child"]
     assert len(kids) == 3                                                       # no dup rels
 
 
 def test_ingest_preserves_existing_bucket(client):
     # 1.3a: a thing added directly keeps its own bucket even when a later playlist pull
     # (carrying a different inherited bucket) re-discovers it — bucket is immutable.
-    client.post("/things/", json={"url": "http://example/v/0", "type": "video",
+    client.post("/things/", json={"url": "http://example/v/0", "container": False,
                                   "bucket": "vidbucket"})
     url = "http://example/pl/preserve"
     tid, rid = _claimed_run(client, url, bucket="plbucket")
     payload = _pl_payload(3, url=url, native="plpreserve")  # entries include .../v/0..2
     assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
-    by_url = {v["url"]: v for v in client.get("/things/", params={"type": "video"}).json()}
+    by_url = {v["url"]: v for v in client.get("/things/", params={"container": False}).json()}
     assert by_url["http://example/v/0"]["bucket"] == "vidbucket"   # kept, not overwritten
     assert by_url["http://example/v/1"]["bucket"] == "plbucket"    # newly inherited
 
@@ -860,13 +902,42 @@ def test_ingest_failure_records_only(client):
     assert r.status_code == 200 and r.json()["success"] is False
     pl = client.get(f"/things/{tid}").json()
     assert pl["last_failure_dt"] and pl["last_success_dt"] is None
-    assert client.get("/things/", params={"type": "video"}).json() == []       # no fan-out
+    assert client.get("/things/", params={"container": False}).json() == []       # no fan-out
 
 
 def test_ingest_success_requires_playlist(client):
     _, rid = _claimed_run(client, "http://example/pl/req")
     r = client.post(f"/jobs/{rid}/result", json={"success": True})
     assert r.status_code == 422
+
+
+def test_container_gets_video_body_is_failure(client):
+    # Seed with container=True already set so the guard fires (URL-only stubs are container=None)
+    tid = _seed_thing(type="playlist", url="http://example/pl/mismatch1", try_on=_TODAY)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == tid
+    rid = job["run_id"]
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True, "video": {"native_id": "vid1", "extractor_key": "youtube"}})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{tid}").json()
+    assert t["container"] is True           # not reclassified
+    assert t["last_failure_dt"] is not None
+    assert t["last_success_dt"] is None
+    assert t["try_on"] is not None          # backoff applied
+
+
+def test_video_gets_playlist_body_is_failure(client):
+    vid, rid = _claimed_download(client, url="http://e/mismatch2")
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "playlist": _pl_payload(url="http://e/mismatch2", native="mmpl")})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{vid}").json()
+    assert t["container"] is False          # not reclassified
+    assert t["last_failure_dt"] is not None
+    assert t["best_oi"] is None
+    assert t["try_on"] is not None          # backoff applied
 
 
 def test_ingest_run_404(client):
@@ -894,7 +965,7 @@ def _claimed_download(client, **kw):
     kw.setdefault("try_on", _TODAY)
     v = _seed_thing(type="video", **kw)
     job = _claim(client)
-    assert job and job["thing"]["id"] == v and job["action"] == "download"
+    assert job and job["thing"]["id"] == v and job["download"] is True
     return v, job["run_id"]
 
 
@@ -903,7 +974,7 @@ def test_download_result_sets_best_oi(client):
     v, rid = _claimed_download(client, url="http://e/dl")  # no extractor/native yet
     r = client.post(f"/jobs/{rid}/result",
                     json={"success": True, "best_oi": oi,
-                          "extractor_key": "youtube", "native_id": "vid42",
+                          "video": {"native_id": "vid42", "extractor_key": "youtube"},
                           "input_json": {"cookies": False}})
     assert r.status_code == 200
     assert r.json()["input_json"] == {"cookies": False}     # per-run decision recorded
@@ -920,7 +991,7 @@ def test_download_result_backfill_no_overwrite(client):
                                extractor_key="vimeo", native_id="orig")
     client.post(f"/jobs/{rid}/result",
                 json={"success": True, "best_oi": str(uuid.uuid4()),
-                      "extractor_key": "youtube", "native_id": "new"})
+                      "video": {"native_id": "new", "extractor_key": "youtube"}})
     t = client.get(f"/things/{v}").json()
     assert t["extractor_key"] == "vimeo" and t["native_id"] == "orig"
 
@@ -948,17 +1019,18 @@ def test_download_result_enriches_and_fans_out_channel(client):
     t = client.get(f"/things/{v}").json()
     assert t["best_oi"] == oi and t["try_on"] is None and t["last_success_dt"]
     assert t["title"] == "Downloaded" and t["thumbnail_url"] == "http://e/dv1.jpg"  # display captured
-    related = client.get(f"/things/{v}", params={"include": "related"}).json()["related"]
+    related = client.get(f"/things/{v}/related").json()
     chan = [e for e in related if e["channel"]]
     assert len(chan) == 1 and chan[0]["thing"]["url"] == "http://e/dchan"           # channel fanned out
 
 
 def _claimed_meta(client, **kw):
-    """Seed a C-band, under-described due video (last_success_dt NULL), claim it -> meta."""
+    """Seed a C-band, under-described due video (last_success_dt NULL), claim it -> metadata-only
+    (download False)."""
     kw.setdefault("try_on", _TODAY)   # unrated -> C
     v = _seed_thing(type="video", **kw)
     job = _claim(client)
-    assert job and job["thing"]["id"] == v and job["action"] == "meta"
+    assert job and job["thing"]["id"] == v and job["download"] is False
     return v, job["run_id"]
 
 
