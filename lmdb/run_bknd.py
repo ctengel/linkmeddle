@@ -26,12 +26,12 @@ def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
     return None
 
 def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
-         extract_flat: bool = False) -> YoutubeDL:
+         extract_flat: bool = False, noplaylist: bool = False) -> YoutubeDL:
     # TODO user, password
     # TODO simulate, skip_download
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
-    # TODO "format": "best", "noplaylist": True, "quiet": False, "no_warnings": True,
+    # TODO "format": "best", "quiet": False, "no_warnings": True,
     opts = {'writeinfojson': True,
             'download_archive': download_archive,
             #'writethumbnail': True,
@@ -43,6 +43,9 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
     if extract_flat:
         # Flat playlist pull: list entries (ids/urls/titles) without a per-video page fetch.
         opts['extract_flat'] = 'in_playlist'
+    if noplaylist:
+        # Single-leaf fetch: resolve a `watch?v=X&list=Y` URL to just X, never the list (#164).
+        opts['noplaylist'] = True
     if cookies is not None:
         opts['cookiefile'] = cookies
     return YoutubeDL(opts)
@@ -132,6 +135,14 @@ def is_container(info: dict) -> bool:
     return info.get("_type") == "playlist" or info.get("entries") is not None
 
 
+def is_both(info: dict) -> bool:
+    """A result that is simultaneously a container (has entries) AND a standalone playable
+    video (top-level media). yt-dlp normally returns one or the other; this ambiguous shape we
+    can't classify, so the worker reports it as a failure for a human to inspect (#164)."""
+    return is_container(info) and bool(
+        info.get("oi_uuid") or info.get("requested_downloads") or info.get("formats"))
+
+
 # yt-dlp `ie_key` fragments that mark a flat url-result as a *container* extractor (a channel
 # tab / sub-playlist) rather than a single video — e.g. `YoutubeTab`, `YoutubePlaylist`,
 # `BilibiliChannel`. Heuristic and easily extended; an unmatched url-result is assumed to be a
@@ -199,7 +210,9 @@ def init_download(url: str, *,
 
     download=False -> Stage-1 metadata-only pull (no OI required); download=True -> Stage-2
     real download with OI upload (the `ObjIdxUploadPP` sets info['oi_uuid'], which the caller
-    reads back as `best_oi` — no separate OI lookup). flat -> flatten a playlist pull
+    reads back as `best_oi` — no separate OI lookup); a download also sets `noplaylist` so a
+    `watch?v=X&list=Y` URL resolves to the single leaf X and never the ambiguous video+playlist
+    "both" shape (#164). flat -> flatten a playlist pull
     (`extract_flat`, minimal site calls); set only for a playlist `pull`, never for a
     single-video `meta`/`download` (those need a full extract). Returns the sanitized info
     dict on success, or None on a caught YoutubeDLError (callers treat None as a failed run).
@@ -241,7 +254,12 @@ def init_download(url: str, *,
         assert os.getenv("OBJIDX_AUTH"), "OBJIDX_AUTH must be set to download"
         download_archive = ytdl_arch_oi.ObjIdxDlArch(objidx=oic.get_obj_idx_env())
 
-    with _ydl(download_archive=download_archive, cookies=cookies, extract_flat=flat) as ydl:
+    # A Stage-2 acquire (download=True) is always a single leaf, so set noplaylist: a
+    # `watch?v=X&list=Y` URL resolves to just X (best_oi stored correctly), and the ambiguous
+    # video+playlist "both" shape never arises for downloads (#164). Pulls/meta keep it off so
+    # container enumeration still works; noplaylist makes the flat-on-download case moot.
+    with _ydl(download_archive=download_archive, cookies=cookies, extract_flat=flat,
+              noplaylist=download) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if download and oibucket:

@@ -238,6 +238,30 @@ def test_ydl_extract_flat_opt():
     assert not run_bknd._ydl().params.get("extract_flat")
 
 
+def test_ydl_noplaylist_opt():
+    # #164: a download fetch sets noplaylist so a list URL resolves to its single leaf.
+    assert run_bknd._ydl(noplaylist=True).params.get("noplaylist") is True
+    assert not run_bknd._ydl().params.get("noplaylist")
+
+
+def test_init_download_threads_noplaylist_on_download(monkeypatch):
+    # #164: only a Stage-2 acquire (download=True) sets noplaylist; pulls/meta leave it off so
+    # container enumeration still works.
+    captured = {}
+    monkeypatch.setattr(run_bknd, "_ydl",
+                        lambda **kw: captured.update(kw) or _FakeYDL())
+    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
+    monkeypatch.setenv("OBJIDX_URL", "http://oi/")
+    monkeypatch.setenv("OBJIDX_AUTH", "user")
+    monkeypatch.setattr(run_bknd.ytdl_arch_oi, "ObjIdxDlArch", lambda **kw: None)
+    monkeypatch.setattr(run_bknd.oic, "get_obj_idx_env", lambda: None)
+    run_bknd.init_download("https://x/v", download=True)  # no oibucket -> skips upload PP
+    assert captured["noplaylist"] is True
+    captured.clear()
+    run_bknd.init_download("https://x/pl", download=False, flat=True)
+    assert captured["noplaylist"] is False
+
+
 def test_extract_pull_handles_flat_entries():
     # extract_flat='in_playlist' entries carry `url`/`ie_key` (not webpage_url/extractor).
     flat_pl = {"webpage_url": "https://x/pl", "id": "pl", "extractor_key": "YouTube",
@@ -310,6 +334,34 @@ def test_post_result_container_sends_playlist(monkeypatch):
     job_runner.post_result("http://api/", "r", info, download=False)
     body = captured["body"]
     assert "playlist" in body and "video" not in body
+
+
+def test_is_both_detects_video_plus_entries():
+    # #164: entries coexisting with top-level media (formats / oi_uuid / requested_downloads)
+    # is the ambiguous "both" shape; entries-only or media-only is not.
+    assert run_bknd.is_both({"entries": [{"id": "v"}], "formats": [{"url": "u"}]}) is True
+    assert run_bknd.is_both({"_type": "playlist", "entries": [],
+                             "oi_uuid": "11111111-1111-1111-1111-111111111111"}) is True
+    assert run_bknd.is_both({"entries": [{"id": "v"}], "requested_downloads": [{}]}) is True
+    assert run_bknd.is_both({"_type": "playlist", "entries": [{"id": "v"}]}) is False  # no media
+    assert run_bknd.is_both({"id": "v", "formats": [{"url": "u"}]}) is False            # no entries
+
+
+def test_post_result_both_shape_is_failure(monkeypatch):
+    # #164: a result that is both a video and a playlist can't be classified -> report a failure
+    # (no body) while keeping data_json for inspection, rather than silently sending a playlist.
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "vid", "webpage_url": "https://e/v", "extractor": "YouTube", "title": "T",
+            "entries": [{"_type": "url", "id": "v1", "url": "https://e/v/1"}],
+            "oi_uuid": "11111111-1111-1111-1111-111111111111"}
+    job_runner.post_result("http://api/", "r", info, download=True)
+    body = captured["body"]
+    assert body["success"] is False
+    assert "playlist" not in body and "video" not in body and "best_oi" not in body
+    assert body["data_json"] == info
 
 
 def test_post_result_empty_playlist_no_type_sends_playlist(monkeypatch):

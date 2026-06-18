@@ -522,6 +522,23 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         return _finish(session, run)
         # TODO still try to get metadata from a failed download?
 
+    # Both-shape guard (#164): a successful result must be exactly one shape — a Stage-1 playlist
+    # pull XOR a Stage-2 video. The worker never sends both (it reports the ambiguous video+
+    # playlist shape as a failure), but a different client could POST both, and the video branch
+    # below would silently win and drop the playlist. Record a failure (+ backoff) and reset the
+    # classification to NULL (contradictory evidence -> unsure what this is; a later pull
+    # reclassifies it). Keep best_oi if present (media was already uploaded — preserve the ref to
+    # investigate), but do NOT mark acquired or fan out any rels.
+    if item.playlist is not None and item.video is not None:
+        if pl_thing is not None:
+            pl_thing.container = None
+            if item.best_oi is not None:
+                pl_thing.best_oi = item.best_oi
+            pl_thing.last_failure_dt = now
+            _set_try_on(session, pl_thing)
+        run.success = False
+        return _finish(session, run)
+
     # Mismatch guard: a classified thing must not change type.
     # video body on a known container, or playlist body on a known leaf → treat as failure.
     if pl_thing is not None and pl_thing.container is not None:

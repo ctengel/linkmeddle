@@ -953,6 +953,27 @@ def test_video_gets_playlist_body_is_failure(client):
     assert t["try_on"] is not None          # backoff applied
 
 
+def test_both_bodies_is_failure(client):
+    # #164: a body carrying both a video and a playlist is contradictory — record a failure,
+    # reset the classification to NULL (now unsure what it is), keep best_oi (media was already
+    # uploaded) for a human to investigate, and record no relationships / member stubs.
+    oi = str(uuid.uuid4())
+    vid, rid = _claimed_download(client, url="http://e/both")   # seeded container=False
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True, "best_oi": oi,
+                          "video": {"native_id": "bvid", "extractor_key": "youtube"},
+                          "playlist": _pl_payload(url="http://e/both", native="bpl")})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{vid}").json()
+    assert t["container"] is None           # reset: contradictory evidence
+    assert t["best_oi"] == oi               # kept for investigation
+    assert t["last_failure_dt"] is not None
+    assert t["try_on"] is not None          # backoff applied (not marked acquired)
+    # no relationships fanned out and no member stubs created
+    assert client.get(f"/things/{vid}/related").json() == []
+    assert client.get("/things/", params={"container": False}).json() == []
+
+
 def test_ingest_run_404(client):
     r = client.post(f"/jobs/{uuid.uuid4()}/result", json={"success": False})
     assert r.status_code == 404

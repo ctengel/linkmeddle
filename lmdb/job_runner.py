@@ -43,6 +43,9 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     `info` is the sanitized yt-dlp output, or None when extraction failed. The body shape is
     derived from `info` itself — the server keys off which field is set (`playlist` vs `video`):
 
+    - An ambiguous "both" result (entries AND top-level media, `run_bknd.is_both`) can't be
+      classified, so it is reported as a failure (success=False, no body) for a human to inspect
+      while `data_json` preserves the raw shape (#164).
     - A container result (yt-dlp `_type == 'playlist'` or any `entries`) is extracted into the
       thin PlaylistFull (the Stage-1 fan-out body). Non-None info = success.
     - Otherwise the result is a single video, extracted into a thin VidFull (`video`) so the
@@ -63,7 +66,11 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     success = info is not None
     if info is not None:
         body['data_json'] = info
-        if run_bknd.is_container(info):
+        if run_bknd.is_both(info):
+            # Ambiguous video+playlist shape we can't classify: fail (data_json kept) for a
+            # human to inspect, rather than silently mis-routing it as a playlist (#164).
+            success = False
+        elif run_bknd.is_container(info):
             body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
         else:
             body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
