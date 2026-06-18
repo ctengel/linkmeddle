@@ -549,8 +549,8 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             # clears thing hints since we don't need it anymore
             xform.merge_attr(pl_thing, xform.INFO_JSON_KEY, None)
         else:                                 # meta: metadata only, still pending acquisition
-            if xform.enough_to_rate(pl_thing):   # all five identity fields present
-                pl_thing.last_success_dt = now   # else stays NULL → re-dispatch on backoff
+            pl_thing.last_success_dt = now       # full extract is terminal → complete (§4.2),
+                                                 # even if still bare: never re-loop a meta job
             xform.refresh_info_hint(pl_thing, item.video.info_json)  # keep Stage-2 hint fresh
             _set_try_on(session, pl_thing)       # backoff (§4.4)
         return _finish(session, run)

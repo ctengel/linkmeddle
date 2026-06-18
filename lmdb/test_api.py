@@ -1068,9 +1068,11 @@ def test_meta_result_enriches_without_acquiring(client):
     # last_success_dt being set is sufficient to prove meta_branch won't re-dispatch this video.
 
 
-def test_meta_result_incomplete_stays_unrated(client):
-    # A meta result still missing required fields (here: no channel) must NOT mark the video
-    # as metadata-complete — it stays NULL so the dispatcher can re-dispatch it on backoff.
+def test_meta_result_incomplete_is_still_terminal(client):
+    # A meta result still missing identity fields (here: no channel) is nonetheless TERMINAL:
+    # the full single-video extract can't be improved by re-running it, so last_success_dt is
+    # set unconditionally (§4.2) — otherwise a still-bare video would re-match meta_branch
+    # (last_success_dt IS NULL) and loop forever (#163).
     v, rid = _claimed_meta(client, url="http://e/mincomplete")
     r = client.post(f"/jobs/{rid}/result",
                     json={"success": True,
@@ -1079,8 +1081,9 @@ def test_meta_result_incomplete_stays_unrated(client):
                                     "info_json": {"id": "mi1"}}})
     assert r.status_code == 200
     t = client.get(f"/things/{v}").json()
-    assert t["last_success_dt"] is None    # still not enough to rate
-    assert t["try_on"] is not None         # Fibonacci backoff applied; will retry later
+    assert t["last_success_dt"]             # terminal: set even though channel is missing
+    assert t["best_oi"] is None            # metadata only, NOT acquired
+    assert t["try_on"] is not None         # Fibonacci backoff applied; no longer a meta job
 
 
 def test_meta_result_failure_backs_off(client):
