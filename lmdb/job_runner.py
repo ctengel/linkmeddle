@@ -113,6 +113,8 @@ def initiate_job(api_base: str, job: dict, worker: str) -> None:
         thing["url"], download=download,
         oibucket=thing["bucket"] if download else None,
         lpmlib=attrs.get("lpm_lib") if download else None,
+        run_id=str(run_id) if download else None,
+        thing_id=str(thing["id"]) if download else None,
         use_cookies=cookies,
         flat=True,   # flat is a no-op on a single video, so a download still gets a full extract
         info_dict=attrs.get(xform.INFO_JSON_KEY))

@@ -190,6 +190,8 @@ def init_download(url: str, *,
                   download: bool = True,
                   oibucket: str | None = None,
                   lpmlib: str | None = None,
+                  run_id: str | None = None,
+                  thing_id: str | None = None,
                   use_cookies: bool = False,
                   flat: bool = False,
                   info_dict: dict | None = None) -> Optional[dict]:
@@ -206,6 +208,8 @@ def init_download(url: str, *,
     URL: the URL to download
     oibucket: if provided (download only), enables ObjIdx upload postprocessor with this bucket
     lpmlib: if provided, provided to OI
+    run_id: if provided (download only), written as `lm-run-id` tag in OI object metadata
+    thing_id: if provided (download only), written as `lm-thing-id` tag in OI object metadata
     use_cookies: if True, fetch cookies from Crustula and pass to yt-dlp
     info_dict: if provided, download straight from this pre-extracted yt-dlp info dict
         (like `yt-dlp --load-info-json`) instead of re-extracting `url`. See the
@@ -241,7 +245,14 @@ def init_download(url: str, *,
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if download and oibucket:
-                ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib))
+                oitags_parts = []
+                if run_id:
+                    oitags_parts.append(f"lm-run-id={run_id}")
+                if thing_id:
+                    oitags_parts.append(f"lm-thing-id={thing_id}")
+                oitags = ",".join(oitags_parts) or None
+                ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib,
+                                                      oitags=oitags))
             if info_dict is not None:
                 # Download straight from a supplied info dict, like
                 # `yt-dlp --load-info-json`. This is what download_with_info_file() wraps,

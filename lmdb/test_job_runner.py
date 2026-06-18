@@ -30,7 +30,7 @@ def test_initiate_job_forwards_info_json_both_stages(monkeypatch, download):
     calls = _capture_init_download(monkeypatch)
     payload = {"id": "abc", "webpage_url": "https://example.com/v/abc"}
     job = {"run_id": "r1", "download": download,
-           "thing": {"url": "https://example.com/v/abc", "bucket": "b",
+           "thing": {"id": "t1", "url": "https://example.com/v/abc", "bucket": "b",
                      "attrs": {"info_json": payload}}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["info_dict"] == payload
@@ -41,7 +41,7 @@ def test_initiate_job_metadata_only_when_not_download(monkeypatch):
     # media download / OI bucket.
     calls = _capture_init_download(monkeypatch)
     job = {"run_id": "r1", "download": False,
-           "thing": {"url": "https://example.com/v/c", "bucket": "b", "attrs": None}}
+           "thing": {"id": "t1", "url": "https://example.com/v/c", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["download"] is False and calls["oibucket"] is None
 
@@ -52,7 +52,7 @@ def test_initiate_job_always_flat(monkeypatch, download):
     # download still gets a full extract while a container pull is enumerated cheaply.
     calls = _capture_init_download(monkeypatch)
     job = {"run_id": "r1", "download": download,
-           "thing": {"url": "https://example.com/x", "bucket": "b", "attrs": None}}
+           "thing": {"id": "t1", "url": "https://example.com/x", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["flat"] is True
 
@@ -116,10 +116,33 @@ def test_norm_extractor_matches_download_archive_convention():
     assert run_bknd._norm_extractor({}) is None
 
 
+def test_initiate_job_forwards_ids_on_download(monkeypatch):
+    # On a download job, run_id and thing_id are forwarded so the OI object gets lm-* tags.
+    calls = _capture_init_download(monkeypatch)
+    import uuid
+    rid = uuid.uuid4()
+    tid = uuid.uuid4()
+    job = {"run_id": rid, "download": True,
+           "thing": {"id": tid, "url": "https://example.com/v/x", "bucket": "b", "attrs": None}}
+    job_runner.initiate_job("http://api/", job, "w")
+    assert calls["run_id"] == str(rid)
+    assert calls["thing_id"] == str(tid)
+
+
+def test_initiate_job_no_ids_on_non_download(monkeypatch):
+    # Non-download jobs don't produce an OI object, so no IDs are forwarded.
+    calls = _capture_init_download(monkeypatch)
+    job = {"run_id": "r1", "download": False,
+           "thing": {"id": "t1", "url": "https://example.com/v/x", "bucket": "b", "attrs": None}}
+    job_runner.initiate_job("http://api/", job, "w")
+    assert calls.get("run_id") is None
+    assert calls.get("thing_id") is None
+
+
 def test_initiate_job_info_json_absent_is_none(monkeypatch):
     calls = _capture_init_download(monkeypatch)
     job = {"run_id": "r1", "download": True,
-           "thing": {"url": "https://example.com/v/abc", "bucket": "b", "attrs": None}}
+           "thing": {"id": "t1", "url": "https://example.com/v/abc", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["info_dict"] is None
 
@@ -176,7 +199,7 @@ def test_main_reports_failure_on_raising_job(monkeypatch):
     # A job that raises while running must be reported as a failure (info=None -> success=False)
     # so the run is finalized and the thing backs off; otherwise it is re-claimed forever.
     jobs = iter([{"run_id": "rX", "download": False, "cookies": False,
-                  "thing": {"url": "u", "bucket": "b", "attrs": None}}])
+                  "thing": {"id": "tX", "url": "u", "bucket": "b", "attrs": None}}])
     monkeypatch.setattr(job_runner, "claim_job", lambda *a, **k: next(jobs, None))
 
     def boom(*a, **k):
