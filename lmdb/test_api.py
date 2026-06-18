@@ -1056,6 +1056,7 @@ def test_meta_result_enriches_without_acquiring(client):
                                     "channel": {"url": "http://e/chan/m1"},
                                     "info_json": {"id": "mv1", "description": "d"}}})
     assert r.status_code == 200
+    assert r.json()["entries_hash"]                      # leaf empty-membership hash -> backs off
     t = client.get(f"/things/{v}").json()
     assert t["title"] == "Fetched Title"                 # NULL display backfilled from the fetch
     assert t["extractor_key"] == "youtube" and t["native_id"] == "mv1"

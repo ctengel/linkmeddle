@@ -25,11 +25,6 @@ def next_fib(existing: int | float | None, up: bool) -> int:
             return i
     return FIB[0]
 
-def adjust(existing: list[int], up: bool) -> int:
-    """Change interval up or down (reused by the Task 1.4 try_on backoff)"""
-    med = statistics.median(existing)
-    return next_fib(med, up)
-
 def entry2text(entry: models.VidFull) -> str:
     """Change a pl entry into single unique string"""
     return entry.native_id
@@ -340,11 +335,12 @@ def _run_stats(runs: list[models.Run]) -> list[_RunStat]:
 
 
 def _current_interval(stats: list[_RunStat]) -> Optional[int]:
-    """Day-gap between the last two successful runs (the §4.4 'current interval'); None if <2."""
+    """Median day-gap across up to the 3 most recent successful run pairs; None if <2."""
     succ = [s.date for s in stats if s.success]
     if len(succ) < 2:
         return None
-    return (succ[-1] - succ[-2]).days
+    gaps = [(succ[i] - succ[i-1]).days for i in range(1, len(succ))]
+    return round(statistics.median(gaps[-3:]))
 
 
 def _rec_adjust(window: list[_RunStat]) -> Optional[bool]:
@@ -382,7 +378,9 @@ def next_try_on(rating: float, runs: list[models.Run],
     if not last.success:                       # failure backoff (§2.5/§4.7)
         if len(window) >= 2 and window[-2].success:
             return last.date + datetime.timedelta(days=1)   # first failure -> retry tomorrow
-        step = _current_interval(stats) or initial_interval(rating)
+        step = _current_interval(stats)
+        if step is None:
+            step = initial_interval(rating)
         return last.date + datetime.timedelta(days=next_fib(step, True))
 
     successful = [s for s in stats if s.success]
@@ -390,6 +388,8 @@ def next_try_on(rating: float, runs: list[models.Run],
         interval = initial_interval(rating)
     else:
         interval = _current_interval(stats)
+        if interval is None:
+            interval = initial_interval(rating)
         rec = _rec_adjust(window)
         if rec is not None:
             interval = next_fib(interval, rec)

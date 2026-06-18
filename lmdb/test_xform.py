@@ -116,6 +116,16 @@ def test_next_try_on_speeds_up_when_changing():
     assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=3)
 
 
+def test_next_try_on_leaf_meta_loop_backs_off():
+    # A leaf video's runs carry the empty-membership hash (api sets pl_hash([])); since it
+    # never changes, a repeated-meta loop reads different=False -> back off (5 -> 8), not the
+    # pre-fix accelerate-to-1-day caused by null hashes reading as always-different.
+    leaf = xform.pl_hash([])
+    runs = [_run_on(d, True, leaf) for d in (1, 6, 11, 16)]
+    today = datetime.date(2026, 1, 16)
+    assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+
+
 def test_next_try_on_failure_after_success_tomorrow():
     runs = [_run_on(1, True, b"h"), _run_on(6, False)]
     assert xform.next_try_on(1.0, runs, datetime.date(2026, 1, 6)) == datetime.date(2026, 1, 7)

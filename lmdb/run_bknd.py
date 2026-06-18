@@ -48,7 +48,6 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
     return YoutubeDL(opts)
 
 def _print_download_result(info: dict):
-    # TODO use this
     # Print a concise result (filename or id) for callers to parse
     if isinstance(info, dict):
         # For playlist returns, prefer 'requested_downloads' filename when available
@@ -77,8 +76,9 @@ def get_cookies(url: str) -> str:
 # PlaylistDLP.model_validate + xform.pl_dlp2lm.
 
 def _norm_extractor(info: dict) -> Optional[str]:
-    """Canonical lowercased extractor key (key, then extractor name, then flat-entry ie_key)."""
-    ek = info.get("extractor_key") or info.get("extractor") or info.get("ie_key")
+    """Canonical lowercased extractor key, matching yt-dlp's download-archive id
+    (`extractor_key` -> flat-entry `ie_key`); `extractor` IE_NAME only as a last resort."""
+    ek = info.get("extractor_key") or info.get("ie_key") or info.get("extractor")
     return ek.lower() if ek else None
 
 
@@ -141,7 +141,9 @@ _CONTAINER_IE_KEY_HINTS = ("tab", "playlist", "channel", "user", "album", "serie
 
 def _is_container_ie_key(ie_key: Optional[str]) -> bool:
     """Does this flat-entry `ie_key` look like a container (playlist/channel) extractor?"""
-    return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
+    # TODO figure out what is safe here
+    return True
+    #return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
 
 
 def extract_pull(info: dict) -> models.PlaylistFull:

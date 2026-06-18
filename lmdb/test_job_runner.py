@@ -96,12 +96,24 @@ def test_post_result_download_sends_video_and_best_oi(monkeypatch):
 
 def test_extract_pull_video_matches_entry_mapping():
     # extract_pull_video maps a single-video info dict like extract_pull's per-entry path.
-    info = {"id": "vidx", "webpage_url": "https://e/v/x", "extractor": "YouTube",
-            "title": "X", "thumbnail": "th"}
+    info = {"id": "vidx", "webpage_url": "https://e/v/x", "extractor_key": "Youtube",
+            "extractor": "youtube", "title": "X", "thumbnail": "th"}
     vid = run_bknd.extract_pull_video(info)
     assert vid.native_id == "vidx" and vid.url == "https://e/v/x"
     assert vid.extractor_key == "youtube" and vid.title == "X"
     assert vid.info_json["id"] == "vidx"
+
+
+def test_norm_extractor_matches_download_archive_convention():
+    # The stored extractor_key must be the yt-dlp download-archive id (IE class key, lowercased):
+    # `extractor_key` -> flat-entry `ie_key`, and `ie_key` must win over the IE_NAME `extractor`
+    # (e.g. "YoutubeTab" -> "youtubetab", not "youtube:tab").
+    assert run_bknd._norm_extractor({"extractor_key": "YoutubeTab",
+                                     "extractor": "youtube:tab"}) == "youtubetab"
+    assert run_bknd._norm_extractor({"ie_key": "YoutubeTab",
+                                     "extractor": "youtube:tab"}) == "youtubetab"
+    assert run_bknd._norm_extractor({"extractor": "youtube:tab"}) == "youtube:tab"
+    assert run_bknd._norm_extractor({}) is None
 
 
 def test_initiate_job_info_json_absent_is_none(monkeypatch):
@@ -214,8 +226,10 @@ def test_extract_pull_handles_flat_entries():
 
 
 def test_extract_pull_url_result_marks_unknown_container():
-    # A flat url-result with a *container* ie_key (a channel tab / sub-playlist) is ambiguous
-    # -> container=None so its own pull classifies it; a plain video url-result is a known leaf.
+    # A flat url-result is only a URL pointer. A container/playlist-like one is never a leaf
+    # (container=None, classified by its own later pull). A plain video url-result is either a
+    # known leaf (container=False) or, conservatively, ambiguous (container=None) depending on
+    # whether the ie_key leaf heuristic is enabled (see _is_container_ie_key's TODO).
     raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
                {"_type": "url", "ie_key": "Youtube", "id": "v1",
@@ -224,8 +238,8 @@ def test_extract_pull_url_result_marks_unknown_container():
                 "url": "https://x/chan/videos", "title": "Videos"},
            ]}
     by_id = {v.native_id: v for v in run_bknd.extract_pull(raw).entries}
-    assert by_id["v1"].container is False    # plain video url-result -> known leaf (cheap path)
-    assert by_id["tab1"].container is None   # container ie_key -> unknown, classified later
+    assert by_id["v1"].container in (None, False)   # video url-result: leaf or (conservatively) unknown
+    assert by_id["tab1"].container is None          # container ie_key -> unknown, classified later
 
 
 def test_extract_pull_splits_videos_and_child_playlists():

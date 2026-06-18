@@ -197,11 +197,7 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     if existing:
         response.status_code = status.HTTP_200_OK
         return existing
-    attrs: dict = {}
-    if item.cookies is not None:
-        attrs["cookies"] = item.cookies
-    if item.lpm_lib is not None:
-        attrs["lpm_lib"] = item.lpm_lib
+    attrs = {k: getattr(item, k) for k in xform._PROPAGATE_HINTS if getattr(item, k) is not None}
     thing = Thing(url=item.url, container=item.container,
                   human_rating=item.rating if item.rating is not None else 0.0,
                   bucket=item.bucket, attrs=attrs or None)
@@ -543,6 +539,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     # full single-video `video`; outcome diverges on `best_oi` (download vs meta).
     if pl_thing is not None and item.video is not None:
         pl_thing.container = False             # classify (discovery) / affirm a leaf
+        run.entries_hash = xform.pl_hash([])   # leaf: empty, unchanging membership (§4.4 backoff)
         _apply_video_metadata(session, pl_thing, item.video)  # display+identity+channel
         pl_thing.last_failure_dt = None
         if item.best_oi is not None:          # download: media acquired → always complete
