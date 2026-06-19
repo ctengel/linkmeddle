@@ -978,6 +978,25 @@ def test_both_bodies_is_failure(client):
     assert client.get("/things/", params={"container": False}).json() == []
 
 
+def test_both_bodies_known_container_stays_classified(client):
+    # #164 guard: a known-good container (container=True) that receives a both-shape result must
+    # NOT have its classification reset — leave container=True and record a plain failure with
+    # backoff. Only unknowns/leaves are reset to NULL on contradictory evidence.
+    # Seed directly (type="playlist" → container=True) — POST /things/ starts as unknown.
+    pl = _seed_thing(type="playlist", url="http://e/both-c", human_rating=0.0, try_on=_TODAY)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == pl
+    rid = job["run_id"]
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "bv1", "extractor_key": "youtube"},
+                          "playlist": _pl_payload(url="http://e/both-c", native="bpl-c")})
+    assert r.status_code == 200 and r.json()["success"] is False
+    t = client.get(f"/things/{pl}").json()
+    assert t["container"] is True              # NOT reset — known-good container preserved
+    assert t["last_failure_dt"] is not None
+
+
 def test_ingest_run_404(client):
     r = client.post(f"/jobs/{uuid.uuid4()}/result", json={"success": False})
     assert r.status_code == 404

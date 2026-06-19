@@ -273,10 +273,9 @@ def test_extract_pull_handles_flat_entries():
 
 
 def test_extract_pull_url_result_marks_unknown_container():
-    # A flat url-result is only a URL pointer. A container/playlist-like one is never a leaf
-    # (container=None, classified by its own later pull). A plain video url-result is either a
-    # known leaf (container=False) or, conservatively, ambiguous (container=None) depending on
-    # whether the ie_key leaf heuristic is enabled (see _is_container_ie_key's TODO).
+    # From a generic YouTube extractor (not a known video-only parent), a tab-like ie_key is
+    # marked container=None (unknown, classified by its own later pull). A plain video ie_key
+    # stays a known leaf (container=False) because the ie_key heuristic finds no container hint.
     raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
                {"_type": "url", "ie_key": "Youtube", "id": "v1",
@@ -285,8 +284,22 @@ def test_extract_pull_url_result_marks_unknown_container():
                 "url": "https://x/chan/videos", "title": "Videos"},
            ]}
     by_id = {v.native_id: v for v in run_bknd.extract_pull(raw).entries}
-    assert by_id["v1"].container in (None, False)   # video url-result: leaf or (conservatively) unknown
-    assert by_id["tab1"].container is None          # container ie_key -> unknown, classified later
+    assert by_id["v1"].container is False   # plain ie_key -> known leaf (no classify pull)
+    assert by_id["tab1"].container is None  # "tab" in ie_key -> unknown, classified later
+
+
+def test_extract_pull_video_only_parent_leaves_are_known_leaves():
+    # A parent in _VIDEO_ONLY_CONTAINER_IE_KEYS (e.g. youtubeplaylist) never produces nested
+    # containers, so every url-result is a known leaf (container=False) regardless of ie_key.
+    raw = {"webpage_url": "https://x/pl", "id": "pl1", "extractor_key": "YoutubePlaylist",
+           "entries": [
+               {"_type": "url", "ie_key": "YoutubeTab", "id": "v1",
+                "url": "https://x/v/1", "title": "V1"},
+               {"_type": "url", "ie_key": "Youtube", "id": "v2",
+                "url": "https://x/v/2", "title": "V2"},
+           ]}
+    entries = run_bknd.extract_pull(raw).entries
+    assert all(v.container is False for v in entries)  # video-only parent -> all leaves
 
 
 def test_extract_pull_splits_videos_and_child_playlists():

@@ -145,18 +145,28 @@ def is_both(info: dict) -> bool:
         info.get("oi_uuid") or info.get("requested_downloads") or info.get("formats"))
 
 
-# yt-dlp `ie_key` fragments that mark a flat url-result as a *container* extractor (a channel
-# tab / sub-playlist) rather than a single video — e.g. `YoutubeTab`, `YoutubePlaylist`,
-# `BilibiliChannel`. Heuristic and easily extended; an unmatched url-result is assumed to be a
-# plain video (the common, cheap flat-pull case), so we never pay a classify pull per video.
+# Two-level heuristic for flat url-result classification. A flat url-result whose yt-dlp shape
+# is `url`/`url_transparent` (no entries, no formats) may be either a single video or a nested
+# container (channel tab / sub-playlist). The decision uses two signals:
+#
+# Level 1 — parent extractor: some parent containers are known to only ever produce video
+# children (never sub-playlists), so every url-result from them is safely a leaf.
+_VIDEO_ONLY_CONTAINER_IE_KEYS = ("youtubeplaylist",)  # lowercase _norm_extractor values
+#
+# Level 2 — entry ie_key fragments: if the parent is not in the video-only set, check whether
+# the entry's own ie_key looks like a container extractor. An unmatched entry stays a leaf.
 _CONTAINER_IE_KEY_HINTS = ("tab", "playlist", "channel", "user", "album", "series")
 
 
-def _is_container_ie_key(ie_key: Optional[str]) -> bool:
-    """Does this flat-entry `ie_key` look like a container (playlist/channel) extractor?"""
-    # TODO figure out what is safe here
-    return True
-    #return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
+def _is_container_ie_key(ie_key: Optional[str], parent_ie_key: Optional[str] = None) -> bool:
+    """Is this flat url-result entry likely a container rather than a plain video?
+
+    Returns False immediately if the parent extractor is known to only produce video children.
+    Otherwise falls back to fragment-matching on the entry's own ie_key.
+    """
+    if parent_ie_key and parent_ie_key in _VIDEO_ONLY_CONTAINER_IE_KEYS:
+        return False
+    return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
 
 
 def extract_pull(info: dict) -> models.PlaylistFull:
@@ -169,6 +179,7 @@ def extract_pull(info: dict) -> models.PlaylistFull:
     assert info.get("webpage_url") is not None  # needed until we get an lmpl id
     entries: list[models.VidFull] = []
     child_playlists: list[models.PlaylistFull] = []
+    parent_ie_key = _norm_extractor(info)
     for entry in info.get("entries") or []:
         if entry is None:
             continue
@@ -178,12 +189,12 @@ def extract_pull(info: dict) -> models.PlaylistFull:
                 child_playlists.append(stub)
             continue
         vid = extract_pull_video(entry)
-        # A flat url-result whose `ie_key` marks it as a container extractor (a channel tab /
-        # sub-playlist) is ambiguous — yt-dlp only handed back a URL pointer. Mark the stub
-        # container=NULL (unknown) so its own pull classifies it, instead of guessing video and
-        # later trying to download a playlist. A plain video url-result stays a known leaf.
+        # A flat url-result whose ie_key looks like a container extractor (or whose parent is
+        # not a known video-only container) is ambiguous — yt-dlp only handed back a URL
+        # pointer. Mark container=NULL so its own pull classifies it authoritatively. A plain
+        # video url-result from a known video-only parent stays a known leaf.
         if (entry.get("_type") in ("url", "url_transparent")
-                and _is_container_ie_key(entry.get("ie_key"))):
+                and _is_container_ie_key(entry.get("ie_key"), parent_ie_key)):
             vid.container = None
         entries.append(vid)
     modified = info.get("modified_date")

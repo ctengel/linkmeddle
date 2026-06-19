@@ -542,13 +542,15 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     # Both-shape guard (#164): a successful result must be exactly one shape — a Stage-1 playlist
     # pull XOR a Stage-2 video. The worker never sends both (it reports the ambiguous video+
     # playlist shape as a failure), but a different client could POST both, and the video branch
-    # below would silently win and drop the playlist. Record a failure (+ backoff) and reset the
-    # classification to NULL (contradictory evidence -> unsure what this is; a later pull
-    # reclassifies it). Keep best_oi if present (media was already uploaded — preserve the ref to
-    # investigate), but do NOT mark acquired or fan out any rels.
+    # below would silently win and drop the playlist. Record a failure (+ backoff). For an
+    # already-classified container (container=True), leave the classification intact and treat
+    # this as a plain failure (demoting a known-good playlist to unknown on one bad POST would
+    # cause classification churn). For an unknown/leaf, reset to NULL so a later pull can
+    # reclassify it authoritatively. Keep best_oi if present (media was already uploaded).
     if item.playlist is not None and item.video is not None:
         if pl_thing is not None:
-            pl_thing.container = None
+            if pl_thing.container is not True:  # unknown/leaf: contradictory evidence → unsure
+                pl_thing.container = None
             if item.best_oi is not None:
                 pl_thing.best_oi = item.best_oi
             pl_thing.last_failure_dt = now
