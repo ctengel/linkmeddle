@@ -457,7 +457,7 @@ function renderThingInfoHTML(thing, isContainer) {
     <div class="muted">
       ${renderTypeBadge(thing)}
       ${thing.channel ? `Channel: ${escapeHtml(thing.channel)}<br/>` : ""}
-      ${thing.url ? `URL: <a href="${escapeAttr(thing.url)}" target="_blank">${escapeHtml(thing.url)}</a><br/>` : ""}
+      ${thing.url ? `URL: ${isHttpUrl(thing.url) ? `<a href="${escapeAttr(thing.url)}" target="_blank">${escapeHtml(thing.url)}</a>` : escapeHtml(thing.url)}<br/>` : ""}
       ${statusLines.length ? statusLines.join("<br/>") : ""}
     </div>
     ${renderRatingWidget(thing)}
@@ -700,6 +700,10 @@ function escapeHtml(str) {
 function escapeAttr(str) {
   if (str == null) return "";
   return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function isHttpUrl(str) {
+  return /^https?:\/\//i.test(String(str || ""));
 }
 </script>
 
