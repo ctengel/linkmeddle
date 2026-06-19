@@ -69,6 +69,7 @@ let currentVideoId = null;       // UUID of the currently shown video
 let autoPlayEnabled = true;
 let helpOverlayVisible = false;
 let thingCache = {};             // id → ThingPage
+let playbackCache = {};          // id → presigned download_url (or null if no media)
 
 /* === ROUTER === */
 window.addEventListener("hashchange", router);
@@ -156,17 +157,33 @@ async function getThingCached(id) {
   return t;
 }
 
-function invalidateCache(id) { delete thingCache[id]; }
+function invalidateCache(id) { delete thingCache[id]; delete playbackCache[id]; }
+
+// Lazily resolve (and cache) a video's presigned playback URL via the BFF, off the page
+// view-model — so opening a container does not presign every child's OI URL up front.
+async function getPlaybackCached(id) {
+  if (id in playbackCache) return playbackCache[id];
+  try {
+    const p = await apiGet(`/things/${id}/playback`);
+    playbackCache[id] = p.download_url ?? null;
+  } catch {
+    playbackCache[id] = null;
+  }
+  return playbackCache[id];
+}
+
+// Warm the playback cache for the next 1-2 videos after `id` in the active playlist.
+function prefetchUpcomingPlayback(id) {
+  const idx = activePlaylistVideos.indexOf(id);
+  if (idx === -1) return;
+  for (const nid of activePlaylistVideos.slice(idx + 1, idx + 3)) {
+    getPlaybackCached(nid);   // fire-and-forget
+  }
+}
 
 /* === RATINGS === */
-function gradeFor(r) {
-  if (r == null) return null;
-  if (r >= 1.5) return "A";
-  if (r >= 0.5) return "B";
-  if (r >= -0.5) return "C";
-  if (r >= -1.5) return "D";
-  return "F";
-}
+// thing.grade is computed server-side (lmfe/models.py grade_for) and present on every
+// response — read it directly, do not recompute the band thresholds here.
 
 // Map rating float (-2..+2) to filled star count (0..5)
 function ratingToFilled(rating) {
@@ -179,7 +196,7 @@ function renderRatingWidget(thing) {
   const displayRating = thing.human_rating ?? thing.effective_rating ?? null;
   const isMachine = thing.human_rating == null && thing.effective_rating != null;
   const filledCount = ratingToFilled(displayRating);
-  const grade = thing.grade || gradeFor(thing.effective_rating);
+  const grade = thing.grade;
 
   const stars = [1, 2, 3, 4, 5].map(n => {
     const filled = n <= filledCount;
@@ -205,7 +222,7 @@ async function rateThing(id, rating) {
 }
 
 function renderGradeBadge(thing) {
-  const g = thing.grade || gradeFor(thing.effective_rating);
+  const g = thing.grade;
   if (!g) return "";
   return `<span class="g g${g}">${g}</span>`;
 }
@@ -263,7 +280,8 @@ async function renderHome(prefillUrl = "") {
 async function loadNeedsRating() {
   const el = document.getElementById("needsRating");
   try {
-    const data = await apiGet("/things/?needs_rating=true&limit=10");
+    const all = await apiGet("/things/?needs_rating=true");
+    const data = all.slice(0, 10);   // /things/ has no limit param; bound the panel client-side
     if (!data.length) { el.innerHTML = "<div class='muted'>All things rated</div>"; return; }
     el.innerHTML = data.map(t => `
       <div class="item-row" onclick="location.hash='#/thing/${t.id}'">
@@ -408,6 +426,11 @@ async function renderThingPage(thingId, ctxId) {
   const children = (page.related || []).filter(r => r.direction === "child");
   const parents = (page.related || []).filter(r => r.direction === "parent");
 
+  // Resolve this video's playback URL lazily (the page view-model no longer carries it).
+  if (isVideo && page.file_available) {
+    page.download_url = await getPlaybackCached(thingId);
+  }
+
   document.getElementById("app").innerHTML = `
     <div class="row">
       <div class="main">
@@ -427,6 +450,7 @@ async function renderThingPage(thingId, ctxId) {
   `;
 
   registerVideoPlayer();
+  if (isVideo) prefetchUpcomingPlayback(thingId);
 }
 
 function childVideoIds(containerPage) {
@@ -531,6 +555,8 @@ async function updateVideoInPlace(newVideoId) {
   const page = await getThingCached(newVideoId);
   currentVideoId = newVideoId;
 
+  if (page.file_available) page.download_url = await getPlaybackCached(newVideoId);
+
   const videoArea = document.getElementById("videoArea");
   if (videoArea) videoArea.innerHTML = renderVideoHTML(page);
 
@@ -549,6 +575,10 @@ async function updateVideoInPlace(newVideoId) {
   }
 
   registerVideoPlayer();
+  prefetchUpcomingPlayback(newVideoId);
+  // In-place transitions are deliberate navigations (autoplay-next via onended, or a sidebar
+  // click) — start playback. Best-effort: a browser may block play() without a user gesture.
+  currentVideoElement?.play().catch(() => {});
 }
 
 function registerVideoPlayer() {

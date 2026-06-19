@@ -1023,6 +1023,25 @@ def test_download_result_sets_best_oi(client):
     assert t["last_failure_dt"] is None
 
 
+def test_second_result_on_finalized_run_is_conflict(client):
+    # #1: a run is finalized exactly once. A successful download is recorded, then the worker's
+    # response is lost to a transient error and it reports a failure for the same run; the second
+    # POST must 409 and NOT demote the acquired video back to failed + backoff.
+    oi = str(uuid.uuid4())
+    v, rid = _claimed_download(client, url="http://e/dl-once")
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"success": True, "best_oi": oi,
+                             "video": {"native_id": "vid99", "extractor_key": "youtube"}}
+                       ).status_code == 200
+    # the lost-response report_failure shape (job_runner posts info=None -> success=False)
+    r2 = client.post(f"/jobs/{rid}/result", json={"success": False})
+    assert r2.status_code == 409
+    t = client.get(f"/things/{v}").json()
+    assert t["best_oi"] == oi                        # acquired media untouched
+    assert t["try_on"] is None                       # still acquired (no backoff re-armed)
+    assert t["last_success_dt"] and t["last_failure_dt"] is None
+
+
 def test_download_result_backfill_no_overwrite(client):
     # identity backfill is NULL-only: an already-known extractor/native is not overwritten
     v, rid = _claimed_download(client, url="http://e/dl2",

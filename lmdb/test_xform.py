@@ -126,6 +126,15 @@ def test_next_try_on_leaf_meta_loop_backs_off():
     assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
 
 
+def test_next_try_on_same_day_runs_floor_at_one_day():
+    # #7: two successful runs on the same calendar day -> _current_interval is 0. With a mixed
+    # window (rec=None) the interval stays 0, which would schedule the thing immediately re-due;
+    # the floor clamps it to at least 1 day past the last run.
+    runs = [_run_on(1, True, b"h1"), _run_on(1, True, b"h2")]
+    today = datetime.date(2026, 1, 1)
+    assert xform.next_try_on(1.0, runs, today) == datetime.date(2026, 1, 2)
+
+
 def test_next_try_on_failure_after_success_tomorrow():
     runs = [_run_on(1, True, b"h"), _run_on(6, False)]
     assert xform.next_try_on(1.0, runs, datetime.date(2026, 1, 6)) == datetime.date(2026, 1, 7)

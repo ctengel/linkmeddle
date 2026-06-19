@@ -393,4 +393,7 @@ def next_try_on(rating: float, runs: list[models.Run],
         rec = _rec_adjust(window)
         if rec is not None:
             interval = next_fib(interval, rec)
-    return last.date + datetime.timedelta(days=interval)
+    # Floor at 1 day: _current_interval can be 0 (two successful runs on the same calendar day)
+    # and a 0-day reschedule would make the thing immediately re-due. The only same-day result
+    # is the never-run case above (`return today`).
+    return last.date + datetime.timedelta(days=max(1, interval))

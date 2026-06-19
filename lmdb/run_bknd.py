@@ -104,6 +104,8 @@ def extract_pull_video(info: dict) -> models.VidFull:
         thumbnail_url=info.get("thumbnail"),
         # yt-dlp `timestamp` is a UTC epoch; store it as a naive-UTC datetime (the V4
         # convention, models.naive_utcnow) — NOT fromtimestamp()'s worker-local time.
+        # A falsy ts (None or 0 = epoch 1970) is intentionally stored as NULL: no real video
+        # predates 1990, so a 0 is a placeholder, not a date. Do not "fix" this into 1970-01-01.
         modified=(datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
                   if ts else None),
         channel=_pull_chan(info),

@@ -56,14 +56,6 @@ def _resolve_media(best_oi) -> tuple[Optional[str], Optional[str]]:
     return oi_file.get_s3_url(), oi_file.get_object_url()
 
 
-async def _download_url(best_oi) -> Optional[str]:
-    """Presigned playback URL for an acquired video, off the event loop."""
-    if not best_oi:
-        return None
-    url, _ = await run_in_threadpool(_resolve_media, best_oi)
-    return url
-
-
 @app.post("/things/", response_model=fe_models.ThingSummary)
 async def add_thing(item: fe_models.ThingCreate, response: Response):
     """Add a thing by URL (the human entry point), defaulting the OI bucket.
@@ -128,8 +120,8 @@ async def get_thing(thing_id: str):
         fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
                                  thing=fe_models.ThingSummary.from_thing_read(r.thing))
         for r in related]
-    if thing.container is False:
-        page.download_url = await _download_url(thing.best_oi)
+    # download_url is resolved lazily by the SPA via /things/{id}/playback (current video +
+    # a 1-2 prefetch), not eagerly here — a container page must not presign every child's OI URL.
     return page
 
 

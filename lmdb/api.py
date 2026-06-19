@@ -510,6 +510,14 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     run = session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    # A run is finalized exactly once: `_finish` stamps `endtime` on every terminal path.
+    # Reject a second result for the same run (409) so a worker that posts a result, has the
+    # response lost to a transient error, and then reports a failure (job_runner.report_failure)
+    # cannot overwrite an already-recorded success — which would demote an acquired thing back
+    # to failed + backoff. The worker treats the 409 like any other report error and moves on.
+    if run.endtime is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Run already finalized")
     now = models.naive_utcnow()
     run.endtime = now
     run.success = item.success
