@@ -1,9 +1,19 @@
+"""LinkMeddle frontend BFF.
+
+A thin Backend-for-Frontend for the SPA: it does the work in Python — talking to
+the LMDB V4 `thing` API (`LINKMEDDLE_PLAPI`) and Object Index on the SPA's
+behalf — so the JavaScript stays minimal (LM-V4-DESIGN.md §3.2/§3.3). It owns no
+durable data and is free to break/evolve across 4.x.
+
+The data path is *not* proxied: media is handed to the consumer as a resolved OI
+download URL (`best_oi` -> presigned S3 URL), never streamed through here.
+"""
 import os
-import datetime
+import asyncio
 from typing import Optional
-import urllib.parse
 import fastapi
-from fastapi.responses import RedirectResponse
+from fastapi import Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import httpx
 from obj_idx import client as oi_client
@@ -16,230 +26,168 @@ OI_BUCKET = os.getenv("OBJIDX_BUCKET_DEFAULT")
 app = fastapi.FastAPI()
 
 app.mount("/static", StaticFiles(directory="lmfe/static"), name="static")
-    
-@app.post("/playlists/", response_model=fe_models.PlaylistCreateResult)
-async def create_schedule(schedule: fe_models.PlaylistCreate):
-    """Simple upsert playlist schedule by URL. If a schedule for the URL already exists, update its next_run to today. Otherwise, create a new schedule."""
-    pl_by_url = None
+
+
+def _plapi(path: str) -> str:
+    """Build a LMDB PLAPI URL from a leading-slash path."""
+    return f"{LINKMEDDLE_PLAPI.rstrip('/')}{path}"
+
+
+def _checked(resp: httpx.Response) -> httpx.Response:
+    """Pass a backend error status (e.g. 404) straight through to our caller.
+
+    Without this an httpx error would surface as an opaque 500; instead we mirror
+    the backend's status code and `detail` so the SPA sees the real outcome.
+    """
+    if resp.is_error:
+        try:
+            detail = resp.json().get("detail")
+        except Exception:  # noqa: BLE001 - non-JSON error body
+            detail = resp.text or None
+        raise fastapi.HTTPException(status_code=resp.status_code, detail=detail)
+    return resp
+
+
+def _resolve_media(best_oi) -> tuple[Optional[str], Optional[str]]:
+    """Resolve an OI file UUID to (download_url, object_url). Sync OI calls."""
+    if not best_oi:
+        return None, None
+    oi_file = oi_client.get_obj_idx_env().get_file(str(best_oi))
+    return oi_file.get_s3_url(), oi_file.get_object_url()
+
+
+async def _download_url(best_oi) -> Optional[str]:
+    """Presigned playback URL for an acquired video, off the event loop."""
+    if not best_oi:
+        return None
+    url, _ = await run_in_threadpool(_resolve_media, best_oi)
+    return url
+
+
+@app.post("/things/", response_model=fe_models.ThingSummary)
+async def add_thing(item: fe_models.ThingCreate, response: Response):
+    """Add a thing by URL (the human entry point), defaulting the OI bucket.
+
+    Idempotent on URL: the backend returns 201 on create / 200 on an existing
+    thing, and we propagate that status. The bucket is filled from
+    OBJIDX_BUCKET_DEFAULT when the caller omits it, so GUI/bookmarklet users
+    never pick one.
+    """
+    bucket = item.bucket or OI_BUCKET
+    if not bucket:
+        raise fastapi.HTTPException(
+            status_code=400,
+            detail="No bucket given and OBJIDX_BUCKET_DEFAULT is unset")
+    payload = {"url": item.url, "bucket": bucket}
+    for field in ("container", "rating", "cookies", "lpm_lib"):
+        val = getattr(item, field)
+        if val is not None:
+            payload[field] = val
     async with httpx.AsyncClient(timeout=5) as client:
-        # TODO technically this is a race condition; allows multiple schedules to be created #125 and #142
-        req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{schedule.url}"
-        resp = await client.get(req_url)
-        if resp.status_code != 404:
-            resp.raise_for_status()
-            pl_by_url = pl_models.PlaylistSumWithSched.model_validate(resp.json())
-        if pl_by_url and pl_by_url.schedules:
-            sched = pl_by_url.schedules[0]
-            url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{sched.sched_id}"
-            resp = await client.patch(url, json={"next_run": datetime.date.today().isoformat()})
-            resp.raise_for_status()
-            return fe_models.PlaylistCreateResult(url=schedule.url,
-                                                  lm_id=pl_by_url.playlist_id,
-                                                  lm_sched_id=sched.sched_id)
-        url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
-        my_schedule = pl_models.PlaylistSchedBase(webpage_url=schedule.url,
-                                                  oi_bucket=OI_BUCKET,
-                                                  next_run=datetime.date.today(),
-                                                  freq_days=3)
-        payload = my_schedule.model_dump()
-        payload['next_run'] = payload['next_run'].isoformat()
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        my_schedule_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
-        return fe_models.PlaylistCreateResult(url=schedule.url,
-                                              lm_id=my_schedule_resp.summary.playlist_id if my_schedule_resp.summary else None,
-                                              lm_sched_id=my_schedule_resp.sched_id)
-
-def oi_file_to_video(oi_file: Optional[oi_client.clilib.File] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None) -> fe_models.VideoBase:
-    if not extractor_id or not dlp_id:
-        if oi_file and (file_str := oi_file.info.get('extra', {}).get('ytdl-id')):
-            extractor_id, dlp_id = file_str.split(" ", 1)
-    # TODO set file_available based on OI attributes #123
-    return fe_models.VideoBase(url=oi_file.info['url'] if oi_file else None,
-                               extractor_key=extractor_id,
-                               dlp_id=dlp_id,
-                               oi_file_uuid=oi_file.uuid if oi_file else None,
-                               oi_obj_uuid=oi_file.object['uuid'] if oi_file else None,
-                               object_url=oi_file.get_s3_url() if oi_file else None,
-                               file_available=bool(oi_file),
-                               title=oi_file.info.get('extra', {}).get('ytdl-info', {}).get('title') if oi_file else None,
-                               channel=(oi_file.info.get('extra', {}).get('ytdl-info', {}).get('channel_url') or oi_file.info.get('extra', {}).get('ytdl-info', {}).get('uploader_id')) if oi_file else None)
-
-async def get_sched_info(schedules: list[pl_models.PlaylistSchedPublic]) -> tuple[Optional[int], Optional[datetime.date], Optional[datetime.date]]:
-    """Get schedule ID, next run date, and last run date for a playlist based on its schedules. If multiple schedules, return the one with the soonest next run date."""
-    if not schedules:
-        return None, None, None
-    soonest_sched = min(schedules, key=lambda s: s.next_run or datetime.date.max)
-    async with httpx.AsyncClient(timeout=5) as client:
-        per_sched_runs = [(x, (await client.get(f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{x.sched_id}")).json()['runs']) for x in schedules]
-        latest_runs = [(x[0],
-                        max(datetime.datetime.fromisoformat(y['timestamp']) for y in x[1]))
-                       for x in per_sched_runs if x[1]]
-    returned_sched = soonest_sched
-    latest_sched = None
-    if latest_runs:
-        latest_sched = max(latest_runs, key=lambda x: x[1])
-        if latest_sched[1].date() >= datetime.date.today() - datetime.timedelta(days=1):
-            returned_sched = latest_sched[0]
-    return returned_sched.sched_id, soonest_sched.next_run, latest_sched[1].date() if latest_sched else None
-
-@app.get("/playlists/{playlist_id}", response_model=fe_models.Playlist)
-async def get_playlist(playlist_id: int, random_videos: Optional[int] = None):
-    """Proxy GET /playlists/{id}/ from LinkMeddle API."""
-    # TODO implement random_videos #123
-    async with httpx.AsyncClient(timeout=5) as client:
-        url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/"
-        resp = await client.get(url, params={"playlist_id": playlist_id})
-        resp.raise_for_status()
-        js = resp.json()
-    if not js:
-        raise fastapi.HTTPException(status_code=404, detail="Playlist not found")
-    assert len(js) == 1, f"Expected exactly one playlist with ID {playlist_id}, got {len(js)}"
-    assert js[0]['playlist_id'] == playlist_id, f"Expected playlist ID {playlist_id}, got {js[0]['playlist_id']}"
-    playlist_url = js[0].get('webpage_url')
-    async with httpx.AsyncClient(timeout=5) as client2:
-        url2 = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{urllib.parse.quote(playlist_url)}"
-        resp2 = await client2.get(url2)
-        resp2.raise_for_status()
-        js2 = resp2.json()    
-    my_playlist = pl_models.PlaylistSumWithSched.model_validate(js2)
-    videos = []
-    # TODO async #123
-    oic = oi_client.get_obj_idx_env()
-    for entry in my_playlist.entries:
-        extractor_id = entry[1]
-        dlp_id = entry[0]
-        oic_files = oic.search_files(params={"extra": f"ytdl-id={extractor_id} {dlp_id}"})
-        # TODO if multiple, find the best #123
-        videos.append(oi_file_to_video(oi_file=oic_files[0] if oic_files else None,
-                                       extractor_id=extractor_id,
-                                       dlp_id=dlp_id))
-    sched_id, next_run, last_run = await get_sched_info(my_playlist.schedules)
-    return fe_models.Playlist(url=my_playlist.webpage_url,
-                              dlp_id=my_playlist.id,
-                              extractor_key=my_playlist.extractor_id,
-                              title=my_playlist.title,
-                              channel=my_playlist.channel,
-                              is_channel=my_playlist.pseudo_channel,
-                              lm_id=playlist_id,
-                              videos=videos,
-                              total_videos=len(my_playlist.entries),
-                              next_run=next_run,
-                              last_run=last_run,
-                              lm_sched_id=sched_id)
-
-@app.get("/playlists/", response_model=list[fe_models.PlaylistBase])
-async def list_playlists(url: Optional[str] = None, sched_id: Optional[int] = None, current: bool = False):
-    """Proxy GET /playlists/ from LinkMeddle API."""
-    async with httpx.AsyncClient(timeout=5) as client:
-        if url:
-            req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/playlists/{url}"
-            resp = await client.get(req_url)
-            resp.raise_for_status()
-            x = resp.json()
-            return [fe_models.PlaylistBase(dlp_id=x['id'],
-                                           extractor_key=x.get('extractor_id'),
-                                           title=x.get('title'),
-                                           url=x.get('webpage_url'),
-                                           channel=x.get('channel'),
-                                           is_channel=x.get('pseudo_channel', False),
-                                           lm_id=x.get('playlist_id'))]
-        if sched_id:
-            req_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{sched_id}"
-            resp = await client.get(req_url)
-            resp.raise_for_status()
-            sched_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
-            if not sched_resp.summary:
-                raise fastapi.HTTPException(status_code=503, detail="Playlist summary not available for this schedule yet")
-            assert sched_resp.summary.playlist_id is not None, f"Expected playlist_id in schedule summary for schedule ID {sched_id}, got {sched_resp.summary.playlist_id}"
-            assert sched_resp.webpage_url is not None, f"Expected webpage_url in schedule summary for schedule ID {sched_id}, got {sched_resp.webpage_url}"
-            return [fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
-                                           extractor_key=sched_resp.summary.extractor_id,
-                                           url=sched_resp.webpage_url,
-                                           lm_id=sched_resp.summary.playlist_id)]
-        if current:
-            # TODO also show recent runs from non-schedules (sorta like #125)
-            url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/"
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = [pl_models.PlaylistSchedPublic.model_validate(x) for x in resp.json()]
-            scheds_with_runs = [(x, await get_sched_info([x])) for x in data]
-            current_schedules = [x for x in scheds_with_runs if (x[1][1] and x[1][1] <= (datetime.date.today() + datetime.timedelta(days=1))) or (x[1][2] and x[1][2] >= datetime.date.today() - datetime.timedelta(days=1))]  # scheds with next run within a day or last run within a day
-            playlists = []
-            for sched_xtra in current_schedules:
-                sched = sched_xtra[0]
-                full_schedule_url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/schedules/{sched.sched_id}"
-                resp = await client.get(full_schedule_url)
-                resp.raise_for_status()
-                sched_resp = pl_models.PlaylistSchedWithStatsAndSum.model_validate(resp.json())
-                if not sched_resp.summary:
-                    continue
-                assert sched_resp.summary.playlist_id is not None, f"Expected playlist_id in schedule summary for schedule ID {sched.sched_id}, got {sched_resp.summary.playlist_id}"
-                assert sched_resp.webpage_url is not None, f"Expected webpage_url in schedule summary for schedule ID {sched.sched_id}, got {sched_resp.webpage_url}"
-                playlists.append(fe_models.PlaylistBase(dlp_id=sched_resp.summary.id,
-                                                       extractor_key=sched_resp.summary.extractor_id,
-                                                       url=sched_resp.webpage_url,
-                                                       lm_id=sched_resp.summary.playlist_id,
-                                                       title=sched_resp.summary.title,
-                                                       channel=sched_resp.summary.channel,
-                                                       is_channel=sched_resp.summary.pseudo_channel))
-            return playlists
-    raise fastapi.HTTPException(status_code=400, detail="Need URL or schedule ID")
-
-@app.get("/videos/{file_id}", response_model=fe_models.Video)
-async def get_video(file_id: str):
-    """Proxy GET /videos/{file_id}/ to ObjectIndex and add playlist info"""
-    oic = oi_client.get_obj_idx_env()
-    oi_file = oic.get_file(file_id)
-    extractor_id = None
-    dlp_id = None
-    playlists = []
-    if file_str := oi_file.info.get('extra', {}).get('ytdl-id'):
-        extractor_id, dlp_id = file_str.split(" ", 1)
-        async with httpx.AsyncClient(timeout=5) as client:
-            url = f"{LINKMEDDLE_PLAPI.rstrip('/')}/videos/{extractor_id}/{dlp_id}"
-            resp = await client.get(url)
-            try:
-                resp.raise_for_status()
-                playlists = [fe_models.PlaylistBase(dlp_id=x['id'],
-                                                    extractor_key=x.get('extractor_id'),
-                                                    title=x.get('title'),
-                                                    url=x.get('webpage_url'),
-                                                    channel=x.get('channel'),
-                                                    is_channel=x.get('pseudo_channel', False),
-                                                    lm_id=x.get('playlist_id')
-                                                    ) for x in
-                            resp.json()]
-            except httpx.HTTPStatusError as e:
-                # If video isn't in any playlists, LinkMeddle API returns 404. In that case, we can just return the video info without playlist info.
-                if e.response.status_code != 404:
-                    raise
-    base_video = oi_file_to_video(oi_file=oi_file, extractor_id=extractor_id, dlp_id=dlp_id)
-    return fe_models.Video(**base_video.model_dump(), playlists=playlists)
+        resp = _checked(await client.post(_plapi("/things/"), json=payload))
+    response.status_code = resp.status_code
+    return fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(resp.json()))
 
 
-@app.get("/videos/", response_model=list[fe_models.VideoBase])
-async def list_videos(url: Optional[str] = None, extractor_id: Optional[str] = None, dlp_id: Optional[str] = None):
-    """Proxy GET /videos/ to ObjectIndex search"""
-    oic = oi_client.get_obj_idx_env()
+@app.get("/things/", response_model=list[fe_models.ThingSummary])
+async def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
+                      rating: Optional[float] = None, min_rating: Optional[float] = None,
+                      due: bool = False, needs_rating: bool = False, new: bool = False,
+                      failing: bool = False, url: Optional[str] = None,
+                      extractor: Optional[str] = None, native_id: Optional[str] = None):
+    """List/search things; passes every LMDB filter through. Backs all list views
+    and (with `new`/`failing`) the status-dashboard panels. No OI round-trips."""
     params = {}
-    if url:
-        params['url'] = url
-    if extractor_id:
-        params['extra'] = f"ytdl-id={extractor_id} {dlp_id}"
-    search_result = oic.search_files(params=params)
-    return [oi_file_to_video(oi_file=oi_file) for oi_file in search_result]
+    for name, val in (("container", container), ("kind", kind), ("rating", rating),
+                      ("min_rating", min_rating), ("url", url), ("extractor", extractor),
+                      ("native_id", native_id)):
+        if val is not None:
+            params[name] = val
+    for name, flag in (("due", due), ("needs_rating", needs_rating),
+                       ("new", new), ("failing", failing)):
+        if flag:
+            params[name] = True
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/things/"), params=params))
+    return [fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(t))
+            for t in resp.json()]
 
-@app.get("/url")
-async def get_url(url: str):
-    """Redirect to the appropriate playlist or video URL."""
-    # NOTE future versions may have a "Thing" response model
-    try:
-        if pl := await list_playlists(url=url):
-            return RedirectResponse(url=f"/playlists/{pl[0].lm_id}")
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code != 404:
-            raise
-    if vids := await list_videos(url=url):
-        return RedirectResponse(url=f"/videos/{vids[0].oi_file_uuid}")
-    raise fastapi.HTTPException(status_code=404, detail="URL not found")
+
+@app.get("/things/{thing_id}", response_model=fe_models.ThingPage)
+async def get_thing(thing_id: str):
+    """One-call page view-model: the thing, its rel neighbors, and (for an
+    acquired video) a resolved playback URL — all inline, no per-child OI calls."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        thing_resp, related_resp = await asyncio.gather(
+            client.get(_plapi(f"/things/{thing_id}")),
+            client.get(_plapi(f"/things/{thing_id}/related")))
+    thing = pl_models.ThingRead.model_validate(_checked(thing_resp).json())
+    related = [pl_models.RelatedThing.model_validate(r) for r in _checked(related_resp).json()]
+    page = fe_models.ThingPage(**fe_models.ThingSummary.from_thing_read(thing).model_dump())
+    page.related = [
+        fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
+                                 thing=fe_models.ThingSummary.from_thing_read(r.thing))
+        for r in related]
+    if thing.container is False:
+        page.download_url = await _download_url(thing.best_oi)
+    return page
+
+
+@app.get("/things/{thing_id}/playback", response_model=fe_models.PlaybackInfo)
+async def get_playback(thing_id: str):
+    """On-demand resolve a thing's acquired media to consumer-usable URLs, so a
+    container page need not resolve every child's URL up front."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi(f"/things/{thing_id}")))
+    best_oi = pl_models.ThingRead.model_validate(resp.json()).best_oi
+    if not best_oi:
+        raise fastapi.HTTPException(status_code=404, detail="No media acquired for this thing")
+    download_url, object_url = await run_in_threadpool(_resolve_media, best_oi)
+    return fe_models.PlaybackInfo(best_oi=best_oi, download_url=download_url,
+                                  object_url=object_url)
+
+
+@app.get("/things/{thing_id}/runs", response_model=list[fe_models.RunSummary])
+async def get_thing_runs(thing_id: str):
+    """Run history for a thing, newest first (thin proxy of LMDB)."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi(f"/things/{thing_id}/runs")))
+    return [fe_models.RunSummary(**pl_models.RunRead.model_validate(r).model_dump())
+            for r in resp.json()]
+
+
+@app.patch("/things/{thing_id}", response_model=fe_models.ThingSummary)
+async def patch_thing(thing_id: str, item: fe_models.RatingPatch):
+    """Set a rating, acknowledge a permanent failure (try_on=null), or edit
+    cookies/lpm_lib soft hints. The primary path for exposing V4 ratings."""
+    payload = item.model_dump(exclude_unset=True, mode="json")
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.patch(_plapi(f"/things/{thing_id}"), json=payload))
+    return fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(resp.json()))
+
+
+@app.get("/runs/", response_model=list[fe_models.RunSummary])
+async def list_runs(limit: int = 50, success: Optional[bool] = None,
+                    in_progress: bool = False):
+    """Global recent-activity feed for the status dashboard (proxy of LMDB)."""
+    params = {"limit": limit}
+    if success is not None:
+        params["success"] = success
+    if in_progress:
+        params["in_progress"] = True
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/runs/"), params=params))
+    return [fe_models.RunSummary(**pl_models.RunActivity.model_validate(r).model_dump())
+            for r in resp.json()]
+
+
+@app.get("/url", response_model=fe_models.ThingSummary)
+async def resolve_url(u: str):
+    """Resolve a pasted URL to an existing thing (dedupe / add-helper). 404 if we
+    don't have it yet, which the SPA turns into an add prompt."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/things/"), params={"url": u}))
+    things = resp.json()
+    if not things:
+        raise fastapi.HTTPException(status_code=404, detail="URL not found")
+    return fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(things[0]))

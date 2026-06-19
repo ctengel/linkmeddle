@@ -120,6 +120,14 @@ def _read_with_ratings(thing: Thing, machine: Optional[float]) -> ThingRead:
     return tr
 
 
+def _read_thing(session: Session, thing: Thing) -> ThingRead:
+    """ThingRead for a loaded thing, computing its machine/effective ratings on read.
+
+    The single read-projection shared by every endpoint that returns one thing (get/add/patch),
+    so add/patch responses carry the same computed ratings as a GET (not the raw, unrated row)."""
+    return _read_with_ratings(thing, _machine_rating_value(session, thing))
+
+
 def _wants_download(thing: Thing, eff_rating: float) -> bool:
     """Whether the worker should acquire media for this claimed thing (§4.5 dispatch result).
 
@@ -196,7 +204,7 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
         response.status_code = status.HTTP_200_OK
-        return existing
+        return _read_thing(session, existing)
     attrs = {k: getattr(item, k) for k in xform._PROPAGATE_HINTS if getattr(item, k) is not None}
     thing = Thing(url=item.url, container=item.container,
                   human_rating=item.rating if item.rating is not None else 0.0,
@@ -210,9 +218,9 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
         if existing is None:
             raise
         response.status_code = status.HTTP_200_OK
-        return existing
+        return _read_thing(session, existing)
     session.refresh(thing)
-    return thing
+    return _read_thing(session, thing)
 
 
 @app.get("/things/", response_model=list[ThingRead])
@@ -264,7 +272,7 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
 def get_thing(thing_id: uuid.UUID, session: Session = Depends(get_session)):
     """Get one thing; fetch its rel neighbors separately via GET /things/{id}/related."""
     thing = get_thing_or_404(session, thing_id)
-    return _read_with_ratings(thing, _machine_rating_value(session, thing))
+    return _read_thing(session, thing)
 
 
 @app.get("/things/{thing_id}/related", response_model=list[RelatedThing])
@@ -343,7 +351,8 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
     session.add(thing)
     session.commit()
     session.refresh(thing)
-    return thing
+    # machine rating is stable across the patch (rels unchanged) — reuse it, no extra query.
+    return _read_with_ratings(thing, machine)
 
 
 # --- Jobs / runs: Stage-1 ingest (Task 1.1) -------------------------------------------

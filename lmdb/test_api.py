@@ -78,6 +78,9 @@ def test_add_thing_rating_override(client, value):
                                       "bucket": "b"})
     assert r.status_code == 201
     assert r.json()["human_rating"] == value
+    # add response carries computed ratings like a read: human is authoritative (§2.4)
+    assert r.json()["effective_rating"] == value
+    assert r.json()["machine_rating"] is None
 
 
 def test_add_thing_container_override(client):
@@ -211,6 +214,7 @@ def test_patch_rating_positive(client):
     r = client.patch(f"/things/{tid}", json={"human_rating": 2.0})
     assert r.status_code == 200
     assert r.json()["human_rating"] == 2.0
+    assert r.json()["effective_rating"] == 2.0  # patch response computes ratings like a read
 
 
 def test_patch_rating_numeric(client):

@@ -2,100 +2,122 @@
 <html>
 <head>
   <meta charset="UTF-8" />
-  <title>Video Playlist GUI</title>
+  <title>LinkMeddle</title>
   <style>
-    body { font-family: Arial; margin: 0; background:#f5f5f5; }
-    header { background:#111; color:white; padding:10px 20px; }
-    header h1 { margin:0; cursor:pointer; }
-    .container { padding:20px; }
-    .card { background:white; padding:15px; margin-bottom:15px; border-radius:6px; }
-    .row { display:flex; gap:20px; }
-    .sidebar { width:300px; }
-    .main { flex:1; }
-    .video-row { padding:8px 0; border-bottom:1px solid #eee; cursor:pointer; }
-    .video-row:hover { background:#fafafa; }
-    button { padding:6px 12px; cursor:pointer; }
-    input { padding:6px; width:300px; }
-    .muted { color:#777; font-size:12px; }
-    .placeholder { opacity:0.5; }
-    .active { font-weight:bold; }
-    video { width:100%; max-height:500px; background:black; }
+    body { font-family: Arial; margin: 0; background: #f5f5f5; }
+    header { background: #111; color: white; padding: 10px 20px; }
+    header h1 { margin: 0; cursor: pointer; display: inline; }
+    .container { padding: 20px; }
+    .card { background: white; padding: 15px; margin-bottom: 15px; border-radius: 6px; }
+    .row { display: flex; gap: 20px; }
+    .sidebar { width: 300px; flex-shrink: 0; }
+    .main { flex: 1; min-width: 0; }
+    .item-row { padding: 8px 0; border-bottom: 1px solid #eee; cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .item-row:hover { background: #fafafa; }
+    .item-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item-row.active { font-weight: bold; }
+    button { padding: 6px 12px; cursor: pointer; margin-right: 4px; }
+    input[type=text] { padding: 6px; width: 300px; }
+    textarea { padding: 6px; }
+    .muted { color: #777; font-size: 12px; }
+    .placeholder { opacity: 0.5; text-align: center; padding: 40px; }
+    video { width: 100%; max-height: 500px; background: black; display: block; }
+    /* Badges */
+    .badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+    .badge-pl   { background: #ddf; color: #336; }
+    .badge-ch   { background: #dfd; color: #363; }
+    .badge-v    { background: #ffd; color: #663; }
+    .badge-ok   { background: #dfd; color: #363; }
+    .badge-fail { background: #fdd; color: #633; }
+    .badge-run  { background: #ffd; color: #663; }
+    /* Rating stars */
+    .rating-widget { margin: 8px 0; line-height: 1; }
+    .star { cursor: pointer; font-size: 22px; color: #ccc; user-select: none; }
+    .star.filled { color: gold; }
+    .star.machine { color: #ddd; }
+    .grade-label { font-weight: bold; margin-left: 6px; font-size: 16px; }
+    .grade-label.machine { color: #999; font-style: italic; }
+    /* Grade badges on rows */
+    .g { font-size: 11px; font-weight: bold; padding: 1px 4px; border-radius: 2px; }
+    .gA { background: #dfd; color: #363; }
+    .gB { background: #dff; color: #366; }
+    .gC { background: #eee; color: #666; }
+    .gD { background: #ffd; color: #663; }
+    .gF { background: #fdd; color: #633; }
+    /* Failing indicator */
+    .failing-badge { color: red; font-weight: bold; font-size: 12px; }
   </style>
 </head>
 <body>
 
 <header>
-  <h1 onclick="goHome()">Video GUI</h1>
+  <h1 onclick="goHome()">LinkMeddle</h1>
 </header>
 
 <div id="app" class="container"></div>
 
 <script>
-/* =========================
-   CONFIG
-========================= */
+/* === CONFIG === */
 const API_BASE = "";
 
-/* =========================
-   STATE
-========================= */
-
+/* === STATE === */
 let currentVideoElement = null;
-let activePlaylistVideos = [];
-let activePlaylistId = null;
-let currentVideoId = null;
+let activePlaylistVideos = [];   // ordered UUIDs of video children in the active container
+let activeContainerId = null;    // UUID of the sidebar/autoplay container
+let activeContainerData = null;  // ThingPage of the active container
+let currentVideoId = null;       // UUID of the currently shown video
 let autoPlayEnabled = true;
 let helpOverlayVisible = false;
-let playlistCache = {};
-let currentPlaylistData = null;
-let videoDataCache = {};
+let thingCache = {};             // id → ThingPage
 
-/* =========================
-   ROUTER
-========================= */
-
+/* === ROUTER === */
 window.addEventListener("hashchange", router);
 window.addEventListener("load", router);
-renderHelpOverlay();  // is this the right place for this?
+renderHelpOverlay();
 
 function router() {
   const hash = location.hash || "#/";
-  const app = document.getElementById("app");
 
-    // Prefill route
   if (hash.startsWith("#/prefill/")) {
-    const encoded = hash.replace("#/prefill/", "");
-    const decoded = decodeURIComponent(encoded);
-    renderHome(decoded);
+    renderHome(decodeURIComponent(hash.replace("#/prefill/", "")));
     return;
   }
 
-  if (hash.startsWith("#/playlist/")) {
-    const id = hash.split("/")[2];
-    renderPlaylistPage(id);
-  } 
-  else if (hash.startsWith("#/video/")) {
+  if (hash.startsWith("#/thing/")) {
     const parts = hash.split("/");
-    const fileId = parts[2].split("?")[0];
-    const params = new URLSearchParams(location.hash.split("?")[1]);
-    const playlistId = params.get("playlist");
-    renderVideoPage(fileId, playlistId);
-  } 
-  else {
-    renderHome();
+    const thingId = parts[2].split("?")[0];
+    const params = new URLSearchParams(location.hash.split("?")[1] || "");
+    renderThingPage(thingId, params.get("ctx"));
+    return;
   }
+
+  // Legacy V3 hash redirects
+  if (hash.startsWith("#/playlist/")) {
+    location.replace(`#/thing/${hash.split("/")[2]}`);
+    return;
+  }
+  if (hash.startsWith("#/video/")) {
+    const parts = hash.split("/");
+    const vid = parts[2].split("?")[0];
+    const params = new URLSearchParams(location.hash.split("?")[1] || "");
+    const pl = params.get("playlist");
+    location.replace(pl ? `#/thing/${vid}?ctx=${pl}` : `#/thing/${vid}`);
+    return;
+  }
+
+  renderHome();
 }
 
-function goHome() {
-  location.hash = "#/";
-}
+function goHome() { location.hash = "#/"; }
 
-/* =========================
-   API HELPERS
-========================= */
-
+/* === API HELPERS === */
 async function apiGet(path) {
   const res = await fetch(API_BASE + path);
+  if (!res.ok) {
+    const err = new Error(res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -105,392 +127,424 @@ async function apiPost(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
+  if (!res.ok) {
+    const err = new Error(res.statusText);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
-async function getPlaylistCached(id) {
-  if (!id) return null;
-
-  if (playlistCache[id]) {
-    return playlistCache[id];
+async function apiPatch(path, body) {
+  const res = await fetch(API_BASE + path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (!res.ok) {
+    const err = new Error(res.statusText);
+    err.status = res.status;
+    throw err;
   }
-
-  const playlist = await apiGet(`/playlists/${id}`);
-  playlistCache[id] = playlist;
-  return playlist;
+  return res.json();
 }
 
-async function getVideoCached(id) {
-  if (videoDataCache[id]) {
-    return videoDataCache[id];
-  }
-
-  const video = await apiGet(`/videos/${id}`);
-  videoDataCache[id] = video;
-  return video;
+async function getThingCached(id) {
+  if (thingCache[id]) return thingCache[id];
+  const t = await apiGet(`/things/${id}`);
+  thingCache[id] = t;
+  return t;
 }
 
-async function schedulePlaylist(url) {
+function invalidateCache(id) { delete thingCache[id]; }
+
+/* === RATINGS === */
+function gradeFor(r) {
+  if (r == null) return null;
+  if (r >= 1.5) return "A";
+  if (r >= 0.5) return "B";
+  if (r >= -0.5) return "C";
+  if (r >= -1.5) return "D";
+  return "F";
+}
+
+// Map rating float (-2..+2) to filled star count (0..5)
+function ratingToFilled(rating) {
+  if (rating == null) return 0;
+  return Math.round(rating + 3);
+}
+
+function renderRatingWidget(thing) {
+  // Prefer human_rating for display; fall back to effective_rating (machine)
+  const displayRating = thing.human_rating ?? thing.effective_rating ?? null;
+  const isMachine = thing.human_rating == null && thing.effective_rating != null;
+  const filledCount = ratingToFilled(displayRating);
+  const grade = thing.grade || gradeFor(thing.effective_rating);
+
+  const stars = [1, 2, 3, 4, 5].map(n => {
+    const filled = n <= filledCount;
+    const cls = ["star", filled ? "filled" : "", isMachine ? "machine" : ""].filter(Boolean).join(" ");
+    // star n maps to rating n-3 (-2..+2): 1→−2, 2→−1, 3→0, 4→+1, 5→+2
+    return `<span class="${cls}" onclick="rateThing('${thing.id}', ${n - 3})">${filled ? "★" : "☆"}</span>`;
+  }).join("");
+
+  const gradeCls = `grade-label${isMachine ? " machine" : ""}`;
+  const gradeStr = grade ? `<span class="${gradeCls}">${grade}</span>` : "";
+  const machineNote = isMachine ? ` <span class="muted">(machine)</span>` : "";
+  return `<div class="rating-widget">${stars}${gradeStr}${machineNote}</div>`;
+}
+
+async function rateThing(id, rating) {
   try {
-    const result = await apiPost("/playlists/", { url });
-
-    alert("Scheduled successfully.");
-
-    if (playlistCache[result.lm_id]) {
-      delete playlistCache[result.lm_id];
-    }
-
-    if (result.lm_id) {
-      location.hash = `#/playlist/${result.lm_id}`;
-    } else {
-      goHome();
-    }
-
-  } catch (err) {
-    alert("Failed to schedule playlist.");
+    await apiPatch(`/things/${id}`, { human_rating: rating });
+    invalidateCache(id);
+    router();
+  } catch {
+    alert("Failed to save rating.");
   }
 }
 
-/* =========================
-   HOME PAGE
-========================= */
+function renderGradeBadge(thing) {
+  const g = thing.grade || gradeFor(thing.effective_rating);
+  if (!g) return "";
+  return `<span class="g g${g}">${g}</span>`;
+}
 
+/* === HOME PAGE === */
 async function renderHome(prefillUrl = "") {
   const app = document.getElementById("app");
-
   app.innerHTML = `
     <div class="card">
-      <h2>Search / Add Playlist</h2>
-
+      <h2>Search / Add</h2>
       <label>
-        <input type="checkbox" id="batchToggle"
-              onchange="toggleBatchMode(this.checked)">
+        <input type="checkbox" id="batchToggle" onchange="toggleBatchMode(this.checked)">
         Batch Mode
       </label>
-
       <br/><br/>
-
       <div id="searchContainer">
-        <input id="searchInput"
-              placeholder="Paste playlist or video URL"
-              value="${prefillUrl || ""}"/>
+        <input type="text" id="searchInput" placeholder="Paste playlist or video URL"
+               value="${escapeAttr(prefillUrl)}"/>
       </div>
-
       <br/>
       <button onclick="handleSearch()">Go</button>
     </div>
 
     <div class="card">
       <h2>Bookmarklet</h2>
-      <p>Drag this to your bookmarks bar:</p>
-      <a id="bookmarkletLink" href="#">📌 Schedule in Video App</a>
+      <p>Drag to your bookmarks bar:</p>
+      <a id="bookmarkletLink" href="#">📌 Add to LinkMeddle</a>
     </div>
 
     <div class="card">
-      <h2>Current Jobs</h2>
-      <div id="currentJobs">Loading...</div>
+      <h2>Needs Rating</h2>
+      <div id="needsRating">Loading...</div>
     </div>
 
-    <!--<div class="card">
-      <h2>All Playlists</h2>
-      <div id="playlistList">Loading...</div>
-    </div>-->
+    <div class="card">
+      <h2>In Progress</h2>
+      <div id="inProgress">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h2>Recent Activity</h2>
+      <div id="recentActivity">Loading...</div>
+    </div>
   `;
 
-  loadCurrentJobs();
-  //loadPlaylists();
-
-  // Generate bookmarklet code
   const baseURL = window.location.origin + window.location.pathname;
-
-  const bookmarkletCode = `
-  javascript:(function(){
-    var target='${baseURL}';
-    var current=encodeURIComponent(window.location.href);
-    window.location.href = target + '#/prefill/' + current;
-  })();
-  `;
-
   document.getElementById("bookmarkletLink").href =
-    bookmarkletCode.replace(/\n/g,'');
+    "javascript:(function(){var t='" + baseURL + "';var c=encodeURIComponent(window.location.href);window.location.href=t+'#/prefill/'+c;})();";
 
+  loadNeedsRating();
+  loadInProgress();
+  loadRecentActivity();
+}
+
+async function loadNeedsRating() {
+  const el = document.getElementById("needsRating");
+  try {
+    const data = await apiGet("/things/?needs_rating=true&limit=10");
+    if (!data.length) { el.innerHTML = "<div class='muted'>All things rated</div>"; return; }
+    el.innerHTML = data.map(t => `
+      <div class="item-row" onclick="location.hash='#/thing/${t.id}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        ${renderTypeBadge(t)}
+        <span class="muted">${escapeHtml(t.channel || "")}</span>
+      </div>
+    `).join("");
+  } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
+}
+
+async function loadInProgress() {
+  const el = document.getElementById("inProgress");
+  try {
+    const data = await apiGet("/runs/?in_progress=true");
+    if (!data.length) { el.innerHTML = "<div class='muted'>No active jobs</div>"; return; }
+    el.innerHTML = data.map(renderRunRow).join("");
+  } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
+}
+
+async function loadRecentActivity() {
+  const el = document.getElementById("recentActivity");
+  try {
+    const data = await apiGet("/runs/?limit=20");
+    if (!data.length) { el.innerHTML = "<div class='muted'>No recent activity</div>"; return; }
+    el.innerHTML = data.map(renderRunRow).join("");
+  } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
+}
+
+function renderRunRow(r) {
+  const statusBadge = r.success === null
+    ? `<span class="badge badge-run">Running</span>`
+    : r.success
+    ? `<span class="badge badge-ok">OK</span>`
+    : `<span class="badge badge-fail">Failed</span>`;
+  const time = r.starttime ? new Date(r.starttime).toLocaleString() : "";
+  return `
+    <div class="item-row" onclick="location.hash='#/thing/${r.thing_id}'">
+      <span class="title">${escapeHtml(r.thing_title || "Untitled")}</span>
+      ${renderTypeBadgeFromContainer(r.container)}${statusBadge}
+      <span class="muted">${time}</span>
+    </div>
+  `;
 }
 
 async function handleSingleURL(url) {
   try {
-    const result = await apiGet(`/url?url=${encodeURIComponent(url)}`);
-
-    if (result.lm_id) {
-      location.hash = `#/playlist/${result.lm_id}`;
-      return;
+    const result = await apiGet(`/url?u=${encodeURIComponent(url)}`);
+    location.hash = `#/thing/${result.id}`;
+  } catch (err) {
+    // 404 = not yet known; try adding it
+    try {
+      const result = await apiPost("/things/", { url });
+      if (result.id) {
+        location.hash = `#/thing/${result.id}`;
+      } else {
+        goHome();
+      }
+    } catch {
+      alert("Failed to add URL.");
     }
-
-    if (result.oi_file_uuid) {
-      location.hash = `#/video/${result.oi_file_uuid}`;
-      return;
-    }
-
-    await schedulePlaylist(url);
-
-  } catch {
-    await schedulePlaylist(url);
   }
 }
 
 async function handleBatch(urls) {
-
   const app = document.getElementById("app");
+  const div = document.createElement("div");
+  div.className = "card";
+  div.innerHTML = `<h3>Batch Progress</h3>`;
+  app.prepend(div);
 
-  const resultsDiv = document.createElement("div");
-  resultsDiv.className = "card";
-  resultsDiv.innerHTML = `<h3>Batch Scheduling Progress</h3>`;
-  app.prepend(resultsDiv);
-
-  let success = 0;
-  let failed = 0;
-
+  let success = 0, failed = 0;
   for (const url of urls) {
-
     const row = document.createElement("div");
-    row.textContent = `Scheduling: ${url}`;
-    resultsDiv.appendChild(row);
-
+    row.textContent = `Adding: ${url}`;
+    div.appendChild(row);
     try {
-      await apiPost("/playlists/", { url });
-      row.textContent = `✅ Scheduled: ${url}`;
+      await apiPost("/things/", { url });
+      row.textContent = `✅ Added: ${url}`;
       success++;
     } catch {
       row.textContent = `❌ Failed: ${url}`;
       failed++;
     }
   }
-
   const summary = document.createElement("div");
-  summary.innerHTML = `
-    <br/>
-    <b>Done.</b><br/>
-    Success: ${success}<br/>
-    Failed: ${failed}
-  `;
-  resultsDiv.appendChild(summary);
-
-  loadPlaylists(); // refresh list
+  summary.innerHTML = `<br/><b>Done.</b> Success: ${success} / Failed: ${failed}`;
+  div.appendChild(summary);
 }
 
 async function handleSearch() {
   const input = document.getElementById("searchInput").value.trim();
   if (!input) return;
-
-  const batchEnabled =
-    document.getElementById("batchToggle")?.checked;
-
+  const batchEnabled = document.getElementById("batchToggle")?.checked;
   if (!batchEnabled) {
     await handleSingleURL(input);
   } else {
-    const urls = input
-      .split("\n")
-      .map(u => u.trim())
-      .filter(Boolean);
-
+    const urls = input.split("\n").map(u => u.trim()).filter(Boolean);
     await handleBatch(urls);
   }
 }
 
-async function loadCurrentJobs() {
-  const data = await apiGet("/playlists/?current=true");
-  const container = document.getElementById("currentJobs");
-
-  if (!data.length) {
-    container.innerHTML = "<div class='muted'>No active jobs</div>";
-    return;
-  }
-
-  container.innerHTML = data.map(p => `
-    <div onclick="location.hash='#/playlist/${p.lm_id}'" class="video-row">
-      <b>${p.title || "Untitled"}</b><br/>
-      <span class="muted">URL: ${p.url}</span>
-    </div>
-  `).join("");
-}
-
-async function loadPlaylists() {
-  const data = await apiGet("/playlists/");
-  const container = document.getElementById("playlistList");
-
-  container.innerHTML = data.map(p => `
-    <div class="video-row" onclick="location.hash='#/playlist/${p.lm_id}'">
-      ${p.title || "Untitled"} 
-      <span class="muted">(${p.channel || "Unknown"})</span>
-    </div>
-  `).join("");
-}
-
-/* =========================
-   PLAYLIST PAGE
-========================= */
-
-async function renderPlaylistPage(id) {
-  const app = document.getElementById("app");
-  const playlist = await getPlaylistCached(id);
-
-  app.innerHTML = `
-    <div class="card">
-      <h2>${playlist.title || "Untitled Playlist"}</h2>
-      <div class="muted">
-        Channel: ${playlist.channel || "Unknown"}<br/>
-        Total Videos: ${playlist.total_videos}<br/>
-        Last Run: ${playlist.last_run || "N/A"}<br/>
-        Next Run: ${playlist.next_run || "N/A"}<br/>
-        URL: <a href="${playlist.url}" target="_blank">${playlist.url}</a>
-      </div>
-        <button onclick="schedulePlaylist('${playlist.url}')">
-          Schedule Today
-        </button>
-    </div>
-
-    <div class="card">
-      <h3>Videos</h3>
-      <div>
-        ${playlist.videos.map(v => `
-          <div class="video-row"
-               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${playlist.lm_id}'">
-            ${v.title || "Untitled"}
-            <span class="muted">
-              ${v.channel || ""} 
-              ${v.file_available ? "" : "(Not Downloaded)"}
-            </span><br />
-            <span class="muted">URL: ${v.url}</span>
-          </div>
-        `).join("")}
-      </div>
-    </div>
-  `;
-}
-
-/* =========================
-   VIDEO PAGE
-========================= */
-
-async function renderVideoPage(fileId, playlistId) {
-
-  // If already on video page and same playlist → update in place
-  if (
-    currentPlaylistData &&
-    playlistId &&
-    currentPlaylistData.lm_id == playlistId &&
-    document.getElementById("videoPlayer")
-  ) {
-    await updateVideoInPlace(fileId);
-    return;
-  }
-
-  // Otherwise full render
-  const app = document.getElementById("app");
-
-  const video = await getVideoCached(fileId);
-
-  currentVideoId = fileId;
-  activePlaylistId = playlistId || null;
-
-  if (playlistId) {
-    currentPlaylistData = await getPlaylistCached(playlistId);
-    activePlaylistVideos = currentPlaylistData.videos.map(v => v.oi_file_uuid);
+function toggleBatchMode(enabled) {
+  const c = document.getElementById("searchContainer");
+  if (enabled) {
+    c.innerHTML = `<textarea id="searchInput" rows="6" style="width:100%;"
+                             placeholder="Enter one URL per line"></textarea>`;
   } else {
-    currentPlaylistData = null;
+    c.innerHTML = `<input type="text" id="searchInput"
+                          placeholder="Paste playlist or video URL"/>`;
+  }
+}
+
+/* === THING PAGE === */
+async function renderThingPage(thingId, ctxId) {
+  // In-place update: same container context, already have a video player
+  if (
+    ctxId &&
+    activeContainerData &&
+    activeContainerData.id === ctxId &&
+    document.getElementById("videoArea") &&
+    document.getElementById("currentThingInfo")
+  ) {
+    await updateVideoInPlace(thingId);
+    return;
+  }
+
+  const page = await getThingCached(thingId);
+  currentVideoId = thingId;
+  activeContainerId = ctxId || null;
+
+  if (ctxId) {
+    activeContainerData = await getThingCached(ctxId);
+    activePlaylistVideos = childVideoIds(activeContainerData);
+  } else {
+    activeContainerData = null;
     activePlaylistVideos = [];
   }
 
-  app.innerHTML = `
+  const isVideo = page.container === false;
+  const isContainer = page.container === true;
+  const children = (page.related || []).filter(r => r.direction === "child");
+  const parents = (page.related || []).filter(r => r.direction === "parent");
+
+  document.getElementById("app").innerHTML = `
     <div class="row">
       <div class="main">
 
-        <div class="card">
-          ${video.file_available
-            ? `<video id="videoPlayer" controls src="${video.object_url}"></video>`
-            : `<div class="placeholder">File not downloaded yet</div>`
-          }
+        ${isVideo ? `<div class="card" id="videoArea">${renderVideoHTML(page)}</div>` : ""}
+
+        <div class="card" id="currentThingInfo">
+          ${renderThingInfoHTML(page, isContainer)}
         </div>
 
-        <div class="card">
-          <h2 id="videoTitle">${video.title || "Untitled Video"}</h2>
-          <div class="muted" id="videoChannel">
-            Channel: ${video.channel || "Unknown"}
-          </div>
-        </div>
-
-        <div class="card placeholder">
-          <h3>⭐ Rating (Coming Soon)</h3>
-          ☆ ☆ ☆ ☆ ☆
-        </div>
-
-        <div class="card">
-          <h3>Related Playlists</h3>
-          <div id="relatedPlaylists">
-            ${video.playlists.map(p => `
-              <div class="video-row"
-                   onclick="location.hash='#/playlist/${p.lm_id}'">
-                ${p.title || "Untitled"}
-              </div>
-            `).join("")}
-          </div>
-        </div>
+        ${isContainer ? renderChildrenCard(children, page.id) : ""}
+        ${isVideo && parents.length ? renderParentsCard(parents) : ""}
 
       </div>
-
-      ${renderSidebarHTML(fileId)}
+      ${renderSidebarHTML(thingId)}
     </div>
   `;
 
   registerVideoPlayer();
 }
 
+function childVideoIds(containerPage) {
+  return (containerPage.related || [])
+    .filter(r => r.direction === "child" && r.thing.container === false)
+    .map(r => r.thing.id);
+}
+
+function renderVideoHTML(page) {
+  if (page.file_available && page.download_url) {
+    return `<video id="videoPlayer" controls src="${escapeAttr(page.download_url)}"></video>`;
+  }
+  return `<div class="placeholder">File not downloaded yet</div>`;
+}
+
+function renderThingInfoHTML(thing, isContainer) {
+  const isFailing = isThingFailing(thing);
+  const statusLines = [];
+  if (thing.try_on) statusLines.push(`Next run: ${thing.try_on}`);
+  if (thing.last_success_dt) statusLines.push(`Last success: ${fmtDt(thing.last_success_dt)}`);
+  if (thing.last_failure_dt) {
+    const s = `Last failure: ${fmtDt(thing.last_failure_dt)}`;
+    statusLines.push(isFailing ? `<span class="failing-badge">${s}</span>` : s);
+  }
+
+  return `
+    <h2>${escapeHtml(thing.title || "Untitled")}</h2>
+    <div class="muted">
+      ${renderTypeBadge(thing)}
+      ${thing.channel ? `Channel: ${escapeHtml(thing.channel)}<br/>` : ""}
+      ${thing.url ? `URL: <a href="${escapeAttr(thing.url)}" target="_blank">${escapeHtml(thing.url)}</a><br/>` : ""}
+      ${statusLines.length ? statusLines.join("<br/>") : ""}
+    </div>
+    ${renderRatingWidget(thing)}
+    <div style="margin-top:8px;">
+      ${isContainer ? `<button onclick="rescheduleToday('${thing.id}')">Run Today</button>` : ""}
+      ${isFailing ? `<button onclick="permafailAck('${thing.id}')">Permafail Ack</button>` : ""}
+    </div>
+  `;
+}
+
+function renderChildrenCard(children, containerId) {
+  if (!children.length) {
+    return `<div class="card"><div class="muted">No items yet</div></div>`;
+  }
+  const rows = children.map(r => {
+    const t = r.thing;
+    const ctx = t.container !== true ? `?ctx=${containerId}` : "";
+    return `
+      <div class="item-row" onclick="location.hash='#/thing/${t.id}${ctx}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        ${renderTypeBadge(t)}
+        ${renderGradeBadge(t)}
+        ${!t.file_available && t.container === false ? `<span class="muted">(no file)</span>` : ""}
+      </div>
+    `;
+  }).join("");
+  return `<div class="card"><h3>Contents (${children.length})</h3>${rows}</div>`;
+}
+
+function renderParentsCard(parents) {
+  const rows = parents.map(r => {
+    const t = r.thing;
+    return `
+      <div class="item-row" onclick="location.hash='#/thing/${t.id}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        ${renderTypeBadge(t)}
+        ${r.channel ? `<span class="badge badge-ch">channel</span>` : ""}
+      </div>
+    `;
+  }).join("");
+  return `<div class="card"><h3>In Playlists</h3>${rows}</div>`;
+}
+
 function renderSidebarHTML(activeId) {
-  if (!currentPlaylistData) return "";
+  if (!activeContainerData) return "";
+  const videoChildren = (activeContainerData.related || [])
+    .filter(r => r.direction === "child" && r.thing.container === false);
+  if (!videoChildren.length) return "";
+
+  const rows = videoChildren.map(r => {
+    const t = r.thing;
+    const isActive = t.id === activeId;
+    return `
+      <div class="item-row ${isActive ? "active" : ""}"
+           onclick="location.hash='#/thing/${t.id}?ctx=${activeContainerData.id}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        ${renderGradeBadge(t)}
+      </div>
+    `;
+  }).join("");
 
   return `
     <div class="card sidebar">
-      <h3>Active Playlist</h3>
-      <div id="playlistSidebar">
-        ${currentPlaylistData.videos.map(v => `
-          <div class="video-row ${v.oi_file_uuid === activeId ? "active" : ""}"
-               onclick="location.hash='#/video/${v.oi_file_uuid}?playlist=${currentPlaylistData.lm_id}'">
-            ${v.title || "Untitled"}
-          </div>
-        `).join("")}
-      </div>
+      <h3>${escapeHtml(activeContainerData.title || "Playlist")}</h3>
+      <div id="playlistSidebar">${rows}</div>
     </div>
   `;
 }
 
 async function updateVideoInPlace(newVideoId) {
-
-  const video = await getVideoCached(newVideoId);
-
+  const page = await getThingCached(newVideoId);
   currentVideoId = newVideoId;
 
-  const videoEl = document.getElementById("videoPlayer");
-  const titleEl = document.getElementById("videoTitle");
-  const channelEl = document.getElementById("videoChannel");
+  const videoArea = document.getElementById("videoArea");
+  if (videoArea) videoArea.innerHTML = renderVideoHTML(page);
 
-  if (videoEl && video.file_available) {
-    videoEl.src = video.object_url;
-    videoEl.load();
-    videoEl.play();
-  }
+  const infoEl = document.getElementById("currentThingInfo");
+  if (infoEl) infoEl.innerHTML = renderThingInfoHTML(page, false);
 
-  if (titleEl) titleEl.textContent = video.title || "Untitled Video";
-  if (channelEl) channelEl.textContent = "Channel: " + (video.channel || "Unknown");
-
-  // Update active highlight
+  // Update sidebar highlight
   const sidebar = document.getElementById("playlistSidebar");
   if (sidebar) {
-    Array.from(sidebar.children).forEach(el => {
-      el.classList.remove("active");
-    });
-
-    const activeIndex = activePlaylistVideos.indexOf(newVideoId);
-    if (activeIndex !== -1) {
-      sidebar.children[activeIndex].classList.add("active");
+    sidebar.querySelectorAll(".item-row").forEach(el => el.classList.remove("active"));
+    const idx = activePlaylistVideos.indexOf(newVideoId);
+    if (idx !== -1) {
+      const rows = sidebar.querySelectorAll(".item-row");
+      if (rows[idx]) rows[idx].classList.add("active");
     }
   }
 
@@ -499,158 +553,105 @@ async function updateVideoInPlace(newVideoId) {
 
 function registerVideoPlayer() {
   currentVideoElement = document.getElementById("videoPlayer");
-
   if (currentVideoElement && activePlaylistVideos.length) {
     currentVideoElement.onended = () => {
-      console.log("Video ended");
-      if (autoPlayEnabled) {
-        navigatePlaylist(1);
-      }
+      if (autoPlayEnabled) navigatePlaylist(1);
     };
-  }
-} 
-
-/* =========================
-   KEYBOARD SHORTCUTS & HELP OVERLAY
-========================= */
-
-
-document.addEventListener("keydown", (e) => {
-  // Don't trigger shortcuts when typing in input fields
-  if (
-    ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) &&
-    e.key !== "?"
-  ) return;
-  const video = currentVideoElement;
- 
-  console.log("Key pressed:", e.key);
-
-  switch (e.key.toLowerCase()) {
-
-    // Play / Pause
-    case " ":
-    case "k":
-      if (video) {
-        e.preventDefault();
-        video.paused ? video.play() : video.pause();
-      }
-      break;
-
-    // Back 10 seconds
-    case "j":
-      if (video) {
-        video.currentTime = Math.max(0, video.currentTime - 10);
-      }
-      break;
-
-    // Forward 10 seconds
-    case "l":
-      if (video) {
-        video.currentTime = Math.min(video.duration, video.currentTime + 10);
-      }
-      break;
-
-    // Previous video
-    case "arrowleft":
-      navigatePlaylist(-1);
-      break;
-
-    // Next video
-    case "arrowright":
-      navigatePlaylist(1);
-      break;
-
-    // Fullscreen
-    case "f":
-      if (video) {
-        if (!document.fullscreenElement) {
-          video.requestFullscreen();
-        } else {
-          document.exitFullscreen();
-        }
-      }
-      break;
-
-    // Mute
-    case "m":
-      if (video) {
-        video.muted = !video.muted;
-      }
-      break;
-
-    // Go Home
-    case "home":
-      goHome();
-      break;
-    
-    case "?":
-      toggleHelpOverlay();
-      break;
-  }
-});
-
-function navigatePlaylist(direction) {
-
-  console.log("Navigating playlist, direction:", direction, currentVideoId);
-
-  if (!activePlaylistVideos.length || !currentVideoId) return;
-
-  const index = activePlaylistVideos.indexOf(currentVideoId);
-  if (index === -1) return;
-
-  const nextIndex = index + direction;
-
-  if (nextIndex >= 0 && nextIndex < activePlaylistVideos.length) {
-    const nextVideoId = activePlaylistVideos[nextIndex];
-    location.hash = `#/video/${nextVideoId}?playlist=${activePlaylistId}`;
   }
 }
 
+async function rescheduleToday(id) {
+  const today = new Date().toISOString().split("T")[0];
+  try {
+    await apiPatch(`/things/${id}`, { try_on: today });
+    invalidateCache(id);
+    router();
+  } catch { alert("Failed to reschedule."); }
+}
+
+async function permafailAck(id) {
+  // Explicitly send try_on: null so the BFF includes it in exclude_unset payload
+  try {
+    await apiPatch(`/things/${id}`, { try_on: null });
+    invalidateCache(id);
+    router();
+  } catch { alert("Failed to acknowledge."); }
+}
+
+/* === NAVIGATION === */
+function navigatePlaylist(direction) {
+  if (!activePlaylistVideos.length || !currentVideoId) return;
+  const idx = activePlaylistVideos.indexOf(currentVideoId);
+  if (idx === -1) return;
+  const next = idx + direction;
+  if (next >= 0 && next < activePlaylistVideos.length) {
+    location.hash = `#/thing/${activePlaylistVideos[next]}?ctx=${activeContainerId}`;
+  }
+}
+
+/* === KEYBOARD SHORTCUTS === */
+document.addEventListener("keydown", (e) => {
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) && e.key !== "?") return;
+  const video = currentVideoElement;
+
+  switch (e.key.toLowerCase()) {
+    case " ":
+    case "k":
+      if (video) { e.preventDefault(); video.paused ? video.play() : video.pause(); }
+      break;
+    case "j":
+      if (video) video.currentTime = Math.max(0, video.currentTime - 10);
+      break;
+    case "l":
+      if (video) video.currentTime = Math.min(video.duration, video.currentTime + 10);
+      break;
+    case "arrowleft":  navigatePlaylist(-1); break;
+    case "arrowright": navigatePlaylist(1);  break;
+    case "f":
+      if (video) {
+        document.fullscreenElement ? document.exitFullscreen() : video.requestFullscreen();
+      }
+      break;
+    case "m":
+      if (video) video.muted = !video.muted;
+      break;
+    case "home": goHome(); break;
+    case "?":    toggleHelpOverlay(); break;
+  }
+});
+
+/* === HELP OVERLAY === */
 function renderHelpOverlay() {
   if (document.getElementById("shortcutOverlay")) return;
-
   const overlay = document.createElement("div");
   overlay.id = "shortcutOverlay";
-  overlay.style.position = "fixed";
-  overlay.style.top = "0";
-  overlay.style.left = "0";
-  overlay.style.width = "100%";
-  overlay.style.height = "100%";
-  overlay.style.background = "rgba(0,0,0,0.85)";
-  overlay.style.color = "white";
-  overlay.style.display = "none";
-  overlay.style.zIndex = "9999";
-  overlay.style.padding = "40px";
-  overlay.style.overflow = "auto";
-
+  Object.assign(overlay.style, {
+    position: "fixed", top: "0", left: "0", width: "100%", height: "100%",
+    background: "rgba(0,0,0,0.85)", color: "white", display: "none",
+    zIndex: "9999", padding: "40px", overflow: "auto", boxSizing: "border-box"
+  });
   overlay.innerHTML = `
     <h2>Keyboard Shortcuts</h2>
-    <table style="width:100%; max-width:600px;">
+    <table style="width:100%;max-width:600px;border-spacing:8px;">
       <tr><td>Space / K</td><td>Play / Pause</td></tr>
       <tr><td>J</td><td>Back 10 seconds</td></tr>
       <tr><td>L</td><td>Forward 10 seconds</td></tr>
-      <tr><td>←</td><td>Previous video</td></tr>
-      <tr><td>→</td><td>Next video</td></tr>
+      <tr><td>← →</td><td>Previous / Next video</td></tr>
       <tr><td>F</td><td>Fullscreen</td></tr>
       <tr><td>M</td><td>Mute</td></tr>
       <tr><td>Home</td><td>Go to homepage</td></tr>
       <tr><td>?</td><td>Toggle this help</td></tr>
     </table>
-
     <br/>
-
     <label>
       <input type="checkbox" id="autoPlayToggle" ${autoPlayEnabled ? "checked" : ""}/>
       Auto-play next video
     </label>
-
     <br/><br/>
     <button onclick="toggleHelpOverlay()">Close</button>
   `;
-
   document.body.appendChild(overlay);
-
-  document.getElementById("autoPlayToggle").addEventListener("change", (e) => {
+  document.getElementById("autoPlayToggle").addEventListener("change", e => {
     autoPlayEnabled = e.target.checked;
   });
 }
@@ -658,29 +659,48 @@ function renderHelpOverlay() {
 function toggleHelpOverlay() {
   const overlay = document.getElementById("shortcutOverlay");
   if (!overlay) return;
-
   helpOverlayVisible = !helpOverlayVisible;
   overlay.style.display = helpOverlayVisible ? "block" : "none";
 }
 
-function toggleBatchMode(enabled) {
-  const container = document.getElementById("searchContainer");
-
-  if (enabled) {
-    container.innerHTML = `
-      <textarea id="searchInput"
-                rows="6"
-                style="width:100%;"
-                placeholder="Enter one URL per line"></textarea>
-    `;
-  } else {
-    container.innerHTML = `
-      <input id="searchInput"
-             placeholder="Paste playlist or video URL"/>
-    `;
-  }
+/* === UTILITIES === */
+function renderTypeBadge(thing) {
+  return renderTypeBadgeFromContainer(thing.container, thing.kind);
 }
 
+function renderTypeBadgeFromContainer(container, kind) {
+  if (container === true) {
+    if (kind === "channel") return `<span class="badge badge-ch">CH</span>`;
+    return `<span class="badge badge-pl">PL</span>`;
+  }
+  if (container === false) return `<span class="badge badge-v">V</span>`;
+  return "";
+}
+
+function isThingFailing(thing) {
+  if (!thing.last_failure_dt) return false;
+  if (!thing.last_success_dt) return true;
+  return new Date(thing.last_failure_dt) > new Date(thing.last_success_dt);
+}
+
+function fmtDt(dt) {
+  if (!dt) return "";
+  return new Date(dt).toLocaleString();
+}
+
+function escapeHtml(str) {
+  if (str == null) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function escapeAttr(str) {
+  if (str == null) return "";
+  return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 </script>
 
 </body>
