@@ -108,7 +108,7 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
 @app.get("/things/{thing_id}", response_model=fe_models.ThingPage)
 async def get_thing(thing_id: str):
     """One-call page view-model: the thing, its rel neighbors, and (for an
-    acquired video) a resolved playback URL — all inline, no per-child OI calls."""
+    acquired thing) its resolved playback URL — all inline, no per-child OI calls."""
     async with httpx.AsyncClient(timeout=5) as client:
         thing_resp, related_resp = await asyncio.gather(
             client.get(_plapi(f"/things/{thing_id}")),
@@ -120,8 +120,12 @@ async def get_thing(thing_id: str):
         fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
                                  thing=fe_models.ThingSummary.from_thing_read(r.thing))
         for r in related]
-    # download_url is resolved lazily by the SPA via /things/{id}/playback (current video +
-    # a 1-2 prefetch), not eagerly here — a container page must not presign every child's OI URL.
+    # Resolve only the requested thing's OI URL inline (one cheap call; containers have no
+    # best_oi so this is a no-op for them). The `related` neighbors are left unresolved — a
+    # container page must not presign every child's OI URL; the SPA prefetches those it needs
+    # via the dedicated /things/{id}/playback endpoint.
+    if thing.best_oi:
+        page.download_url, _ = await run_in_threadpool(_resolve_media, thing.best_oi)
     return page
 
 

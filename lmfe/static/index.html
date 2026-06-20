@@ -426,10 +426,8 @@ async function renderThingPage(thingId, ctxId) {
   const children = (page.related || []).filter(r => r.direction === "child");
   const parents = (page.related || []).filter(r => r.direction === "parent");
 
-  // Resolve this video's playback URL lazily (the page view-model no longer carries it).
-  if (isVideo && page.file_available) {
-    page.download_url = await getPlaybackCached(thingId);
-  }
+  // page.download_url arrives inline from GET /things/{id} (the single-thing endpoint
+  // resolves the requested thing's OI URL). No separate /playback call for the current video.
 
   document.getElementById("app").innerHTML = `
     <div class="row">
@@ -552,7 +550,12 @@ function renderSidebarHTML(activeId) {
 }
 
 async function updateVideoInPlace(newVideoId) {
-  const page = await getThingCached(newVideoId);
+  // We already hold this child's metadata in the active container's `related` list, so render
+  // from that cached summary instead of re-fetching the full page; only the OI URL is fetched,
+  // via the dedicated /playback endpoint (usually a prefetch cache hit). Fall back to a full
+  // page fetch only if the child isn't found in the container.
+  const rel = (activeContainerData?.related || []).find(r => r.thing.id === newVideoId);
+  const page = rel ? { ...rel.thing } : await getThingCached(newVideoId);
   currentVideoId = newVideoId;
 
   if (page.file_available) page.download_url = await getPlaybackCached(newVideoId);
