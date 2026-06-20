@@ -110,21 +110,13 @@ def test_add_thing_idempotent(client):
     assert r2.json()["bucket"] == "first"    # bucket is immutable ([A10])
 
 
-def test_add_thing_existing_backfills_container(client):
-    # Idempotent on URL, but a container hint still classifies an unknown (NULL->value).
+def test_add_thing_existing_ignores_container_hint(client):
+    # Idempotent on URL returns the existing thing as-is; container hint in re-add is ignored.
     r1 = client.post("/things/", json={"url": "http://example/bf", "bucket": "b"})
     assert r1.status_code == 201 and r1.json()["container"] is None
     r2 = client.post("/things/", json={"url": "http://example/bf", "bucket": "b",
                                        "container": True})
-    assert r2.status_code == 200 and r2.json()["container"] is True
-
-
-def test_add_thing_existing_container_switch_conflict(client):
-    # Switching an already-set container via re-add is a 409 (set once, never flipped).
-    client.post("/things/", json={"url": "http://example/sw", "container": False, "bucket": "b"})
-    r = client.post("/things/", json={"url": "http://example/sw", "container": True, "bucket": "b"})
-    assert r.status_code == 409
-    assert client.get("/things/", params={"url": "http://example/sw"}).json()[0]["container"] is False
+    assert r2.status_code == 200 and r2.json()["container"] is None  # unchanged; use PATCH to modify
 
 
 # --- list / search ---------------------------------------------------------------------

@@ -210,20 +210,12 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     #153); channel-ness is discovered (attrs.kind) on the pull, not declared here. `bucket`
     (OI storage home) is required — no server default ([A10]). Optional `cookies`/`lpm_lib`
     are stored as soft hints in `attrs` ([A11]). extractor_key/native_id are filled in later by
-    the worker. Idempotent on URL (returns the existing thing with 200, bucket unchanged).
+    the worker. Idempotent on URL: returns the existing thing as-is with 200 (use PATCH to modify).
     """
-    def _existing(found: Thing):
-        # Idempotent on URL: return the existing thing (200), but still honor a container hint —
-        # backfill NULL->value or 409 on a switch (the same rule as PATCH, [#153]).
-        _set_container_hint(found, item.container)
-        session.commit()
-        session.refresh(found)
-        response.status_code = status.HTTP_200_OK
-        return _read_thing(session, found)
-
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
-        return _existing(existing)
+        response.status_code = status.HTTP_200_OK
+        return _read_thing(session, existing)
     attrs = {k: getattr(item, k) for k in xform._PROPAGATE_HINTS if getattr(item, k) is not None}
     thing = Thing(url=item.url, container=item.container,
                   human_rating=item.rating if item.rating is not None else 0.0,
@@ -236,7 +228,8 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
         existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
         if existing is None:
             raise
-        return _existing(existing)
+        response.status_code = status.HTTP_200_OK
+        return _read_thing(session, existing)
     session.refresh(thing)
     return _read_thing(session, thing)
 
