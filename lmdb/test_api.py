@@ -110,6 +110,23 @@ def test_add_thing_idempotent(client):
     assert r2.json()["bucket"] == "first"    # bucket is immutable ([A10])
 
 
+def test_add_thing_existing_backfills_container(client):
+    # Idempotent on URL, but a container hint still classifies an unknown (NULL->value).
+    r1 = client.post("/things/", json={"url": "http://example/bf", "bucket": "b"})
+    assert r1.status_code == 201 and r1.json()["container"] is None
+    r2 = client.post("/things/", json={"url": "http://example/bf", "bucket": "b",
+                                       "container": True})
+    assert r2.status_code == 200 and r2.json()["container"] is True
+
+
+def test_add_thing_existing_container_switch_conflict(client):
+    # Switching an already-set container via re-add is a 409 (set once, never flipped).
+    client.post("/things/", json={"url": "http://example/sw", "container": False, "bucket": "b"})
+    r = client.post("/things/", json={"url": "http://example/sw", "container": True, "bucket": "b"})
+    assert r.status_code == 409
+    assert client.get("/things/", params={"url": "http://example/sw"}).json()[0]["container"] is False
+
+
 # --- list / search ---------------------------------------------------------------------
 
 def test_list_things_empty(client):
@@ -246,6 +263,25 @@ def test_patch_soft_hints(client):
     r = client.patch(f"/things/{tid}", json={"cookies": False})
     assert r.json()["attrs"] == {"cookies": False, "lpm_lib": "x"}
     assert r.json()["human_rating"] == 1.0
+
+
+def test_patch_container_classifies_then_affirms(client):
+    # NULL->value classifies an unknown; re-asserting the same value is a no-op (200).
+    tid = client.post("/things/", json={"url": "http://example/pc", "bucket": "b"}).json()["id"]
+    assert client.get(f"/things/{tid}").json()["container"] is None
+    r = client.patch(f"/things/{tid}", json={"container": True})
+    assert r.status_code == 200 and r.json()["container"] is True
+    r = client.patch(f"/things/{tid}", json={"container": True})  # affirm same value
+    assert r.status_code == 200 and r.json()["container"] is True
+
+
+def test_patch_container_switch_conflict(client):
+    # Switching a set value (True<->False) is a 409; the stored value is untouched.
+    tid = client.post("/things/", json={"url": "http://example/pcsw", "container": False,
+                                        "bucket": "b"}).json()["id"]
+    r = client.patch(f"/things/{tid}", json={"container": True})
+    assert r.status_code == 409
+    assert client.get(f"/things/{tid}").json()["container"] is False
 
 
 # --- patch: raise-to-eligible try_on side-effect (Task 2.1, §2.5) ----------------------
@@ -572,7 +608,7 @@ def _chan_payload(url="http://example/chan/ingest", native="chanX",
 
     Each direct video's uploader matches the container's identity (the channel uploaded it),
     so fan-out emits a single uploader (`channel=True`) edge, no membership edge. Sub-playlists
-    become `container=True` stubs pulled on their own later (recursion).
+    are `container=True` members in the same `entries` list, pulled on their own later.
     """
     chan = models.UlChan(native_id=native, title="The Channel", url=url)
     pl = models.PlaylistFull(
@@ -582,10 +618,10 @@ def _chan_payload(url="http://example/chan/ingest", native="chanX",
         entries=[models.VidFull(
             native_id=f"cv{i}", title=f"CVid {i}", url=f"http://example/cv/{i}",
             extractor_key="youtube", channel=chan,      # uploaded BY this channel
-        ) for i in range(n_videos)],
-        child_playlists=[models.PlaylistFull(
-            url=f"http://example/chan/{native}/pl{j}", native_id=f"{native}pl{j}",
-            title=f"Sub PL {j}", extractor_key="youtube", channel=chan,
+        ) for i in range(n_videos)] + [models.VidFull(
+            native_id=f"{native}pl{j}", title=f"Sub PL {j}", container=True,
+            url=f"http://example/chan/{native}/pl{j}",
+            extractor_key="youtube", channel=chan,
         ) for j in range(n_playlists)],
     )
     return pl.model_dump(mode="json")
@@ -856,6 +892,75 @@ def test_channel_pull_videos_and_subplaylists(client):
     assert job["download"] is False and job["thing"]["id"] in {s["id"] for s in subs}
 
 
+def test_subcontainer_edge_upgrades_on_own_pull(client):
+    # A sub-container first seen with an unknown owner is a channel=False membership edge;
+    # when the sub-container is pulled itself and reveals the listing parent as its owner,
+    # the monotonic rel upsert raises that same (parent, child) edge False -> True.
+    c_url = "http://example/chanupg"
+    cid, rid = _claimed_run(client, c_url)
+    sub_url = "http://example/chanupg/subpl"
+    c_payload = models.PlaylistFull(
+        url=c_url, native_id="cupg", title="Chan", extractor_key="youtube",
+        playlist_count=1,
+        channel=models.UlChan(),                          # no top-level owner
+        entries=[models.VidFull(native_id="subupg", url=sub_url, title="Sub",
+                                extractor_key="youtube", container=True)],  # unknown owner
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": c_payload}).status_code == 200
+
+    # discovery edge: C -> S is channel=False membership
+    kids = [e for e in client.get(f"/things/{cid}/related").json() if e["direction"] == "child"]
+    sub = next(e for e in kids if e["thing"]["container"] is True)
+    assert sub["channel"] is False
+    sid = sub["thing"]["id"]
+
+    # pull S itself; its own uploader resolves (by url) to C -> owner edge C -> S channel=True
+    sjob = _claim(client)
+    assert sjob["thing"]["id"] == sid and sjob["download"] is False
+    s_payload = models.PlaylistFull(
+        url=sub_url, native_id="subupg", title="Sub", extractor_key="youtube",
+        playlist_count=0,
+        channel=models.UlChan(native_id="cupg", url=c_url),   # owned by C
+        entries=[],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{sjob['run_id']}/result",
+                       json={"playlist": s_payload}).status_code == 200
+
+    # the same C -> S edge is upgraded to channel=True (monotonic OR-upsert)
+    parents = client.get(f"/things/{sid}/related", params={"direction": "parent"}).json()
+    c_edge = next(e for e in parents if e["thing"]["id"] == cid)
+    assert c_edge["channel"] is True
+
+
+def test_curated_subcontainer_membership_and_owner(client):
+    # A curated container listing someone else's sub-playlist: channel=False membership edge
+    # from the parent + the sub's real owner as a kind='channel' thing with channel=True.
+    p_url = "http://example/curated"
+    pid, rid = _claimed_run(client, p_url)
+    sub_url = "http://example/x/subpl"
+    payload = models.PlaylistFull(
+        url=p_url, native_id="curated", title="Curated", extractor_key="youtube",
+        playlist_count=1,
+        channel=models.UlChan(),
+        entries=[models.VidFull(native_id="xsub", url=sub_url, title="X Sub",
+                                extractor_key="youtube", container=True,
+                                channel=models.UlChan(native_id="xowner", title="X",
+                                                      url="http://example/xowner"))],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    kids = [e for e in client.get(f"/things/{pid}/related").json() if e["direction"] == "child"]
+    sub = next(e for e in kids if e["thing"]["container"] is True)
+    assert sub["channel"] is False                        # membership: parent doesn't own it
+    sid = sub["thing"]["id"]
+
+    # the sub's owner X exists as a channel thing with a channel=True edge to the sub
+    parents = client.get(f"/things/{sid}/related", params={"direction": "parent"}).json()
+    owner = next(e for e in parents if e["channel"] is True)
+    assert owner["thing"]["url"] == "http://example/xowner"
+    assert owner["thing"]["attrs"]["kind"] == "channel"
+
+
 def test_unknown_url_discovered_as_video(client):
     # #153: an unknown URL (container=None) the pull resolves to a single video is sent as a
     # `video` body and classified as a leaf (container=False), then download/meta-eligible.
@@ -958,9 +1063,9 @@ def test_video_gets_playlist_body_is_failure(client):
 
 
 def test_both_bodies_is_failure(client):
-    # #164: a body carrying both a video and a playlist is contradictory — record a failure,
-    # reset the classification to NULL (now unsure what it is), keep best_oi (media was already
-    # uploaded) for a human to investigate, and record no relationships / member stubs.
+    # #164: a body carrying both a video and a playlist is contradictory — record a plain failure
+    # and never mutate the classification (set once, never reset). The seeded container=False
+    # stays False, best_oi is not applied, and no relationships / member stubs are recorded.
     oi = str(uuid.uuid4())
     vid, rid = _claimed_download(client, url="http://e/both")   # seeded container=False
     r = client.post(f"/jobs/{rid}/result",
@@ -969,13 +1074,14 @@ def test_both_bodies_is_failure(client):
                           "playlist": _pl_payload(url="http://e/both", native="bpl")})
     assert r.status_code == 200 and r.json()["success"] is False
     t = client.get(f"/things/{vid}").json()
-    assert t["container"] is None           # reset: contradictory evidence
-    assert t["best_oi"] == oi               # kept for investigation
+    assert t["container"] is False          # unchanged: classification is never reset
+    assert t["best_oi"] is None             # not applied on a contradictory failure
     assert t["last_failure_dt"] is not None
     assert t["try_on"] is not None          # backoff applied (not marked acquired)
-    # no relationships fanned out and no member stubs created
+    # no relationships fanned out and no member stubs created (the seeded thing is the only one)
     assert client.get(f"/things/{vid}/related").json() == []
-    assert client.get("/things/", params={"container": False}).json() == []
+    ids = [x["id"] for x in client.get("/things/", params={"container": False}).json()]
+    assert ids == [vid]
 
 
 def test_both_bodies_known_container_stays_classified(client):

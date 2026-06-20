@@ -189,6 +189,17 @@ def _related(session: Session, thing_id: uuid.UUID,
 
 # --- Things ---------------------------------------------------------------------------
 
+def _set_container_hint(thing: Thing, proposed: Optional[bool]) -> None:
+    """Apply a user container hint: NULL->value (first classification) or affirm same value;
+    a switch (True<->False) of a set value is a 409. A None/omitted hint is a no-op."""
+    if proposed is None:
+        return
+    if xform.container_switch(thing.container, proposed):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="container already set to a different value")
+    thing.container = proposed
+
+
 @app.post("/things/", response_model=ThingRead, status_code=status.HTTP_201_CREATED)
 def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get_session)):
     """Add a thing by URL (the human entry point).
@@ -201,10 +212,18 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
     are stored as soft hints in `attrs` ([A11]). extractor_key/native_id are filled in later by
     the worker. Idempotent on URL (returns the existing thing with 200, bucket unchanged).
     """
+    def _existing(found: Thing):
+        # Idempotent on URL: return the existing thing (200), but still honor a container hint —
+        # backfill NULL->value or 409 on a switch (the same rule as PATCH, [#153]).
+        _set_container_hint(found, item.container)
+        session.commit()
+        session.refresh(found)
+        response.status_code = status.HTTP_200_OK
+        return _read_thing(session, found)
+
     existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
     if existing:
-        response.status_code = status.HTTP_200_OK
-        return _read_thing(session, existing)
+        return _existing(existing)
     attrs = {k: getattr(item, k) for k in xform._PROPAGATE_HINTS if getattr(item, k) is not None}
     thing = Thing(url=item.url, container=item.container,
                   human_rating=item.rating if item.rating is not None else 0.0,
@@ -217,8 +236,7 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
         existing = session.exec(select(Thing).where(Thing.url == item.url)).one_or_none()
         if existing is None:
             raise
-        response.status_code = status.HTTP_200_OK
-        return _read_thing(session, existing)
+        return _existing(existing)
     session.refresh(thing)
     return _read_thing(session, thing)
 
@@ -348,6 +366,8 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
         xform.merge_attr(thing, "cookies", data["cookies"])
     if "lpm_lib" in data:
         xform.merge_attr(thing, "lpm_lib", data["lpm_lib"])
+    if "container" in data:  # NULL->value sets it; switching a set value is a 409
+        _set_container_hint(thing, data["container"])
     session.add(thing)
     session.commit()
     session.refresh(thing)
@@ -542,31 +562,24 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     # Both-shape guard (#164): a successful result must be exactly one shape — a Stage-1 playlist
     # pull XOR a Stage-2 video. The worker never sends both (it reports the ambiguous video+
     # playlist shape as a failure), but a different client could POST both, and the video branch
-    # below would silently win and drop the playlist. Record a failure (+ backoff). For an
-    # already-classified container (container=True), leave the classification intact and treat
-    # this as a plain failure (demoting a known-good playlist to unknown on one bad POST would
-    # cause classification churn). For an unknown/leaf, reset to NULL so a later pull can
-    # reclassify it authoritatively. Keep best_oi if present (media was already uploaded).
+    # below would silently win and drop the playlist. This is contradictory evidence, not new
+    # classification: record a plain failure (+ backoff) and never mutate `container` — a thing's
+    # classification is set once and only switched via the guard below (never reset).
     if item.playlist is not None and item.video is not None:
         if pl_thing is not None:
-            if pl_thing.container is not True:  # unknown/leaf: contradictory evidence → unsure
-                pl_thing.container = None
-            if item.best_oi is not None:
-                pl_thing.best_oi = item.best_oi
             pl_thing.last_failure_dt = now
             _set_try_on(session, pl_thing)
         run.success = False
         return _finish(session, run)
 
-    # Mismatch guard: a classified thing must not change type.
-    # video body on a known container, or playlist body on a known leaf → treat as failure.
-    if pl_thing is not None and pl_thing.container is not None:
-        is_video_result = item.video is not None
-        if is_video_result != (pl_thing.container is False):
-            pl_thing.last_failure_dt = now
-            _set_try_on(session, pl_thing)
-            run.success = False
-            return _finish(session, run)
+    # Container is set once: NULL->value classifies (below), value->same affirms, but a switch
+    # (a `video` body proposing False on a known container, or a `playlist` body proposing True
+    # on a known leaf) is rejected as a failure (+ backoff) — never silently re-typed.
+    if pl_thing is not None and xform.container_switch(pl_thing.container, item.video is None):
+        pl_thing.last_failure_dt = now
+        _set_try_on(session, pl_thing)
+        run.success = False
+        return _finish(session, run)
 
     # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
     # (distinct from the Stage-1 container fan-out below). Identified by a `video` body, which
@@ -599,7 +612,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     graph = xform.pl_full2things(item.playlist, bucket=pl_thing.bucket,
                                  parent_attrs=pl_thing.attrs)
 
-    run.entries_hash = xform.pl_hash(item.playlist.entries, item.playlist.child_playlists)
+    run.entries_hash = xform.pl_hash(item.playlist.entries)
     run.playlist_count = xform.reconcile_count(item.playlist)
 
     # The dispatched thing IS the container: backfill it, classify it, mark success.
@@ -612,7 +625,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         xform.merge_attr(pl_thing, "kind", "channel")
 
     remap = {graph.playlist.id: pl_thing.id}
-    for stub in graph.videos + graph.channels + graph.child_playlists:
+    for stub in graph.members + graph.channels:
         existing = _find_thing(session, stub)
         if existing is not None:
             thing = existing
@@ -633,12 +646,21 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
         remap[stub.id] = thing.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
-    # Bulk upsert the edges in one statement: the (parent, child) PK dedups (DO NOTHING also
-    # tolerates in-batch duplicates), so no per-edge SELECT or round-trip.
+    # Bulk upsert the edges in one statement keyed on the (parent, child) PK. On conflict we
+    # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
+    # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
+    # sub-container first seen as channel=False membership becomes channel=True once it is
+    # pulled itself and reveals the parent as its owner. A single pull's graph.rels has no
+    # duplicate (parent, child) pairs (each member is a fresh child id; the only other edges
+    # are owner->child and pl_chan->pl), so DO UPDATE can't affect a row twice in one batch.
     rows = [{"parent": remap[rel.parent], "child": remap[rel.child], "channel": rel.channel}
             for rel in graph.rels]
     if rows:
-        session.execute(pg_insert(Rel).values(rows).on_conflict_do_nothing())
+        stmt = pg_insert(Rel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["parent", "child"],
+            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
+        session.execute(stmt)
 
     _set_try_on(session, pl_thing)   # successful container run -> next backoff date (§4.4)
     return _finish(session, run)

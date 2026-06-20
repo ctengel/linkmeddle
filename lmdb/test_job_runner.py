@@ -272,50 +272,57 @@ def test_extract_pull_handles_flat_entries():
     assert v.extractor_key == "youtube" and v.title == "V1"
 
 
-def test_extract_pull_url_result_marks_unknown_container():
-    # From a generic YouTube extractor (not a known video-only parent), a tab-like ie_key is
-    # marked container=None (unknown, classified by its own later pull). A plain video ie_key
-    # stays a known leaf (container=False) because the ie_key heuristic finds no container hint.
+def test_extract_pull_url_result_classified_by_return_type():
+    # A flat url-result is classified by the target extractor's declared _RETURN_TYPE (no
+    # ie_key heuristics); every member lands in `entries`, distinguished only by `container`:
+    # Youtube -> 'video' -> leaf (False); YoutubeTab -> 'any' -> unknown (None, classified by
+    # its own later pull); YoutubePlaylist -> 'playlist' -> sub-container (True).
     raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
                {"_type": "url", "ie_key": "Youtube", "id": "v1",
                 "url": "https://x/v/1", "title": "V1"},
                {"_type": "url", "ie_key": "YoutubeTab", "id": "tab1",
                 "url": "https://x/chan/videos", "title": "Videos"},
+               {"_type": "url", "ie_key": "YoutubePlaylist", "id": "pl1",
+                "url": "https://x/pl/1", "title": "PL1"},
            ]}
-    by_id = {v.native_id: v for v in run_bknd.extract_pull(raw).entries}
-    assert by_id["v1"].container is False   # plain ie_key -> known leaf (no classify pull)
-    assert by_id["tab1"].container is None  # "tab" in ie_key -> unknown, classified later
+    pl = run_bknd.extract_pull(raw)
+    by_id = {v.native_id: v for v in pl.entries}
+    assert by_id["v1"].container is False   # _RETURN_TYPE 'video' -> known leaf
+    assert by_id["tab1"].container is None  # _RETURN_TYPE 'any' -> unknown
+    assert by_id["pl1"].container is True   # _RETURN_TYPE 'playlist' -> sub-container
 
 
-def test_extract_pull_video_only_parent_leaves_are_known_leaves():
-    # A parent in _VIDEO_ONLY_CONTAINER_IE_KEYS (e.g. youtubeplaylist) never produces nested
-    # containers, so every url-result is a known leaf (container=False) regardless of ie_key.
-    raw = {"webpage_url": "https://x/pl", "id": "pl1", "extractor_key": "YoutubePlaylist",
+def test_extract_pull_url_result_unknown_ie_key_is_null():
+    # An unresolvable/absent ie_key can't be classified -> NULL (its own pull resolves it).
+    raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
-               {"_type": "url", "ie_key": "YoutubeTab", "id": "v1",
+               {"_type": "url", "ie_key": "NoSuchExtractor", "id": "v1",
                 "url": "https://x/v/1", "title": "V1"},
-               {"_type": "url", "ie_key": "Youtube", "id": "v2",
-                "url": "https://x/v/2", "title": "V2"},
+               {"_type": "url", "id": "v2", "url": "https://x/v/2", "title": "V2"},
            ]}
-    entries = run_bknd.extract_pull(raw).entries
-    assert all(v.container is False for v in entries)  # video-only parent -> all leaves
+    assert all(v.container is None for v in run_bknd.extract_pull(raw).entries)
 
 
-def test_extract_pull_splits_videos_and_child_playlists():
-    # A channel's flat pull lists both videos and playlist-typed entries (tabs/sub-playlists):
-    # videos -> entries, playlist entries -> child_playlists stubs (not flattened).
+def test_extract_pull_videos_and_subcontainers_in_one_list():
+    # A channel's flat pull lists both videos and playlist-typed entries (tabs/sub-playlists);
+    # all land in `entries`, distinguished by `container`. A sub-container's info_json hint is
+    # carried but stripped of any cached enumeration so its own pull re-enumerates fresh.
     raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
                {"_type": "url", "ie_key": "Youtube", "id": "v1",
                 "url": "https://x/v/1", "title": "V1"},
                {"_type": "playlist", "ie_key": "Youtube", "id": "subpl",
-                "url": "https://x/pl/sub", "title": "Sub PL"},
+                "url": "https://x/pl/sub", "title": "Sub PL",
+                "entries": [{"id": "deep"}]},
            ]}
     pl = run_bknd.extract_pull(raw)
-    assert [v.native_id for v in pl.entries] == ["v1"]
-    assert [c.native_id for c in pl.child_playlists] == ["subpl"]
-    assert pl.child_playlists[0].url == "https://x/pl/sub"
+    by_id = {v.native_id: v for v in pl.entries}
+    assert by_id["v1"].container is False
+    sub = by_id["subpl"]
+    assert sub.container is True
+    assert sub.url == "https://x/pl/sub"
+    assert "entries" not in sub.info_json   # cached enumeration stripped (no membership freeze)
 
 
 def test_post_result_single_video_discovers_leaf(monkeypatch):
@@ -442,7 +449,7 @@ def test_pl_full2things_puts_info_json_in_video_attrs():
     raw = _raw_playlist(2)
     pl = run_bknd.extract_pull(raw)
     graph = xform.pl_full2things(pl, bucket="b", parent_attrs={"cookies": True})
-    for vid in graph.videos:
+    for vid in graph.members:
         assert vid.attrs["cookies"] is True                     # propagated hint preserved
         assert vid.attrs[xform.INFO_JSON_KEY]["id"] == vid.native_id
         assert "formats" in vid.attrs[xform.INFO_JSON_KEY]

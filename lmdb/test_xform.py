@@ -77,7 +77,68 @@ def test_reconcile_count_mismatch_warns():
 def test_pl_full2things_does_not_set_last_success():
     # The builder is pure construction now; the API endpoint owns the last_success decision.
     g = xform.pl_full2things(_pl(2), bucket="b")
-    assert all(v.last_success_dt is None for v in g.videos)
+    assert all(v.last_success_dt is None for v in g.members)
+
+
+def _sub(native_id="sub1", url="http://example/pl/sub") -> models.VidFull:
+    """A sub-container member (container=True), as extract_pull now yields in `entries`."""
+    return models.VidFull(native_id=native_id, url=url, title="Sub PL",
+                          extractor_key="youtube", container=True,
+                          channel=models.UlChan(native_id="up1", title="Up One",
+                                                url="http://example/up1"))
+
+
+def test_pl_hash_video_and_subcontainer_keys_distinct():
+    # A video and a sub-container sharing an id must not collide (the 'pl:' prefix).
+    vid = models.VidFull(native_id="x", url="http://example/v/x", extractor_key="youtube")
+    sub = models.VidFull(native_id="x", url="http://example/pl/x", extractor_key="youtube",
+                         container=True)
+    assert xform.pl_hash([vid]) != xform.pl_hash([sub])
+    # Order independence still holds across mixed membership.
+    assert xform.pl_hash([vid, sub]) == xform.pl_hash([sub, vid])
+
+
+def test_pl_full2things_curated_subcontainer_is_membership_with_owner():
+    # A curated playlist (node pl1, owned by up1) listing up1's sub-playlist: the parent node
+    # is NOT the owner, so the sub gets a channel=False membership edge plus the owner's
+    # channel=True edge -- exactly like a curated video.
+    pl = _pl(0)                       # curated playlist (owner up1), no video entries
+    pl.entries = [_sub()]
+    g = xform.pl_full2things(pl, bucket="b")
+    sub_thing = next(m for m in g.members if m.container is True)
+    sub_edges = {(r.parent, r.channel) for r in g.rels if r.child == sub_thing.id}
+    owner = next(c for c in g.channels if c.channel == "http://example/up1")
+    assert (g.playlist.id, False) in sub_edges    # membership edge from the parent node
+    assert (owner.id, True) in sub_edges          # owner (up1) channel=True edge
+
+
+def test_pl_full2things_owned_subcontainer_is_channel():
+    # A channel pull (parent node IS the owner) -> one channel=True edge, no owner node.
+    chan = models.UlChan(native_id="chan1", title="Chan", url="http://example/chan1")
+    pl = models.PlaylistFull(url="http://example/chan1", native_id="chan1", title="Chan",
+                             extractor_key="youtube", channel=chan,
+                             entries=[_sub(native_id="tab1", url="http://example/chan1/vids")])
+    pl.entries[0].channel = chan      # the tab is owned by the channel itself
+    g = xform.pl_full2things(pl, bucket="b")
+    sub_thing = next(m for m in g.members if m.container is True)
+    sub_edges = [r for r in g.rels if r.child == sub_thing.id]
+    assert len(sub_edges) == 1
+    assert sub_edges[0].parent == g.playlist.id and sub_edges[0].channel is True
+    assert g.channels == []           # parent is its own owner -> no separate node
+
+
+def test_pl_full2things_unknown_owner_subcontainer_is_membership():
+    # No-guess: a sub-container with no discernible owner -> channel=False membership (its
+    # ownership edge is established later, when it is pulled itself), and no owner node.
+    pl = _pl(0)
+    pl.entries = [models.VidFull(native_id="sub1", url="http://example/pl/sub",
+                                 title="Sub", extractor_key="youtube", container=True)]
+    g = xform.pl_full2things(pl, bucket="b")
+    sub_thing = next(m for m in g.members if m.container is True)
+    sub_edges = [r for r in g.rels if r.child == sub_thing.id]
+    assert len(sub_edges) == 1
+    assert sub_edges[0].parent == g.playlist.id and sub_edges[0].channel is False
+    assert all(c.channel != "http://example/pl/sub" for c in g.channels)  # no node for the sub
 
 
 # --- try_on backoff (Task 1.4): pure math ----------------------------------------------

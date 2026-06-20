@@ -26,29 +26,30 @@ def next_fib(existing: int | float | None, up: bool) -> int:
     return FIB[0]
 
 def entry2text(entry: models.VidFull) -> str:
-    """Change a pl entry into single unique string"""
+    """Change a pl member into a single unique string.
+
+    Sub-containers (container=True) get a 'pl:' prefix (keyed by native_id, else url) so a
+    video and a sub-playlist sharing an id can never collide; videos key by native_id.
+    """
+    if entry.container is True:
+        return f"pl:{entry.native_id or entry.url or ''}"
     return entry.native_id
 
-def pl2txt(entries: list[models.VidFull],
-           child_playlists: "list[models.PlaylistFull]" = ()) -> str:
+def pl2txt(entries: list[models.VidFull]) -> str:
     """Change a container's members into a string
 
-    Sub-containers are folded in with a 'pl:' prefix (keyed by native_id, else url) so a
-    channel's membership change registers and a video/playlist id can never collide. Note
-    that we sort and uniq it (order does not matter).
+    Note that we sort and uniq it (order does not matter).
     """
     keys = {entry2text(x) for x in entries}
-    keys |= {f"pl:{c.native_id or c.url or ''}" for c in child_playlists}
     return "\n".join(sorted(keys))
 
-def pl_hash(entries: list[models.VidFull],
-            child_playlists: "list[models.PlaylistFull]" = ()) -> bytes:
+def pl_hash(entries: list[models.VidFull]) -> bytes:
     """Hash a container's membership (videos + sub-containers)
 
     Note that the order does not matter
     """
     hash_object = hashlib.sha256()
-    hash_object.update(pl2txt(entries, child_playlists).encode())
+    hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
 
 # --- V4 layer: DLP/LM-native -> thing/rel/run ------------------------------------------
@@ -131,12 +132,21 @@ def enough_to_rate(thing: models.Thing) -> bool:
                 and thing.extractor_key and thing.channel)
 
 
+def container_switch(current: Optional[bool], proposed: Optional[bool]) -> bool:
+    """True if `proposed` would flip an already-set container classification.
+
+    A NULL->value transition (first classification) and value->same value (affirm) are allowed;
+    True<->False is the forbidden switch. Used to gate both user edits (409) and worker results
+    (logged failed job) so a thing's container is set once and never silently changed.
+    """
+    return current is not None and proposed is not None and current != proposed
+
+
 class ThingGraph(NamedTuple):
     """The thing/rel graph derived from one container pull, ready to upsert."""
-    playlist: models.Thing               # the pulled container thing
-    videos: list[models.Thing]           # leaf video stubs (container=False)
-    channels: list[models.Thing]         # per-video uploader containers (kind='channel')
-    child_playlists: list[models.Thing]  # sub-container stubs (container=True); pulled later
+    playlist: models.Thing      # the pulled container thing
+    members: list[models.Thing]  # member stubs: leaf videos (False/None) + sub-containers (True)
+    channels: list[models.Thing]  # per-video uploader containers (kind='channel')
     rels: list[models.Rel]
 
 
@@ -173,27 +183,30 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
                    parent_attrs: Optional[dict] = None) -> ThingGraph:
     """Convert an LM-native container pull into its thing/rel graph.
 
-    Produces the container thing, a leaf stub per video entry, a `container=True` stub per
-    sub-container (a channel's playlists/tabs — pulled later), and an uploader container
-    (`kind='channel'`) per distinct video uploader. Edges are one parent->child each, with
-    `rel.channel` chosen by identity (`_same_identity`):
+    Produces the container thing, a member stub per `entries` item (a leaf video, or a
+    `container=True` sub-container pulled later), and an uploader container (`kind='channel'`)
+    per distinct owner. Edges are one parent->child each, with `rel.channel` chosen the same
+    way for videos and sub-containers, by identity (`_same_identity`):
 
-    - parent IS the entry's uploader (channel case) -> one `channel=True` edge, no separate
+    - parent IS the member's owner (channel case) -> one `channel=True` edge, no separate
       uploader node and no duplicate membership edge.
-    - parent is NOT the uploader (curated playlist) -> a `channel=False` membership edge,
-      plus the uploader node + a `channel=True` edge from it (V4's `pseudo_channel`, [A11]).
-    - sub-container -> a `channel=True` edge (the parent, a channel, owns it).
+    - parent is NOT the owner (curated playlist, incl. a curated sub-playlist) -> a
+      `channel=False` membership edge, plus the owner node + a `channel=True` edge from it
+      (V4's `pseudo_channel`, [A11]).
+
+    A sub-container whose owner is unknown/different from the parent thus starts as a
+    `channel=False` membership edge; its true ownership edge is established when the
+    sub-container is pulled itself (its own uploader edge), and the monotonic rel upsert
+    raises a same-parent edge `False->True` then.
 
     The returned objects carry client-side UUIDs, so the edges already reference real ids.
-    Every constructed thing inherits the parent's `bucket` (required, immutable, [A10]);
-    video + sub-container stubs also inherit the propagated soft hints
-    (`attrs.cookies`/`attrs.lpm_lib`, §2.1). Pure constructor (no DB).
+    Every constructed thing inherits the parent's `bucket` (required, immutable, [A10]) and
+    the propagated soft hints (`attrs.cookies`/`attrs.lpm_lib`, §2.1). Pure constructor (no DB).
     """
     hints = propagate_attrs(parent_attrs)
     pl_thing = thing_from_pl(pl)
     pl_thing.bucket = bucket
-    videos: list[models.Thing] = []
-    child_playlists: list[models.Thing] = []
+    members: list[models.Thing] = []
     rels: list[models.Rel] = []
     # One channel node per uploader URL, shared across the container + its videos.
     channels_by_url: dict[str, models.Thing] = {}
@@ -217,14 +230,21 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
     for vid in pl.entries:
-        vid_thing = thing_from_vid(vid)
+        vid_thing = thing_from_vid(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
         attrs = dict(hints) if hints is not None else {}
         if vid.info_json is not None:
-            attrs[INFO_JSON_KEY] = vid.info_json   # Stage-2 load-info hint (§2.1)
+            attrs[INFO_JSON_KEY] = vid.info_json   # load-info hint (§2.1; subs: entries-stripped)
         if attrs:
             vid_thing.attrs = attrs
-        videos.append(vid_thing)
+        members.append(vid_thing)
+        # Identity-based for every member (videos and sub-containers alike): parent IS the
+        # owner -> a channel=True edge, no separate uploader node; a different/unknown owner
+        # -> a channel=False membership edge plus the owner's channel=True edge ([A11]). A
+        # sub-container's ownership edge is (re)asserted when it is pulled itself (its own
+        # uploader edge, above); the monotonic rel upsert upgrades a stale False->True then.
+        # So curated nesting (a container listing someone else's sub-playlist) records a
+        # channel=False membership edge here, exactly like a curated video.
         if _same_identity(pl_thing, vid.channel):
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
@@ -233,29 +253,18 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
-    for child in pl.child_playlists:
-        child_thing = thing_from_pl(child)
-        child_thing.bucket = bucket
-        if hints is not None:
-            child_thing.attrs = {**(child_thing.attrs or {}), **hints}
-        child_playlists.append(child_thing)
-        # A container that owns sub-containers is acting as a channel -> channel=True.
-        # (Curated playlist-in-playlist nesting, channel=False, is left to 4.x.)
-        rels.append(models.Rel(parent=pl_thing.id, child=child_thing.id, channel=True))
-
-    return ThingGraph(playlist=pl_thing, videos=videos,
-                      channels=list(channels_by_url.values()),
-                      child_playlists=child_playlists, rels=rels)
+    return ThingGraph(playlist=pl_thing, members=members,
+                      channels=list(channels_by_url.values()), rels=rels)
 
 
 def reconcile_count(pl: models.PlaylistFull) -> int:
     """Reconcile a container's reported `playlist_count` against its actual members.
 
-    Members = leaf videos + sub-containers (so a channel's count covers both). Returns the
-    count to record (provided count wins on mismatch), warning on disagreement. Used by
-    the Stage-1 ingest endpoint.
+    Members = all `entries` (leaf videos + sub-containers, so a channel's count covers both).
+    Returns the count to record (provided count wins on mismatch), warning on disagreement.
+    Used by the Stage-1 ingest endpoint.
     """
-    count = len(pl.entries) + len(pl.child_playlists)
+    count = len(pl.entries)
     if pl.playlist_count is None:
         warnings.warn(f'No provided playlist_count; leveraging length of {count}.')
     elif count != pl.playlist_count:

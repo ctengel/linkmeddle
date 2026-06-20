@@ -12,6 +12,7 @@ import argparse
 import time
 import requests
 from yt_dlp import YoutubeDL
+from yt_dlp.extractor import get_info_extractor
 from yt_dlp.utils import YoutubeDLError
 from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
@@ -113,25 +114,6 @@ def extract_pull_video(info: dict) -> models.VidFull:
         info_json={k: v for k, v in info.items() if k != "info_json"})
 
 
-def extract_pull_pl_stub(info: dict) -> Optional[models.PlaylistFull]:
-    """Build a thin sub-container stub (no members) from a flat playlist-typed entry.
-
-    A channel's flat pull lists its tabs/playlists as playlist-typed entries; each becomes a
-    `container` thing pulled on its own later, so we keep only identity + display here.
-    Returns None when the entry has no usable URL (PlaylistFull requires one).
-    """
-    url = info.get("webpage_url") or info.get("url")
-    if not url:
-        return None
-    return models.PlaylistFull(
-        url=url,
-        native_id=info.get("id"),
-        extractor_key=_norm_extractor(info),
-        title=info.get("title"),
-        playlist_count=info.get("playlist_count"),
-        channel=_pull_chan(info))
-
-
 def is_container(info: dict) -> bool:
     """Does a raw yt-dlp info dict describe a container (playlist/channel) vs a single video?"""
     return info.get("_type") == "playlist" or info.get("entries") is not None
@@ -145,57 +127,56 @@ def is_both(info: dict) -> bool:
         info.get("oi_uuid") or info.get("requested_downloads") or info.get("formats"))
 
 
-# Two-level heuristic for flat url-result classification. A flat url-result whose yt-dlp shape
-# is `url`/`url_transparent` (no entries, no formats) may be either a single video or a nested
-# container (channel tab / sub-playlist). The decision uses two signals:
-#
-# Level 1 — parent extractor: some parent containers are known to only ever produce video
-# children (never sub-playlists), so every url-result from them is safely a leaf.
-_VIDEO_ONLY_CONTAINER_IE_KEYS = ("youtubeplaylist",)  # lowercase _norm_extractor values
-#
-# Level 2 — entry ie_key fragments: if the parent is not in the video-only set, check whether
-# the entry's own ie_key looks like a container extractor. An unmatched entry stays a leaf.
-_CONTAINER_IE_KEY_HINTS = ("tab", "playlist", "channel", "user", "album", "series")
+def _flat_entry_container(entry: dict) -> Optional[bool]:
+    """Container-ness of a flat url-result entry from its extractor's declared return type.
 
-
-def _is_container_ie_key(ie_key: Optional[str], parent_ie_key: Optional[str] = None) -> bool:
-    """Is this flat url-result entry likely a container rather than a plain video?
-
-    Returns False immediately if the parent extractor is known to only produce video children.
-    Otherwise falls back to fragment-matching on the entry's own ie_key.
+    yt-dlp hands back only a URL pointer for a `url`/`url_transparent` entry, so we ask the
+    target extractor what it yields: `_RETURN_TYPE` 'video' -> leaf (False), 'playlist' ->
+    container (True), 'any'/unknown -> NULL (the stub's own pull classifies it). This is the
+    explicit yt-dlp signal that backs `InfoExtractor.is_single_video`; no heuristics.
     """
-    if parent_ie_key and parent_ie_key in _VIDEO_ONLY_CONTAINER_IE_KEYS:
-        return False
-    return bool(ie_key) and any(h in ie_key.lower() for h in _CONTAINER_IE_KEY_HINTS)
+    ie_key = entry.get("ie_key")
+    if not ie_key:
+        return None
+    try:
+        rt = get_info_extractor(ie_key)._RETURN_TYPE
+    except Exception:
+        return None
+    return {"video": False, "playlist": True}.get(rt)
 
 
 def extract_pull(info: dict) -> models.PlaylistFull:
     """Extract the thin pull contract from a raw yt-dlp container info dict.
 
-    Hierarchy-preserving: a video entry contributes a `VidFull` to `entries`; a
-    playlist-typed entry (a channel's tab/sub-playlist) contributes a stub to
-    `child_playlists` (pulled on its own later) instead of being flattened into videos.
+    Each member becomes one `VidFull` in `entries`, distinguished only by its `container`
+    verdict: a leaf or still-unknown video (False/None), or a sub-container (a channel's
+    tab/sub-playlist, True) the API fans out into its own `container` thing pulled later.
+    Every member carries its flat entry as the load-info hint (`info_json`), but a
+    sub-container's hint is stripped of any cached `entries`/`requested_downloads` so a
+    later pull always re-enumerates fresh (membership change-detection, pl_hash).
     """
     assert info.get("webpage_url") is not None  # needed until we get an lmpl id
     entries: list[models.VidFull] = []
-    child_playlists: list[models.PlaylistFull] = []
-    parent_ie_key = _norm_extractor(info)
     for entry in info.get("entries") or []:
         if entry is None:
             continue
+        # One explicit container verdict per member: already playlist-shaped -> True; a flat
+        # url-result (yt-dlp handed back only a URL pointer, no clear `_type`) -> its target
+        # extractor's declared return type (True/False/None); otherwise a full-shape video ->
+        # False. No ie_key heuristics.
         if is_container(entry):
-            stub = extract_pull_pl_stub(entry)
-            if stub is not None:
-                child_playlists.append(stub)
-            continue
+            container = True
+        elif entry.get("_type") in ("url", "url_transparent"):
+            container = _flat_entry_container(entry)
+        else:
+            container = False
         vid = extract_pull_video(entry)
-        # A flat url-result whose ie_key looks like a container extractor (or whose parent is
-        # not a known video-only container) is ambiguous — yt-dlp only handed back a URL
-        # pointer. Mark container=NULL so its own pull classifies it authoritatively. A plain
-        # video url-result from a known video-only parent stays a known leaf.
-        if (entry.get("_type") in ("url", "url_transparent")
-                and _is_container_ie_key(entry.get("ie_key"), parent_ie_key)):
-            vid.container = None
+        vid.container = container
+        if container is True and vid.info_json is not None:
+            # A sub-container hint is a bare pointer; drop any cached enumeration so its own
+            # pull never reuses stale members in place of a fresh extract.
+            vid.info_json = {k: v for k, v in vid.info_json.items()
+                             if k not in ("entries", "requested_downloads")}
         entries.append(vid)
     modified = info.get("modified_date")
     return models.PlaylistFull(
@@ -206,8 +187,7 @@ def extract_pull(info: dict) -> models.PlaylistFull:
         modified=datetime.datetime.strptime(modified, "%Y%m%d") if modified else None,
         playlist_count=info.get("playlist_count"),
         channel=_pull_chan(info),
-        entries=entries,
-        child_playlists=child_playlists)
+        entries=entries)
 
 
 def init_download(url: str, *,

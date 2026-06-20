@@ -30,7 +30,13 @@ class UlChan(BaseModel):
     title: Optional[str] = None       # uploader
 
 class VidFull(BaseModel):
-    """A discovered video: just what thing/rel need + the Stage-2 load-info hint."""
+    """A discovered container member: just what thing/rel need + the load-info hint.
+
+    Usually a leaf video (`container=False`/`None`), but a sub-container member (a
+    channel's tab/playlist) is also a `VidFull` with `container=True` — pulled on its
+    own later. The split into a separate stub type is gone; `container` is the only
+    discriminator.
+    """
     url: Optional[str] = None              # webpage_url
     native_id: str                         # yt-dlp entry id (also the pl_hash key)
     extractor_key: Optional[str] = None    # normalized lowercase
@@ -48,9 +54,11 @@ class VidFull(BaseModel):
 class PlaylistFull(BaseModel):
     """A discovered container (playlist/channel) + its members (POST /jobs/{id}/result body).
 
-    A flat pull lists each member's identity: leaf videos land in `entries`, and
-    sub-containers (a channel's playlists/tabs) land in `child_playlists` as stubs (empty
-    `entries`) the API fans out into their own `container` things to be pulled later.
+    A flat pull lists each member's identity in `entries` as a `VidFull`: leaf videos
+    (`container=False`/`None`) and sub-containers (a channel's playlists/tabs,
+    `container=True`) alike. The API fans each `container=True` member out into its own
+    `container` thing to be pulled later. This is the top-level result envelope; members
+    are flat (a `VidFull` never nests a sub-pull).
     """
     url: str                               # webpage_url
     native_id: Optional[str] = None
@@ -59,8 +67,7 @@ class PlaylistFull(BaseModel):
     modified: Optional[datetime.datetime] = None
     playlist_count: Optional[int] = None
     channel: UlChan = UlChan()
-    entries: list[VidFull] = []
-    child_playlists: list["PlaylistFull"] = []   # sub-containers (stubs); pulled on their own
+    entries: list[VidFull] = []            # all members; sub-containers carry container=True
 
 # --- V4 schema (thing / rel / run) -----------------------------------------------------
 # Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
@@ -267,6 +274,9 @@ class ThingPatch(BaseModel):
     try_on: Optional[datetime.date] = None  # explicit null acknowledges permafail
     cookies: Optional[bool] = None  # soft hint -> attrs.cookies (null clears it) [A11]
     lpm_lib: Optional[str] = None   # soft hint -> attrs.lpm_lib (null clears it) [A11]
+    # Structural classification: NULL->True/False is allowed (first/affirming), switching a
+    # set value (True<->False) is a 409. Omitted/null leaves it unchanged.
+    container: Optional[bool] = None
 
 
 class ClaimRequest(BaseModel):
