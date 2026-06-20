@@ -110,14 +110,39 @@ def merge_attr(thing: models.Thing, key: str, value) -> None:
     thing.attrs = {**(thing.attrs or {}), key: value}
 
 
+# yt-dlp's two flat url-result `_type`s: a bare pointer (no media/formats). Any other shape
+# (a full video extract) is a richer hint. The one raw-yt-dlp detail xform inspects — kept
+# minimal and here because the load-info hint it guards is itself an opaque yt-dlp blob, and
+# `_type` is a long-stable yt-dlp concept.
+_FLAT_HINT_TYPES = ("url", "url_transparent")
+
+
+def _hint_is_flat(info: Optional[dict]) -> bool:
+    return bool(info) and info.get("_type") in _FLAT_HINT_TYPES
+
+
 def refresh_info_hint(thing: models.Thing, info: Optional[dict]) -> None:
     """Stamp the Stage-2 load-info hint onto a video still pending download (best_oi NULL).
 
     yt-dlp info dicts go stale, so the hint is refreshed while the media is unacquired and
-    left alone once acquired.
+    left alone once acquired. A flat pull pointer (`_type` url/url_transparent) never
+    overwrites a fuller existing hint: re-pulling a playlist must not clobber the richer hint
+    a direct meta extract already stored.
     """
-    if info is not None and thing.container is False and thing.best_oi is None:
-        merge_attr(thing, INFO_JSON_KEY, info)
+    if info is None or thing.container is not False or thing.best_oi is not None:
+        return
+    existing = (thing.attrs or {}).get(INFO_JSON_KEY)
+    if _hint_is_flat(info) and existing is not None and not _hint_is_flat(existing):
+        return
+    merge_attr(thing, INFO_JSON_KEY, info)
+
+
+def clear_info_hint(thing: models.Thing) -> None:
+    """Drop the Stage-2 load-info hint once it is moot (the thing is a pulled container, or
+    its media is acquired). The run history (run.data_json) keeps the raw extract, so the
+    thing need not. No-op unless a hint is actually present (avoids a null-key on attrs)."""
+    if (thing.attrs or {}).get(INFO_JSON_KEY) is not None:
+        merge_attr(thing, INFO_JSON_KEY, None)
 
 
 def enough_to_rate(thing: models.Thing) -> bool:

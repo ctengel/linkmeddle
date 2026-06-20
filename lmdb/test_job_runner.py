@@ -307,7 +307,7 @@ def test_extract_pull_url_result_unknown_ie_key_is_null():
 def test_extract_pull_videos_and_subcontainers_in_one_list():
     # A channel's flat pull lists both videos and playlist-typed entries (tabs/sub-playlists);
     # all land in `entries`, distinguished by `container`. A sub-container's info_json hint is
-    # carried but stripped of any cached enumeration so its own pull re-enumerates fresh.
+    # carried verbatim (no key-filtering), including any cached enumeration yt-dlp returned.
     raw = {"webpage_url": "https://x/chan", "id": "chan", "extractor_key": "YouTube",
            "entries": [
                {"_type": "url", "ie_key": "Youtube", "id": "v1",
@@ -322,7 +322,7 @@ def test_extract_pull_videos_and_subcontainers_in_one_list():
     sub = by_id["subpl"]
     assert sub.container is True
     assert sub.url == "https://x/pl/sub"
-    assert "entries" not in sub.info_json   # cached enumeration stripped (no membership freeze)
+    assert sub.info_json["entries"] == [{"id": "deep"}]   # carried verbatim (no key-filtering)
 
 
 def test_post_result_single_video_discovers_leaf(monkeypatch):

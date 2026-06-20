@@ -588,8 +588,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.last_success_dt = now
             pl_thing.best_oi = item.best_oi
             pl_thing.try_on = None            # acquired; never re-fetch (§2.5)
-            # clears thing hints since we don't need it anymore
-            xform.merge_attr(pl_thing, xform.INFO_JSON_KEY, None)
+            xform.clear_info_hint(pl_thing)   # acquired: drop the now-moot load-info hint
         else:                                 # meta: metadata only, still pending acquisition
             pl_thing.last_success_dt = now       # full extract is terminal → complete (§4.2),
                                                  # even if still bare: never re-loop a meta job
@@ -612,6 +611,7 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     _apply_backfill(session, pl_thing, graph.playlist)
     pl_thing.container = True
     pl_thing.last_success_dt = now
+    xform.clear_info_hint(pl_thing)   # "just a playlist": hint cleared after its own pull
     # A container that is its own videos' uploader or owns sub-containers is acting as a
     # channel — tag the display hint (any channel=True edge it parents, idempotent).
     if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):

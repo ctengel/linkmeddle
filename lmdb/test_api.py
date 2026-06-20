@@ -812,6 +812,77 @@ def test_ingest_refreshes_info_json_until_acquired(client):
     assert "refreshed" not in by_url["http://example/v/0"]["attrs"]["info_json"]          # frozen
 
 
+def test_repull_does_not_clobber_meta_hint_with_flat(client):
+    # A direct meta extract stores a full info_json hint; a later playlist re-pull carrying the
+    # thin flat entry (_type=url) must not overwrite that richer hint.
+    url = "http://example/pl/noclobber"
+    tid, rid = _claimed_run(client, url)
+
+    def flat_payload():
+        # one under-described member (empty channel) so it stays meta-claimable (last_success
+        # NULL); empty playlist channel so no rival channel container is claimable.
+        return models.PlaylistFull(
+            url=url, native_id="ncpl", title="PL", extractor_key="youtube", playlist_count=1,
+            channel=models.UlChan(),
+            entries=[models.VidFull(
+                native_id="ncv", url="http://example/v/nc", title="NC",
+                extractor_key="youtube", channel=models.UlChan(),
+                info_json={"_type": "url", "id": "ncv"})],
+        ).model_dump(mode="json")
+
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": flat_payload()}).status_code == 200
+    vid_id = client.get("/things/", params={"container": False}).json()[0]["id"]
+
+    # meta job: a full extract stores a richer hint (has formats, no _type=url)
+    job = _claim(client)
+    assert job["thing"]["id"] == vid_id and job["download"] is False
+    assert client.post(f"/jobs/{job['run_id']}/result", json={"success": True, "video": {
+        "native_id": "ncv", "title": "NC Full", "extractor_key": "youtube",
+        "channel": {"url": "http://example/chan/nc"},
+        "info_json": {"id": "ncv", "formats": [{"format_id": "best"}]}}}).status_code == 200
+    assert client.get(f"/things/{vid_id}").json()["attrs"]["info_json"].get("formats")
+
+    # re-pull the playlist with the thin flat entry again (same day -> seed the run)
+    rid2 = _seed_run(tid)
+    assert client.post(f"/jobs/{rid2}/result", json={"playlist": flat_payload()}).status_code == 200
+
+    hint = client.get(f"/things/{vid_id}").json()["attrs"]["info_json"]
+    assert hint.get("formats")          # the richer meta hint survived
+    assert hint.get("_type") != "url"   # not clobbered by the flat re-pull entry
+
+
+def test_subcontainer_info_hint_cleared_on_own_pull(client):
+    # A sub-container keeps its info_json hint (it feeds the sub-playlist's own pull); once the
+    # sub-playlist is pulled itself (its result is a playlist), that now-moot hint is cleared.
+    url = "http://example/pl/subhint"
+    tid, rid = _claimed_run(client, url)
+    sub_url = "http://example/pl/subhint/sub"
+    payload = models.PlaylistFull(
+        url=url, native_id="subhintpl", title="Parent", extractor_key="youtube",
+        playlist_count=1, channel=models.UlChan(),
+        entries=[models.VidFull(
+            native_id="subh1", url=sub_url, title="Sub PL", container=True,
+            extractor_key="youtube", channel=models.UlChan(),
+            info_json={"id": "subh1", "webpage_url": sub_url})],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    # the sub-container stub carries the load-info hint for its own pull
+    kids = [e["thing"] for e in client.get(f"/things/{tid}/related").json()
+            if e["direction"] == "child"]
+    sub = next(s for s in kids if s["container"] is True)
+    assert sub["attrs"]["info_json"]["id"] == "subh1"
+
+    # pull the sub-playlist itself -> its hint is now moot and cleared
+    job = _claim(client)
+    assert job["thing"]["id"] == sub["id"] and job["download"] is False
+    sub_payload = _pl_payload(2, url=sub_url, native="subh1pl")
+    assert client.post(f"/jobs/{job['run_id']}/result",
+                       json={"playlist": sub_payload}).status_code == 200
+    refreshed = client.get(f"/things/{sub['id']}").json()
+    assert not (refreshed["attrs"] or {}).get("info_json")
+
+
 def test_ingest_per_video_uploader_channels(client):
     # 1.3c: each distinct video uploader gets a type='channel' thing + channel_video edge;
     # the playlist keeps its own channel_playlist parent.

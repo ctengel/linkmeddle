@@ -42,6 +42,49 @@ def test_thing_from_vid_passes_container_through():
         models.VidFull(native_id="v", container=None)).container is None
 
 
+def _pending_leaf(hint=None) -> models.Thing:
+    return models.Thing(native_id="v", container=False, best_oi=None,
+                        attrs=({xform.INFO_JSON_KEY: hint} if hint is not None else None))
+
+
+def test_refresh_info_hint_no_flat_clobber():
+    flat = {"_type": "url", "id": "v"}
+    full = {"id": "v", "formats": [{"format_id": "best"}]}
+
+    # full existing + flat incoming (re-pull) -> richer meta hint kept
+    t = _pending_leaf(full)
+    xform.refresh_info_hint(t, flat)
+    assert t.attrs[xform.INFO_JSON_KEY] == full
+
+    # flat existing + flat incoming (re-pull) -> refreshed to the newer flat entry
+    newer_flat = {"_type": "url", "id": "v", "refreshed": True}
+    t = _pending_leaf(flat)
+    xform.refresh_info_hint(t, newer_flat)
+    assert t.attrs[xform.INFO_JSON_KEY] == newer_flat
+
+    # flat existing + full incoming (meta) -> upgraded
+    t = _pending_leaf(flat)
+    xform.refresh_info_hint(t, full)
+    assert t.attrs[xform.INFO_JSON_KEY] == full
+
+    # full existing + full incoming -> refreshed
+    newer_full = {"id": "v", "formats": [{"format_id": "best"}], "refreshed": True}
+    t = _pending_leaf(full)
+    xform.refresh_info_hint(t, newer_full)
+    assert t.attrs[xform.INFO_JSON_KEY] == newer_full
+
+    # no existing + flat incoming -> stored
+    t = _pending_leaf()
+    xform.refresh_info_hint(t, flat)
+    assert t.attrs[xform.INFO_JSON_KEY] == flat
+
+    # acquired (best_oi set) -> left alone regardless of incoming
+    t = _pending_leaf(full)
+    t.best_oi = uuid.uuid4()
+    xform.refresh_info_hint(t, {"id": "v", "formats": [{"format_id": "x"}]})
+    assert t.attrs[xform.INFO_JSON_KEY] == full
+
+
 def test_pl_full2things_no_channel_url():
     pl = _pl(1)
     pl.channel = models.UlChan()  # no urls on the playlist...

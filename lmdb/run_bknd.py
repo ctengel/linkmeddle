@@ -110,8 +110,8 @@ def extract_pull_video(info: dict) -> models.VidFull:
         modified=(datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
                   if ts else None),
         channel=_pull_chan(info),
-        # Faithful copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
-        info_json={k: v for k, v in info.items() if k != "info_json"})
+        # Verbatim copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
+        info_json=dict(info))
 
 
 def is_container(info: dict) -> bool:
@@ -151,9 +151,7 @@ def extract_pull(info: dict) -> models.PlaylistFull:
     Each member becomes one `VidFull` in `entries`, distinguished only by its `container`
     verdict: a leaf or still-unknown video (False/None), or a sub-container (a channel's
     tab/sub-playlist, True) the API fans out into its own `container` thing pulled later.
-    Every member carries its flat entry as the load-info hint (`info_json`), but a
-    sub-container's hint is stripped of any cached `entries`/`requested_downloads` so a
-    later pull always re-enumerates fresh (membership change-detection, pl_hash).
+    Every member carries its flat entry verbatim as the load-info hint (`info_json`).
     """
     assert info.get("webpage_url") is not None  # needed until we get an lmpl id
     entries: list[models.VidFull] = []
@@ -172,11 +170,6 @@ def extract_pull(info: dict) -> models.PlaylistFull:
             container = False
         vid = extract_pull_video(entry)
         vid.container = container
-        if container is True and vid.info_json is not None:
-            # A sub-container hint is a bare pointer; drop any cached enumeration so its own
-            # pull never reuses stale members in place of a fresh extract.
-            vid.info_json = {k: v for k, v in vid.info_json.items()
-                             if k not in ("entries", "requested_downloads")}
         entries.append(vid)
     modified = info.get("modified_date")
     return models.PlaylistFull(
