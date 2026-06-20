@@ -98,7 +98,7 @@ def test_extract_pull_video_matches_entry_mapping():
     # extract_pull_video maps a single-video info dict like extract_pull's per-entry path.
     info = {"id": "vidx", "webpage_url": "https://e/v/x", "extractor_key": "Youtube",
             "extractor": "youtube", "title": "X", "thumbnail": "th"}
-    vid = run_bknd.extract_pull_video(info)
+    vid = run_bknd.extract_node(info)
     assert vid.native_id == "vidx" and vid.url == "https://e/v/x"
     assert vid.extractor_key == "youtube" and vid.title == "X"
     assert vid.info_json["id"] == "vidx"
@@ -267,7 +267,7 @@ def test_extract_pull_handles_flat_entries():
     flat_pl = {"webpage_url": "https://x/pl", "id": "pl", "extractor_key": "YouTube",
                "entries": [{"_type": "url", "ie_key": "Youtube", "id": "v1",
                             "url": "https://x/v/1", "title": "V1"}]}
-    v = run_bknd.extract_pull(flat_pl).entries[0]
+    v = run_bknd.extract_node(flat_pl).entries[0]
     assert v.native_id == "v1" and v.url == "https://x/v/1"
     assert v.extractor_key == "youtube" and v.title == "V1"
 
@@ -286,7 +286,7 @@ def test_extract_pull_url_result_classified_by_return_type():
                {"_type": "url", "ie_key": "YoutubePlaylist", "id": "pl1",
                 "url": "https://x/pl/1", "title": "PL1"},
            ]}
-    pl = run_bknd.extract_pull(raw)
+    pl = run_bknd.extract_node(raw)
     by_id = {v.native_id: v for v in pl.entries}
     assert by_id["v1"].container is False   # _RETURN_TYPE 'video' -> known leaf
     assert by_id["tab1"].container is None  # _RETURN_TYPE 'any' -> unknown
@@ -301,7 +301,7 @@ def test_extract_pull_url_result_unknown_ie_key_is_null():
                 "url": "https://x/v/1", "title": "V1"},
                {"_type": "url", "id": "v2", "url": "https://x/v/2", "title": "V2"},
            ]}
-    assert all(v.container is None for v in run_bknd.extract_pull(raw).entries)
+    assert all(v.container is None for v in run_bknd.extract_node(raw).entries)
 
 
 def test_extract_pull_videos_and_subcontainers_in_one_list():
@@ -316,13 +316,16 @@ def test_extract_pull_videos_and_subcontainers_in_one_list():
                 "url": "https://x/pl/sub", "title": "Sub PL",
                 "entries": [{"id": "deep"}]},
            ]}
-    pl = run_bknd.extract_pull(raw)
+    pl = run_bknd.extract_node(raw)
     by_id = {v.native_id: v for v in pl.entries}
     assert by_id["v1"].container is False
     sub = by_id["subpl"]
     assert sub.container is True
     assert sub.url == "https://x/pl/sub"
     assert sub.info_json["entries"] == [{"id": "deep"}]   # carried verbatim (no key-filtering)
+    # the inlined members are also mapped into the typed `entries` (faithfully passed through,
+    # not dropped) so the API can ingest them instead of re-pulling the sub-container.
+    assert [e.native_id for e in sub.entries] == ["deep"]
 
 
 def test_post_result_single_video_discovers_leaf(monkeypatch):
@@ -434,7 +437,7 @@ def _raw_playlist(n=2):
 
 def test_extract_pull_captures_raw_entry_into_info_json():
     raw = _raw_playlist(2)
-    pl = run_bknd.extract_pull(raw)
+    pl = run_bknd.extract_node(raw)
     assert pl.extractor_key == "youtube"        # normalized from "YouTube"
     by_id = {v.native_id: v for v in pl.entries}
     for raw_entry in raw["entries"]:
@@ -447,7 +450,7 @@ def test_extract_pull_captures_raw_entry_into_info_json():
 
 def test_pl_full2things_puts_info_json_in_video_attrs():
     raw = _raw_playlist(2)
-    pl = run_bknd.extract_pull(raw)
+    pl = run_bknd.extract_node(raw)
     graph = xform.pl_full2things(pl, bucket="b", parent_attrs={"cookies": True})
     for vid in graph.members:
         assert vid.attrs["cookies"] is True                     # propagated hint preserved

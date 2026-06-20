@@ -93,27 +93,6 @@ def _pull_chan(info: dict) -> models.UlChan:
                            title=info.get("uploader"))
 
 
-def extract_pull_video(info: dict) -> models.VidFull:
-    """Build a thin VidFull from a raw yt-dlp entry, carrying the raw entry as the hint."""
-    ts = info.get("timestamp")
-    return models.VidFull(
-        # Flat entries carry `url` (not `webpage_url`); full entries carry both.
-        url=info.get("webpage_url") or info.get("url"),
-        native_id=info["id"],
-        extractor_key=_norm_extractor(info),
-        title=info.get("title"),
-        thumbnail_url=info.get("thumbnail"),
-        # yt-dlp `timestamp` is a UTC epoch; store it as a naive-UTC datetime (the V4
-        # convention, models.naive_utcnow) — NOT fromtimestamp()'s worker-local time.
-        # A falsy ts (None or 0 = epoch 1970) is intentionally stored as NULL: no real video
-        # predates 1990, so a 0 is a placeholder, not a date. Do not "fix" this into 1970-01-01.
-        modified=(datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
-                  if ts else None),
-        channel=_pull_chan(info),
-        # Verbatim copy of the raw entry -> Stage-2 load-info hint (needs real `formats`).
-        info_json=dict(info))
-
-
 def is_container(info: dict) -> bool:
     """Does a raw yt-dlp info dict describe a container (playlist/channel) vs a single video?"""
     return info.get("_type") == "playlist" or info.get("entries") is not None
@@ -145,42 +124,62 @@ def _flat_entry_container(entry: dict) -> Optional[bool]:
     return {"video": False, "playlist": True}.get(rt)
 
 
-def extract_pull(info: dict) -> models.PlaylistFull:
-    """Extract the thin pull contract from a raw yt-dlp container info dict.
+def _classify_container(info: dict) -> Optional[bool]:
+    """One explicit container verdict for a raw info dict (root or entry alike).
 
-    Each member becomes one `VidFull` in `entries`, distinguished only by its `container`
-    verdict: a leaf or still-unknown video (False/None), or a sub-container (a channel's
-    tab/sub-playlist, True) the API fans out into its own `container` thing pulled later.
-    Every member carries its flat entry verbatim as the load-info hint (`info_json`).
+    Already playlist-shaped (`_type=='playlist'` or has `entries`) -> True; a flat url-result
+    (yt-dlp handed back only a URL pointer) -> its target extractor's declared return type
+    (True/False/None); otherwise a full-shape video -> False. No ie_key heuristics.
     """
-    assert info.get("webpage_url") is not None  # needed until we get an lmpl id
-    entries: list[models.VidFull] = []
-    for entry in info.get("entries") or []:
-        if entry is None:
-            continue
-        # One explicit container verdict per member: already playlist-shaped -> True; a flat
-        # url-result (yt-dlp handed back only a URL pointer, no clear `_type`) -> its target
-        # extractor's declared return type (True/False/None); otherwise a full-shape video ->
-        # False. No ie_key heuristics.
-        if is_container(entry):
-            container = True
-        elif entry.get("_type") in ("url", "url_transparent"):
-            container = _flat_entry_container(entry)
-        else:
-            container = False
-        vid = extract_pull_video(entry)
-        vid.container = container
-        entries.append(vid)
+    if is_container(info):
+        return True
+    if info.get("_type") in ("url", "url_transparent"):
+        return _flat_entry_container(info)
+    return False
+
+
+def _node_modified(info: dict) -> Optional[datetime.datetime]:
+    """Naive-UTC `modified` from a yt-dlp dict: a video's `timestamp` epoch, else a container's
+    `modified_date` (YYYYMMDD).
+
+    yt-dlp `timestamp` is a UTC epoch; store it as naive-UTC (the V4 convention,
+    models.naive_utcnow) — NOT fromtimestamp()'s worker-local time. A falsy ts (None or 0 =
+    epoch 1970) is intentionally NULL: no real video predates 1990, so a 0 is a placeholder,
+    not a date. Do not "fix" this into 1970-01-01.
+    """
+    ts = info.get("timestamp")
+    if ts:
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
     modified = info.get("modified_date")
-    return models.PlaylistFull(
-        url=info["webpage_url"],
+    return datetime.datetime.strptime(modified, "%Y%m%d") if modified else None
+
+
+def extract_node(info: dict) -> models.PullThing:
+    """Extract the unified pull contract from any raw yt-dlp info dict (the one place that
+    touches yt-dlp's unstable shape).
+
+    Builds a single `PullThing`: identity + display fields, the `container` verdict
+    (`_classify_container`), the raw dict kept verbatim as `info_json` (Stage-2 load-info hint /
+    synthetic-run data), and `entries` mapped through `extract_node` for each member yt-dlp
+    handed back. A flat pull lists members one level deep (the children are flat pointers with
+    empty `entries`); when yt-dlp inlines a sub-playlist's own members they are carried here too
+    — structural mapping of the already-fetched dict, no extra extraction.
+    """
+    return models.PullThing(
+        # Flat entries carry `url` (not `webpage_url`); full entries/containers carry both.
+        url=info.get("webpage_url") or info.get("url"),
         native_id=info.get("id"),
         extractor_key=_norm_extractor(info),
         title=info.get("title"),
-        modified=datetime.datetime.strptime(modified, "%Y%m%d") if modified else None,
+        thumbnail_url=info.get("thumbnail"),
+        modified=_node_modified(info),
         playlist_count=info.get("playlist_count"),
         channel=_pull_chan(info),
-        entries=entries)
+        container=_classify_container(info),
+        # Verbatim copy of the raw dict -> Stage-2 load-info hint (needs real `formats`) and the
+        # recorded data of an inlined sub-container's synthetic run; entries kept (not stripped).
+        info_json=dict(info),
+        entries=[extract_node(entry) for entry in info.get("entries") or [] if entry is not None])
 
 
 def init_download(url: str, *,

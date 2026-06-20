@@ -577,13 +577,13 @@ def _pl_payload(n=3, url="http://example/pl/ingest", native="plingest",
             return None
         return {"id": f"vid{i}", "webpage_url": f"http://example/v/{i}",
                 "formats": [{"format_id": "best", "url": f"http://cdn/{i}.mp4"}]}
-    pl = models.PlaylistFull(
+    pl = models.PullThing(
         url=url, native_id=native, title="Ingest PL",
         modified=datetime.datetime(2026, 1, 31), playlist_count=n,
         extractor_key="youtube",
         channel=models.UlChan(native_id="up1", title="Up One",
                                 url="http://example/up1"),
-        entries=[models.VidFull(
+        entries=[models.PullThing(
             native_id=f"vid{i}", title=f"Video {i}", url=f"http://example/v/{i}",
             thumbnail_url=f"http://example/v/{i}/t.jpg",
             modified=datetime.datetime(2026, 1, i + 1),
@@ -603,14 +603,14 @@ def _chan_payload(url="http://example/chan/ingest", native="chanX",
     are `container=True` members in the same `entries` list, pulled on their own later.
     """
     chan = models.UlChan(native_id=native, title="The Channel", url=url)
-    pl = models.PlaylistFull(
+    pl = models.PullThing(
         url=url, native_id=native, title="The Channel", extractor_key="youtube",
         playlist_count=n_videos + n_playlists,          # members = videos + sub-containers
         channel=chan,                                   # the channel is its own uploader
-        entries=[models.VidFull(
+        entries=[models.PullThing(
             native_id=f"cv{i}", title=f"CVid {i}", url=f"http://example/cv/{i}",
             extractor_key="youtube", channel=chan,      # uploaded BY this channel
-        ) for i in range(n_videos)] + [models.VidFull(
+        ) for i in range(n_videos)] + [models.PullThing(
             native_id=f"{native}pl{j}", title=f"Sub PL {j}", container=True,
             url=f"http://example/chan/{native}/pl{j}",
             extractor_key="youtube", channel=chan,
@@ -719,17 +719,17 @@ def test_ingest_last_success_from_required_fields(client):
     # set); a stub missing any field stays NULL and is claimable as a `meta` job.
     url = "http://example/pl/rate"
     tid, rid = _claimed_run(client, url)
-    pl = models.PlaylistFull(
+    pl = models.PullThing(
         # no playlist channel here: a fanned-out uploader channel is itself a claimable
         # container now, which would outrank the incomplete video below — out of scope for
         # this required-fields->last_success test (channel fan-out is covered by its own tests).
         url=url, native_id="plrate", title="Rate PL", extractor_key="youtube",
         playlist_count=2, channel=models.UlChan(),
         entries=[
-            models.VidFull(native_id="complete", title="Has Title",
+            models.PullThing(native_id="complete", title="Has Title",
                            url="http://example/v/ht", extractor_key="youtube",
                            channel=models.UlChan(url="http://example/chan/ht")),
-            models.VidFull(native_id="notitle", url="http://example/v/nt",
+            models.PullThing(native_id="notitle", url="http://example/v/nt",
                            extractor_key="youtube"),
         ])
     assert client.post(f"/jobs/{rid}/result",
@@ -821,10 +821,10 @@ def test_repull_does_not_clobber_meta_hint_with_flat(client):
     def flat_payload():
         # one under-described member (empty channel) so it stays meta-claimable (last_success
         # NULL); empty playlist channel so no rival channel container is claimable.
-        return models.PlaylistFull(
+        return models.PullThing(
             url=url, native_id="ncpl", title="PL", extractor_key="youtube", playlist_count=1,
             channel=models.UlChan(),
-            entries=[models.VidFull(
+            entries=[models.PullThing(
                 native_id="ncv", url="http://example/v/nc", title="NC",
                 extractor_key="youtube", channel=models.UlChan(),
                 info_json={"_type": "url", "id": "ncv"})],
@@ -857,10 +857,10 @@ def test_subcontainer_info_hint_cleared_on_own_pull(client):
     url = "http://example/pl/subhint"
     tid, rid = _claimed_run(client, url)
     sub_url = "http://example/pl/subhint/sub"
-    payload = models.PlaylistFull(
+    payload = models.PullThing(
         url=url, native_id="subhintpl", title="Parent", extractor_key="youtube",
         playlist_count=1, channel=models.UlChan(),
-        entries=[models.VidFull(
+        entries=[models.PullThing(
             native_id="subh1", url=sub_url, title="Sub PL", container=True,
             extractor_key="youtube", channel=models.UlChan(),
             info_json={"id": "subh1", "webpage_url": sub_url})],
@@ -962,11 +962,11 @@ def test_subcontainer_edge_upgrades_on_own_pull(client):
     c_url = "http://example/chanupg"
     cid, rid = _claimed_run(client, c_url)
     sub_url = "http://example/chanupg/subpl"
-    c_payload = models.PlaylistFull(
+    c_payload = models.PullThing(
         url=c_url, native_id="cupg", title="Chan", extractor_key="youtube",
         playlist_count=1,
         channel=models.UlChan(),                          # no top-level owner
-        entries=[models.VidFull(native_id="subupg", url=sub_url, title="Sub",
+        entries=[models.PullThing(native_id="subupg", url=sub_url, title="Sub",
                                 extractor_key="youtube", container=True)],  # unknown owner
     ).model_dump(mode="json")
     assert client.post(f"/jobs/{rid}/result", json={"playlist": c_payload}).status_code == 200
@@ -980,7 +980,7 @@ def test_subcontainer_edge_upgrades_on_own_pull(client):
     # pull S itself; its own uploader resolves (by url) to C -> owner edge C -> S channel=True
     sjob = _claim(client)
     assert sjob["thing"]["id"] == sid and sjob["download"] is False
-    s_payload = models.PlaylistFull(
+    s_payload = models.PullThing(
         url=sub_url, native_id="subupg", title="Sub", extractor_key="youtube",
         playlist_count=0,
         channel=models.UlChan(native_id="cupg", url=c_url),   # owned by C
@@ -1001,11 +1001,11 @@ def test_curated_subcontainer_membership_and_owner(client):
     p_url = "http://example/curated"
     pid, rid = _claimed_run(client, p_url)
     sub_url = "http://example/x/subpl"
-    payload = models.PlaylistFull(
+    payload = models.PullThing(
         url=p_url, native_id="curated", title="Curated", extractor_key="youtube",
         playlist_count=1,
         channel=models.UlChan(),
-        entries=[models.VidFull(native_id="xsub", url=sub_url, title="X Sub",
+        entries=[models.PullThing(native_id="xsub", url=sub_url, title="X Sub",
                                 extractor_key="youtube", container=True,
                                 channel=models.UlChan(native_id="xowner", title="X",
                                                       url="http://example/xowner"))],
@@ -1022,6 +1022,64 @@ def test_curated_subcontainer_membership_and_owner(client):
     owner = next(e for e in parents if e["channel"] is True)
     assert owner["thing"]["url"] == "http://example/xowner"
     assert owner["thing"]["attrs"]["kind"] == "channel"
+
+
+def test_inlined_subplaylist_ingested_as_completed_run(client):
+    # yt-dlp sometimes hands back a sub-playlist already enumerated (inlined `entries`). Rather
+    # than drop them and re-pull, the endpoint ingests that sub-container as its own successful
+    # run (complete today + scheduled future try_on) and fans out its members. A normal flat
+    # sub-playlist pointer (no entries) stays an unpulled stub pulled on its own schedule.
+    p_url = "http://example/pl/nested"
+    pid, rid = _claimed_run(client, p_url)
+    inlined_url = "http://example/pl/nested/subA"
+    flat_url = "http://example/pl/nested/subB"
+    sub_owner = models.UlChan(native_id="subAown", url="http://example/subAown")
+    payload = models.PullThing(
+        url=p_url, native_id="nested", title="Nested PL", extractor_key="youtube",
+        playlist_count=2, channel=models.UlChan(),
+        entries=[
+            # a sub-playlist yt-dlp returned already enumerated (carries its own members)
+            models.PullThing(
+                native_id="subA", url=inlined_url, title="Sub A", container=True,
+                extractor_key="youtubetab", channel=sub_owner, playlist_count=2,
+                info_json={"id": "subA", "_type": "playlist",
+                           "entries": [{"id": "na1"}, {"id": "na2"}]},
+                entries=[
+                    models.PullThing(native_id="na1", url="http://example/v/na1", title="NA1",
+                                     extractor_key="youtube", channel=sub_owner),
+                    models.PullThing(native_id="na2", url="http://example/v/na2", title="NA2",
+                                     extractor_key="youtube", channel=sub_owner),
+                ]),
+            # a normal flat sub-playlist pointer (no inlined entries)
+            models.PullThing(native_id="subB", url=flat_url, title="Sub B",
+                             container=True, extractor_key="youtubetab"),
+        ],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    kids = [e["thing"] for e in client.get(f"/things/{pid}/related").json()
+            if e["direction"] == "child"]
+    subA = next(t for t in kids if t["native_id"] == "subA")
+    subB = next(t for t in kids if t["native_id"] == "subB")
+
+    # the inlined sub-playlist is recorded as a completed pull: complete today + future try_on
+    assert subA["container"] is True
+    assert subA["last_success_dt"] is not None
+    assert datetime.date.fromisoformat(subA["last_success_dt"][:10]) == _TODAY
+    assert datetime.date.fromisoformat(subA["try_on"]) > _TODAY
+    assert any(run["success"] for run in client.get(f"/things/{subA['id']}/runs").json())
+    # and it shed its load-info hint like any pulled container
+    assert (subA["attrs"] or {}).get("info_json") is None
+
+    # its inlined member videos exist as things with edges from the sub-playlist
+    sub_kids = [e["thing"] for e in client.get(f"/things/{subA['id']}/related").json()
+                if e["direction"] == "child"]
+    assert {t["native_id"] for t in sub_kids} >= {"na1", "na2"}
+
+    # the flat pointer stays an unpulled stub: not complete, due today, no run
+    assert subB["last_success_dt"] is None
+    assert subB["try_on"] == _TODAY.isoformat()
+    assert client.get(f"/things/{subB['id']}/runs").json() == []
 
 
 def test_unknown_url_discovered_as_video(client):

@@ -25,7 +25,7 @@ def next_fib(existing: int | float | None, up: bool) -> int:
             return i
     return FIB[0]
 
-def entry2text(entry: models.VidFull) -> str:
+def entry2text(entry: models.PullThing) -> str:
     """Change a pl member into a single unique string.
 
     Sub-containers (container=True) get a 'pl:' prefix (keyed by native_id, else url) so a
@@ -35,7 +35,7 @@ def entry2text(entry: models.VidFull) -> str:
         return f"pl:{entry.native_id or entry.url or ''}"
     return entry.native_id
 
-def pl2txt(entries: list[models.VidFull]) -> str:
+def pl2txt(entries: list[models.PullThing]) -> str:
     """Change a container's members into a string
 
     Note that we sort and uniq it (order does not matter).
@@ -43,7 +43,7 @@ def pl2txt(entries: list[models.VidFull]) -> str:
     keys = {entry2text(x) for x in entries}
     return "\n".join(sorted(keys))
 
-def pl_hash(entries: list[models.VidFull]) -> bytes:
+def pl_hash(entries: list[models.PullThing]) -> bytes:
     """Hash a container's membership (videos + sub-containers)
 
     Note that the order does not matter
@@ -59,28 +59,21 @@ def pl_hash(entries: list[models.VidFull]) -> bytes:
 # SQLModel select gotcha for the query side (LM-V4-DESIGN.md §6.4): use `col == None` /
 # `is_(None)`, never Python `is not None`, in filters on nullable columns.
 
-def thing_from_vid(vid: models.VidFull) -> models.Thing:
-    """Build a stub `thing` from a playlist entry: a leaf video (container=False) or, for an
-    ambiguous flat url-result, an unknown stub (container=None) classified on its own pull."""
-    return models.Thing(url=vid.url,
-                        extractor_key=vid.extractor_key,
-                        native_id=vid.native_id,
-                        container=vid.container,
-                        title=vid.title,
-                        channel=vid.channel.url,
-                        thumbnail_url=vid.thumbnail_url,
-                        modified=vid.modified)
+def thing_from_node(node: models.PullThing) -> models.Thing:
+    """Build a `thing` from any pull node, carrying its `container` verdict as-is.
 
-
-def thing_from_pl(pl: models.PlaylistFull) -> models.Thing:
-    """Build the container `thing` (container=True) for a playlist/channel."""
-    return models.Thing(url=pl.url,
-                        extractor_key=pl.extractor_key,
-                        native_id=pl.native_id,
-                        container=True,
-                        title=pl.title,
-                        channel=pl.channel.url,
-                        modified=pl.modified)
+    Covers every shape the unified node represents: a leaf video (container=False), an
+    unknown flat url-result (container=None) classified on its own pull (#158), and a
+    container (container=True) for a playlist/channel.
+    """
+    return models.Thing(url=node.url,
+                        extractor_key=node.extractor_key,
+                        native_id=node.native_id,
+                        container=node.container,
+                        title=node.title,
+                        channel=node.channel.url,
+                        thumbnail_url=node.thumbnail_url,
+                        modified=node.modified)
 
 
 def thing_from_chan(chan: models.UlChan) -> Optional[models.Thing]:
@@ -204,7 +197,7 @@ def propagate_attrs(parent_attrs: Optional[dict]) -> Optional[dict]:
     return out or None
 
 
-def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
+def pl_full2things(pl: models.PullThing, *, bucket: str,
                    parent_attrs: Optional[dict] = None) -> ThingGraph:
     """Convert an LM-native container pull into its thing/rel graph.
 
@@ -229,7 +222,7 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
     the propagated soft hints (`attrs.cookies`/`attrs.lpm_lib`, §2.1). Pure constructor (no DB).
     """
     hints = propagate_attrs(parent_attrs)
-    pl_thing = thing_from_pl(pl)
+    pl_thing = thing_from_node(pl)
     pl_thing.bucket = bucket
     members: list[models.Thing] = []
     rels: list[models.Rel] = []
@@ -255,11 +248,14 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
     for vid in pl.entries:
-        vid_thing = thing_from_vid(vid)   # container carried from vid.container (True for subs)
+        vid_thing = thing_from_node(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
         attrs = dict(hints) if hints is not None else {}
         if vid.info_json is not None:
-            attrs[INFO_JSON_KEY] = vid.info_json   # load-info hint (§2.1; subs: entries-stripped)
+            # Load-info hint (§2.1); the raw dict is kept verbatim — a sub-container's inlined
+            # entries ride along but never land on a stub, since refresh_info_hint no-ops for
+            # container=True (the endpoint ingests those entries via its own recursion instead).
+            attrs[INFO_JSON_KEY] = vid.info_json
         if attrs:
             vid_thing.attrs = attrs
         members.append(vid_thing)
@@ -282,7 +278,7 @@ def pl_full2things(pl: models.PlaylistFull, *, bucket: str,
                       channels=list(channels_by_url.values()), rels=rels)
 
 
-def reconcile_count(pl: models.PlaylistFull) -> int:
+def reconcile_count(pl: models.PullThing) -> int:
     """Reconcile a container's reported `playlist_count` against its actual members.
 
     Members = all `entries` (leaf videos + sub-containers, so a channel's count covers both).

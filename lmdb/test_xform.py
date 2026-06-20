@@ -7,8 +7,8 @@ import pytest
 from lmdb import models, xform
 
 
-def _vid(i: int, extractor_key="youtube") -> models.VidFull:
-    return models.VidFull(
+def _vid(i: int, extractor_key="youtube") -> models.PullThing:
+    return models.PullThing(
         native_id=f"vid{i}",
         title=f"Video {i}",
         url=f"http://example/v/{i}",
@@ -20,8 +20,8 @@ def _vid(i: int, extractor_key="youtube") -> models.VidFull:
     )
 
 
-def _pl(n=3) -> models.PlaylistFull:
-    return models.PlaylistFull(
+def _pl(n=3) -> models.PullThing:
+    return models.PullThing(
         url="http://example/pl/1",
         native_id="pl1",
         title="My Playlist",
@@ -37,9 +37,9 @@ def _pl(n=3) -> models.PlaylistFull:
 def test_thing_from_vid_passes_container_through():
     # A known leaf defaults to container=False; an ambiguous flat url-result (container=None)
     # is carried through so its own pull classifies it later (#158).
-    assert xform.thing_from_vid(models.VidFull(native_id="v")).container is False
-    assert xform.thing_from_vid(
-        models.VidFull(native_id="v", container=None)).container is None
+    assert xform.thing_from_node(models.PullThing(native_id="v")).container is False
+    assert xform.thing_from_node(
+        models.PullThing(native_id="v", container=None)).container is None
 
 
 def _pending_leaf(hint=None) -> models.Thing:
@@ -123,9 +123,9 @@ def test_pl_full2things_does_not_set_last_success():
     assert all(v.last_success_dt is None for v in g.members)
 
 
-def _sub(native_id="sub1", url="http://example/pl/sub") -> models.VidFull:
+def _sub(native_id="sub1", url="http://example/pl/sub") -> models.PullThing:
     """A sub-container member (container=True), as extract_pull now yields in `entries`."""
-    return models.VidFull(native_id=native_id, url=url, title="Sub PL",
+    return models.PullThing(native_id=native_id, url=url, title="Sub PL",
                           extractor_key="youtube", container=True,
                           channel=models.UlChan(native_id="up1", title="Up One",
                                                 url="http://example/up1"))
@@ -133,8 +133,8 @@ def _sub(native_id="sub1", url="http://example/pl/sub") -> models.VidFull:
 
 def test_pl_hash_video_and_subcontainer_keys_distinct():
     # A video and a sub-container sharing an id must not collide (the 'pl:' prefix).
-    vid = models.VidFull(native_id="x", url="http://example/v/x", extractor_key="youtube")
-    sub = models.VidFull(native_id="x", url="http://example/pl/x", extractor_key="youtube",
+    vid = models.PullThing(native_id="x", url="http://example/v/x", extractor_key="youtube")
+    sub = models.PullThing(native_id="x", url="http://example/pl/x", extractor_key="youtube",
                          container=True)
     assert xform.pl_hash([vid]) != xform.pl_hash([sub])
     # Order independence still holds across mixed membership.
@@ -158,7 +158,7 @@ def test_pl_full2things_curated_subcontainer_is_membership_with_owner():
 def test_pl_full2things_owned_subcontainer_is_channel():
     # A channel pull (parent node IS the owner) -> one channel=True edge, no owner node.
     chan = models.UlChan(native_id="chan1", title="Chan", url="http://example/chan1")
-    pl = models.PlaylistFull(url="http://example/chan1", native_id="chan1", title="Chan",
+    pl = models.PullThing(url="http://example/chan1", native_id="chan1", title="Chan",
                              extractor_key="youtube", channel=chan,
                              entries=[_sub(native_id="tab1", url="http://example/chan1/vids")])
     pl.entries[0].channel = chan      # the tab is owned by the channel itself
@@ -174,7 +174,7 @@ def test_pl_full2things_unknown_owner_subcontainer_is_membership():
     # No-guess: a sub-container with no discernible owner -> channel=False membership (its
     # ownership edge is established later, when it is pulled itself), and no owner node.
     pl = _pl(0)
-    pl.entries = [models.VidFull(native_id="sub1", url="http://example/pl/sub",
+    pl.entries = [models.PullThing(native_id="sub1", url="http://example/pl/sub",
                                  title="Sub", extractor_key="youtube", container=True)]
     g = xform.pl_full2things(pl, bucket="b")
     sub_thing = next(m for m in g.members if m.container is True)

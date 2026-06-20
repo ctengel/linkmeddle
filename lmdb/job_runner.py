@@ -46,9 +46,9 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     - An ambiguous "both" result (entries AND top-level media, `run_bknd.is_both`) can't be
       classified, so it is reported as a failure (success=False, no body) for a human to inspect
       while `data_json` preserves the raw shape (#164).
-    - A container result (yt-dlp `_type == 'playlist'` or any `entries`) is extracted into the
-      thin PlaylistFull (the Stage-1 fan-out body). Non-None info = success.
-    - Otherwise the result is a single video, extracted into a thin VidFull (`video`) so the
+    - A container result (yt-dlp `_type == 'playlist'` or any `entries`) is extracted into a
+      PullThing (the Stage-1 fan-out body, `playlist`). Non-None info = success.
+    - Otherwise the result is a single video, extracted into a PullThing (`video`) so the
       server enriches the stub identically (display + channel). This covers both an under-
       described C-band video's metadata-only enrichment and an unknown URL that resolved to a
       single video (the server classifies it as a leaf, #153). Success is `info is not None`.
@@ -71,9 +71,9 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
             # human to inspect, rather than silently mis-routing it as a playlist (#164).
             success = False
         elif run_bknd.is_container(info):
-            body['playlist'] = run_bknd.extract_pull(info).model_dump(mode="json")
+            body['playlist'] = run_bknd.extract_node(info).model_dump(mode="json")
         else:
-            body['video'] = run_bknd.extract_pull_video(info).model_dump(mode="json")
+            body['video'] = run_bknd.extract_node(info).model_dump(mode="json")
             if download:
                 oi_uuid = info.get('oi_uuid')
                 success = oi_uuid is not None

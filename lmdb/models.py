@@ -1,8 +1,8 @@
 """LinkMeddle data models
 
-The thin worker->API "pull" contract (UlChan/VidFull/PlaylistFull), the frozen V4
+The thin worker->API "pull" contract (UlChan/PullThing), the frozen V4
 thing/rel/run schema, and the API I/O views. The worker extracts the pull contract
-straight from the raw yt-dlp info dict (run_bknd.extract_pull), so nothing here mirrors
+straight from the raw yt-dlp info dict (run_bknd.extract_node), so nothing here mirrors
 yt-dlp's unstable shape.
 """
 
@@ -18,7 +18,7 @@ from sqlmodel import Field, SQLModel
 # --- The thin "pull" contract (worker -> API) ------------------------------------------
 # A Stage-1 playlist pull, reduced to exactly the fields that land in thing/rel plus the
 # per-video Stage-2 load-info hint. The worker extracts these straight from the unstable
-# yt-dlp info dict (run_bknd.extract_pull), so the API and xform never see raw yt-dlp
+# yt-dlp info dict (run_bknd.extract_node), so the API and xform never see raw yt-dlp
 # shapes — only this stable contract. Fields the DB never stored (duration, ext, formats,
 # categories, ...) are intentionally absent; they remain in the raw blob (run.data_json
 # and each video's attrs.info_json) if a future column ever needs them.
@@ -29,45 +29,34 @@ class UlChan(BaseModel):
     native_id: Optional[str] = None   # uploader_id or channel_id
     title: Optional[str] = None       # uploader
 
-class VidFull(BaseModel):
-    """A discovered container member: just what thing/rel need + the load-info hint.
+class PullThing(BaseModel):
+    """One discovered node — the pull-contract counterpart of the DB `Thing`.
 
-    Usually a leaf video (`container=False`/`None`), but a sub-container member (a
-    channel's tab/playlist) is also a `VidFull` with `container=True` — pulled on its
-    own later. The split into a separate stub type is gone; `container` is the only
-    discriminator.
+    A single recursive model for every member shape: a leaf video (`container=False`), a
+    sub-container (a channel's tab/playlist, `container=True`), an unknown flat url-result
+    (`container=None`, classified on its own pull, #158), or the top-level container itself.
+    The old VidFull/PlaylistFull split was misleading — a sub-playlist was already sent as a
+    `VidFull` with `container=True` — so `container` is the only discriminator now.
+
+    `entries` is normally empty (a flat pull lists members one level deep), but when yt-dlp
+    inlines a sub-playlist's own members they are carried here verbatim so the API can ingest
+    them instead of dropping them. Likewise `info_json` is the raw yt-dlp dict kept verbatim
+    (entries included): it becomes a leaf's Stage-2 load-info hint (needs real `formats`) and,
+    for an inlined sub-container, the recorded `data_json` of its synthetic run.
     """
-    url: Optional[str] = None              # webpage_url
-    native_id: str                         # yt-dlp entry id (also the pl_hash key)
+    url: Optional[str] = None              # webpage_url (or flat-entry url)
+    native_id: Optional[str] = None        # yt-dlp id (the pl_hash key for leaves)
     extractor_key: Optional[str] = None    # normalized lowercase
     title: Optional[str] = None
     thumbnail_url: Optional[str] = None
     modified: Optional[datetime.datetime] = None   # from timestamp/upload_date
+    playlist_count: Optional[int] = None   # containers only
     channel: UlChan = UlChan()
-    # False = a known leaf video; None = unknown (a flat url-result the pull can't classify as
-    # video-vs-sub-playlist) so the stub's own pull resolves it later (#158).
+    # False = a known leaf video; True = a container (playlist/channel); None = unknown (a flat
+    # url-result the pull can't classify as video-vs-sub-playlist) resolved on its own pull (#158).
     container: Optional[bool] = False
-    # Faithful raw yt-dlp entry dict, carried so it can become the Stage-2 load-info hint
-    # (attrs.info_json -> process_ie_result). Kept raw because the download needs `formats`.
-    info_json: Optional[dict] = None
-
-class PlaylistFull(BaseModel):
-    """A discovered container (playlist/channel) + its members (POST /jobs/{id}/result body).
-
-    A flat pull lists each member's identity in `entries` as a `VidFull`: leaf videos
-    (`container=False`/`None`) and sub-containers (a channel's playlists/tabs,
-    `container=True`) alike. The API fans each `container=True` member out into its own
-    `container` thing to be pulled later. This is the top-level result envelope; members
-    are flat (a `VidFull` never nests a sub-pull).
-    """
-    url: str                               # webpage_url
-    native_id: Optional[str] = None
-    extractor_key: Optional[str] = None
-    title: Optional[str] = None
-    modified: Optional[datetime.datetime] = None
-    playlist_count: Optional[int] = None
-    channel: UlChan = UlChan()
-    entries: list[VidFull] = []            # all members; sub-containers carry container=True
+    info_json: Optional[dict] = None       # raw yt-dlp dict, verbatim (see class docstring)
+    entries: list["PullThing"] = []        # members, when yt-dlp inlined them (else empty)
 
 # --- V4 schema (thing / rel / run) -----------------------------------------------------
 # Frozen 4.0 schema per LM-V4-DESIGN.md Part 2. All datetimes are naive UTC
@@ -310,9 +299,12 @@ class RunResultIn(BaseModel):
     Stage-2 (video *meta*): `video` is the single-video metadata fetched for a C-band video
     that the flat pull couldn't describe richly enough for a human to rate (no media, no
     `best_oi`) — the meta-job counterpart of `playlist`.
+
+    Both fields are `PullThing` (the unified node); they stay separate to drive the
+    Stage-1-vs-Stage-2 dispatch and the both-shape guard in the endpoint.
     """
-    playlist: Optional[PlaylistFull] = None
-    video: Optional[VidFull] = None
+    playlist: Optional[PullThing] = None
+    video: Optional[PullThing] = None
     best_oi: Optional[uuid.UUID] = None
     success: bool = True
     data_json: Optional[dict] = None

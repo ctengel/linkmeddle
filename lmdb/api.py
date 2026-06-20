@@ -429,15 +429,108 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
 
 
-def _apply_video_metadata(session: Session, video: Thing, pull: models.VidFull) -> None:
+def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing) -> None:
     """Enrich a video thing from a full single-video extract — shared by meta + download.
 
     NULL-backfills identity + display fields (#147) and fans out the uploader's channel
     (thing + channel_video rel) the flat pull omitted. Does NOT touch best_oi/try_on/
     last_success — those per-outcome decisions stay with the caller.
     """
-    _apply_backfill(session, video, xform.thing_from_vid(pull))
+    _apply_backfill(session, video, xform.thing_from_node(pull))
     _fanout_video_channel(session, video, pull.channel)
+
+
+def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
+                 container: Thing, now: datetime.datetime) -> None:
+    """Ingest one Stage-1 container pull: record the run, fan out the thing/rel graph, and
+    classify+complete the container (the body of submit_result's Stage-1 path).
+
+    `run`/`container` are the (already-fetched) in-progress run and its thing. Recurses into any
+    member that arrives with its own inlined `entries` — yt-dlp occasionally hands back a
+    sub-playlist already enumerated, and rather than dropping that and re-pulling it later, we
+    ingest it now as its own successful run with a scheduled future `try_on`, exactly as if it
+    had been pulled on its own (no extra yt-dlp extraction). Does not commit; the top-level
+    submit_result tail (`_finish`) does the single commit for the whole tree.
+    """
+    # Stubs inherit the container's bucket (immutable, [A10]) and its propagated soft hints
+    # (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
+    graph = xform.pl_full2things(pull, bucket=container.bucket, parent_attrs=container.attrs)
+
+    run.entries_hash = xform.pl_hash(pull.entries)
+    run.playlist_count = xform.reconcile_count(pull)
+
+    # The recorded thing IS the container: backfill it, classify it, mark success.
+    _apply_backfill(session, container, graph.playlist)
+    container.container = True
+    container.last_success_dt = now
+    xform.clear_info_hint(container)   # "just a playlist": hint cleared after its own pull
+    # A container that is its own videos' uploader or owns sub-containers is acting as a
+    # channel — tag the display hint (any channel=True edge it parents, idempotent).
+    if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):
+        xform.merge_attr(container, "kind", "channel")
+
+    # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
+    # its source node — used to spot a sub-container that came with inlined entries (below).
+    node_by_stub = {member.id: node for member, node in zip(graph.members, pull.entries)}
+    nested: list[tuple[Thing, models.PullThing]] = []
+
+    remap = {graph.playlist.id: container.id}
+    for stub in graph.members + graph.channels:
+        existing = _find_thing(session, stub)
+        if existing is not None:
+            thing = existing
+            _apply_backfill(session, existing, stub)
+            xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
+            # Carry a freshly-discovered channel hint onto a pre-existing container.
+            if (stub.attrs or {}).get("kind") == "channel":
+                xform.merge_attr(existing, "kind", "channel")
+        else:
+            thing = stub
+            session.add(stub)
+        # A video is metadata-complete once its fields are enough to rate (a present title);
+        # decided API-side (§Stage 1). Set once, when still NULL (a fresh stub always is);
+        # else it stays NULL and a `meta` job enriches it later.
+        if (thing.container is False and thing.last_success_dt is None
+                and xform.enough_to_rate(thing)):
+            thing.last_success_dt = now
+        # A sub-container yt-dlp handed back already enumerated (inlined `entries`): ingest it now
+        # as its own successful run (recursion below) instead of re-pulling it later. Only while
+        # it is still an unpulled stub (last_success_dt NULL), and never re-typing a known leaf
+        # (the container switch guard). A flat sub-playlist pointer (no entries, the normal case)
+        # falls through and is pulled on its own schedule.
+        node = node_by_stub.get(stub.id)
+        if (node is not None and node.container is True and node.entries
+                and thing.last_success_dt is None
+                and not xform.container_switch(thing.container, True)):
+            nested.append((thing, node))
+        remap[stub.id] = thing.id
+    session.flush()  # persist new stubs so the rel FKs resolve
+
+    # Bulk upsert the edges in one statement keyed on the (parent, child) PK. On conflict we
+    # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
+    # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
+    # sub-container first seen as channel=False membership becomes channel=True once it is
+    # pulled itself and reveals the parent as its owner. A single pull's graph.rels has no
+    # duplicate (parent, child) pairs (each member is a fresh child id; the only other edges
+    # are owner->child and pl_chan->pl), so DO UPDATE can't affect a row twice in one batch.
+    rows = [{"parent": remap[rel.parent], "child": remap[rel.child], "channel": rel.channel}
+            for rel in graph.rels]
+    if rows:
+        stmt = pg_insert(Rel).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["parent", "child"],
+            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
+        session.execute(stmt)
+
+    _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+
+    # Inlined sub-playlists: record each as its own successful run (entries verbatim in
+    # data_json) and recurse so its members fan out and it gets a scheduled future try_on.
+    for sub_thing, node in nested:
+        sub_run = Run(thing_id=sub_thing.id, worker=run.worker,
+                      starttime=now, endtime=now, success=True, data_json=node.info_json)
+        session.add(sub_run)
+        _ingest_pull(session, sub_run, node, sub_thing, now)
 
 
 @app.post("/jobs/claim", response_model=JobClaim,
@@ -599,61 +692,5 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     if item.playlist is None:
         raise HTTPException(status_code=422,
                             detail="playlist or video is required on a successful run")
-    # Stubs inherit the dispatched container's bucket (immutable, [A10]) and its propagated
-    # soft hints (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
-    graph = xform.pl_full2things(item.playlist, bucket=pl_thing.bucket,
-                                 parent_attrs=pl_thing.attrs)
-
-    run.entries_hash = xform.pl_hash(item.playlist.entries)
-    run.playlist_count = xform.reconcile_count(item.playlist)
-
-    # The dispatched thing IS the container: backfill it, classify it, mark success.
-    _apply_backfill(session, pl_thing, graph.playlist)
-    pl_thing.container = True
-    pl_thing.last_success_dt = now
-    xform.clear_info_hint(pl_thing)   # "just a playlist": hint cleared after its own pull
-    # A container that is its own videos' uploader or owns sub-containers is acting as a
-    # channel — tag the display hint (any channel=True edge it parents, idempotent).
-    if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):
-        xform.merge_attr(pl_thing, "kind", "channel")
-
-    remap = {graph.playlist.id: pl_thing.id}
-    for stub in graph.members + graph.channels:
-        existing = _find_thing(session, stub)
-        if existing is not None:
-            thing = existing
-            _apply_backfill(session, existing, stub)
-            xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
-            # Carry a freshly-discovered channel hint onto a pre-existing container.
-            if (stub.attrs or {}).get("kind") == "channel":
-                xform.merge_attr(existing, "kind", "channel")
-        else:
-            thing = stub
-            session.add(stub)
-        # A video is metadata-complete once its fields are enough to rate (a present title);
-        # decided API-side (§Stage 1). Set once, when still NULL (a fresh stub always is);
-        # else it stays NULL and a `meta` job enriches it later.
-        if (thing.container is False and thing.last_success_dt is None
-                and xform.enough_to_rate(thing)):
-            thing.last_success_dt = now
-        remap[stub.id] = thing.id
-    session.flush()  # persist new stubs so the rel FKs resolve
-
-    # Bulk upsert the edges in one statement keyed on the (parent, child) PK. On conflict we
-    # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
-    # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
-    # sub-container first seen as channel=False membership becomes channel=True once it is
-    # pulled itself and reveals the parent as its owner. A single pull's graph.rels has no
-    # duplicate (parent, child) pairs (each member is a fresh child id; the only other edges
-    # are owner->child and pl_chan->pl), so DO UPDATE can't affect a row twice in one batch.
-    rows = [{"parent": remap[rel.parent], "child": remap[rel.child], "channel": rel.channel}
-            for rel in graph.rels]
-    if rows:
-        stmt = pg_insert(Rel).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["parent", "child"],
-            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
-        session.execute(stmt)
-
-    _set_try_on(session, pl_thing)   # successful container run -> next backoff date (§4.4)
+    _ingest_pull(session, run, item.playlist, pl_thing, now)
     return _finish(session, run)
