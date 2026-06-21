@@ -10,7 +10,7 @@ Mapping:
   - playlistsched rows    → thing(container=True, human_rating=1.0, try_on=today)
   - other playlistsum     → thing(container=True, human_rating=None,  try_on=today)
   - playlistvid entries   → thing(container=False, human_rating=None)
-  - OI lookup per video   → thing.best_oi (try_on=None if acquired, else today)
+  - OI lookup per video   → thing.best_oi (acquired: try_on=None, last_success_dt=now; else today)
   - playlistvid rows      → rel(parent=playlist, child=video, channel=False)
   - every thing           → one synthetic run(worker="v3-migration", success=True)
 """
@@ -135,6 +135,11 @@ def main():
             human_rating=None,
             best_oi=best_oi,
             try_on=None if best_oi else today,
+            # An acquired video is terminal (its synthetic run succeeded): mark it complete so it
+            # doesn't read as metadata-incomplete. V3 stored no per-video title/url, so display
+            # fields are backfilled by identity (extractor_key+native_id) on the parent playlist's
+            # next Stage-1 re-pull; a non-acquired video stays last_success_dt=NULL for that pull.
+            last_success_dt=now if best_oi else None,
             created_dt=now,
         )
         vid_thing_map[key] = thing

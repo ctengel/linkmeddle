@@ -33,7 +33,9 @@ def entry2text(entry: models.PullThing) -> str:
     """
     if entry.container is True:
         return f"pl:{entry.native_id or entry.url or ''}"
-    return entry.native_id
+    # A leaf/unknown member keys by native_id, falling back to url (then '') so a member with no
+    # yt-dlp id never yields None — sorted()/join() in pl2txt require comparable, joinable strings.
+    return entry.native_id or entry.url or ""
 
 def pl2txt(entries: list[models.PullThing]) -> str:
     """Change a container's members into a string

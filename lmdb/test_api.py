@@ -1186,7 +1186,8 @@ def test_video_gets_playlist_body_is_failure(client):
 def test_both_bodies_is_failure(client):
     # #164: a body carrying both a video and a playlist is contradictory — record a plain failure
     # and never mutate the classification (set once, never reset). The seeded container=False
-    # stays False, best_oi is not applied, and no relationships / member stubs are recorded.
+    # stays False, and no relationships / member stubs are recorded. A best_oi (media already
+    # uploaded) is preserved so the OI object isn't orphaned, but the thing is NOT marked acquired.
     oi = str(uuid.uuid4())
     vid, rid = _claimed_download(client, url="http://e/both")   # seeded container=False
     r = client.post(f"/jobs/{rid}/result",
@@ -1196,7 +1197,7 @@ def test_both_bodies_is_failure(client):
     assert r.status_code == 200 and r.json()["success"] is False
     t = client.get(f"/things/{vid}").json()
     assert t["container"] is False          # unchanged: classification is never reset
-    assert t["best_oi"] is None             # not applied on a contradictory failure
+    assert t["best_oi"] == oi               # preserved (media uploaded) but not marked acquired
     assert t["last_failure_dt"] is not None
     assert t["try_on"] is not None          # backoff applied (not marked acquired)
     # no relationships fanned out and no member stubs created (the seeded thing is the only one)

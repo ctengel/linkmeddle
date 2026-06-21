@@ -658,7 +658,18 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     # classification: record a plain failure (+ backoff) and never mutate `container` — a thing's
     # classification is set once and only switched via the guard below (never reset).
     if item.playlist is not None and item.video is not None:
+        # Keep best_oi if media was already uploaded — preserve the ref to investigate so the OI
+        # object isn't orphaned — but do NOT mark acquired, fan out rels, or re-classify.
+        if pl_thing is not None and item.best_oi is not None:
+            pl_thing.best_oi = item.best_oi
         return _fail()
+
+    # A successful result must carry exactly one shape. The both-shape case is handled above, so a
+    # neither-shape body is malformed (422). Guard it here, before the container-switch check, so an
+    # empty body can't be misread as a `video` body proposing container=False on a known leaf.
+    if item.playlist is None and item.video is None:
+        raise HTTPException(status_code=422,
+                            detail="playlist or video is required on a successful run")
 
     # Container is set once: NULL->value classifies (below), value->same affirms, but a switch
     # (a `video` body proposing False on a known container, or a `playlist` body proposing True

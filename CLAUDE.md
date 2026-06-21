@@ -52,8 +52,10 @@ The DB is **PostgreSQL** (V4; JSONB `thing`/`rel`/`run`); tables are auto-create
 
 Several files are symlinks that share code across components — edit the real file, not the link:
 - `lmdb/linkmeddle_playlist.py` → `yt-dlp-plugins/.../postprocessor/linkmeddle_playlist.py`
-- `lmdb/ytdl_arch_oi.py` → `apiqueue/ytdl_arch_oi.py`
 - `lmfe/lmdb` → `../lmdb` (so `lmfe` imports `lmdb.models`)
+
+(`lmdb/ytdl_arch_oi.py` was a symlink to the now-deleted `apiqueue/ytdl_arch_oi.py`; it is a
+real file again — the V2-era `apiqueue/` copy is gone.)
 
 ## Environment variables
 

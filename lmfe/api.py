@@ -126,10 +126,14 @@ async def get_thing(thing_id: str):
             sub_resps = await asyncio.gather(*[
                 client.get(_plapi(f"/things/{r.thing.id}/related"))
                 for r in direct_children
-            ])
+            ], return_exceptions=True)
             for parent_rel, sub_resp in zip(direct_children, sub_resps):
+                # Optional enrichment: a single failed/slow/missing sub-container must not 500 the
+                # whole page (the primary thing+related calls already succeeded). Skip it instead.
+                if isinstance(sub_resp, Exception) or sub_resp.status_code != 200:
+                    continue
                 for r in [pl_models.RelatedThing.model_validate(x)
-                          for x in _checked(sub_resp).json()]:
+                          for x in sub_resp.json()]:
                     if r.direction == "child" and r.thing.container is False:
                         page.indirect_children.append(fe_models.IndirectChild(
                             container_id=parent_rel.thing.id,

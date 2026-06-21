@@ -146,12 +146,21 @@ def _node_modified(info: dict) -> Optional[datetime.datetime]:
     models.naive_utcnow) — NOT fromtimestamp()'s worker-local time. A falsy ts (None or 0 =
     epoch 1970) is intentionally NULL: no real video predates 1990, so a 0 is a placeholder,
     not a date. Do not "fix" this into 1970-01-01.
+
+    A `modified_date` that isn't a clean YYYYMMDD is treated as absent (NULL), not an error:
+    extract_node runs this on every node in the tree, so one oddly-shaped date must not abort
+    the whole pull.
     """
     ts = info.get("timestamp")
     if ts:
         return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).replace(tzinfo=None)
     modified = info.get("modified_date")
-    return datetime.datetime.strptime(modified, "%Y%m%d") if modified else None
+    if not modified:
+        return None
+    try:
+        return datetime.datetime.strptime(modified, "%Y%m%d")
+    except (ValueError, TypeError):
+        return None
 
 
 def extract_node(info: dict) -> models.PullThing:
