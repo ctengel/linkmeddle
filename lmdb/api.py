@@ -355,10 +355,10 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
             thing.try_on = _today()
     # Soft-hint edits (V3 PATCH-schedule parity): write into attrs JSONB, preserving the rest;
     # an explicit null clears the hint (the merge_attr(..., None) pattern submit_result uses).
-    if "cookies" in data:
-        xform.merge_attr(thing, "cookies", data["cookies"])
-    if "lpm_lib" in data:
-        xform.merge_attr(thing, "lpm_lib", data["lpm_lib"])
+    # Same hint set add_thing propagates, so a new hint stays settable on both create and edit.
+    for hint in xform._PROPAGATE_HINTS:
+        if hint in data:
+            xform.merge_attr(thing, hint, data[hint])
     if "container" in data:  # NULL->value sets it; switching a set value is a 409
         _set_container_hint(thing, data["container"])
     session.add(thing)
@@ -636,13 +636,19 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
 
     pl_thing = session.get(Thing, run.thing_id)
 
-    # Failure is handled identically for every job kind (record + backoff), so do it once
-    # up front before the per-kind success paths below (§4.4).
-    if not item.success:
+    def _fail() -> RunRead:
+        """Record this run as a failure (+ backoff) and finalize — the shared terminal path
+        for every failure kind (reported failure, both-shape guard, container-switch)."""
+        run.success = False
         if pl_thing is not None:
             pl_thing.last_failure_dt = now
             _set_try_on(session, pl_thing)
         return _finish(session, run)
+
+    # Failure is handled identically for every job kind (record + backoff), so do it once
+    # up front before the per-kind success paths below (§4.4).
+    if not item.success:
+        return _fail()
         # TODO still try to get metadata from a failed download?
 
     # Both-shape guard (#164): a successful result must be exactly one shape — a Stage-1 playlist
@@ -652,20 +658,13 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
     # classification: record a plain failure (+ backoff) and never mutate `container` — a thing's
     # classification is set once and only switched via the guard below (never reset).
     if item.playlist is not None and item.video is not None:
-        if pl_thing is not None:
-            pl_thing.last_failure_dt = now
-            _set_try_on(session, pl_thing)
-        run.success = False
-        return _finish(session, run)
+        return _fail()
 
     # Container is set once: NULL->value classifies (below), value->same affirms, but a switch
     # (a `video` body proposing False on a known container, or a `playlist` body proposing True
     # on a known leaf) is rejected as a failure (+ backoff) — never silently re-typed.
     if pl_thing is not None and xform.container_switch(pl_thing.container, item.video is None):
-        pl_thing.last_failure_dt = now
-        _set_try_on(session, pl_thing)
-        run.success = False
-        return _finish(session, run)
+        return _fail()
 
     # Stage-2 video result — one common metadata-ingest path for `meta` and `download`
     # (distinct from the Stage-1 container fan-out below). Identified by a `video` body, which

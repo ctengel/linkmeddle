@@ -70,11 +70,10 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
             # Ambiguous video+playlist shape we can't classify: fail (data_json kept) for a
             # human to inspect, rather than silently mis-routing it as a playlist (#164).
             success = False
-        elif run_bknd.is_container(info):
-            body['playlist'] = run_bknd.extract_node(info).model_dump(mode="json")
         else:
-            body['video'] = run_bknd.extract_node(info).model_dump(mode="json")
-            if download:
+            container = run_bknd.is_container(info)
+            body['playlist' if container else 'video'] = run_bknd.extract_node(info).model_dump(mode="json")
+            if not container and download:
                 oi_uuid = info.get('oi_uuid')
                 success = oi_uuid is not None
                 body['best_oi'] = str(oi_uuid) if oi_uuid else None

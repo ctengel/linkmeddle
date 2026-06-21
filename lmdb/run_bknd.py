@@ -248,12 +248,8 @@ def init_download(url: str, *,
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if download and oibucket:
-                oitags_parts = []
-                if run_id:
-                    oitags_parts.append(f"lm-run-id={run_id}")
-                if thing_id:
-                    oitags_parts.append(f"lm-thing-id={thing_id}")
-                oitags = ",".join(oitags_parts) or None
+                tags = {"lm-run-id": run_id, "lm-thing-id": thing_id}
+                oitags = ",".join(f"{k}={v}" for k, v in tags.items() if v) or None
                 ydl.add_post_processor(ObjIdxUploadPP(oibucket=oibucket, lpmlib=lpmlib,
                                                       oitags=oitags))
             if info_dict is not None:
