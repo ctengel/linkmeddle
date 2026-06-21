@@ -12,12 +12,11 @@ V4 decouples playlist metadata pulls from video downloads ("fan-out") and adds p
 dnf install postgresql-server ffmpeg   # or apt equivalent
 
 # Python deps
-pip install -U "yt-dlp[default,curl-cffi]" sqlmodel fastapi typer "psycopg[binary]" \
-    https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip \
-    https://github.com/ctengel/objectindex/archive/master.zip
-```
+pip install -U -r requirements.txt
 
-For tests also install `pytest-postgresql` (needs system `initdb`/`pg_ctl`).
+# Also needed for tests (requires system initdb/pg_ctl)
+pip install pytest-postgresql
+```
 
 ### Environment variables
 
@@ -112,7 +111,7 @@ your rustc is too old to compile the `v8` crate. Options:
 
 ## V1–V2 (legacy)
 
-`scripts/` is V1-era ad-hoc scrapers. `apiqueue/` is V2-era Celery (dead since ~2021); its deps (`requirements.txt`: flask/celery/redis/rabbitmq) are no longer needed for V4.
+`scripts/` is V1-era ad-hoc scrapers. `apiqueue/` is V2-era Celery (dead since ~2021); its deps (flask/celery/redis/rabbitmq) are no longer needed for V4.
 
 ## Raspberry Pi hardware tips
 

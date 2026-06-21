@@ -1,7 +1,7 @@
-click
-flask
-celery
-requests
-redis
-bs4
-yt-dlp
+yt-dlp[default,curl-cffi]
+sqlmodel
+fastapi
+typer
+psycopg[binary]
+https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip
+https://github.com/ctengel/objectindex/archive/master.zip

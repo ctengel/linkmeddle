@@ -27,7 +27,7 @@ pytest lmdb/test_api.py                       # all
 pytest lmdb/test_api.py::test_name            # single test
 ```
 
-Install for development (deps not vendored): `pip install -U "yt-dlp[default]" sqlmodel fastapi typer "psycopg[binary]" pytest-postgresql https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip` plus `requirements.txt` (the latter is mostly V1/V2 legacy: flask/celery/redis). Also needs `ffmpeg`. V4 requires **PostgreSQL** (`psycopg`); the test suite spins up a throwaway cluster via `pytest-postgresql` (uses the system `initdb`/`pg_ctl`).
+Install for development (deps not vendored): `pip install -U -r requirements.txt` plus `pytest-postgresql` for tests. Also needs `ffmpeg`. V4 requires **PostgreSQL** (`psycopg`); the test suite spins up a throwaway cluster via `pytest-postgresql` (uses the system `initdb`/`pg_ctl`).
 
 ## Architecture (lmdb + lmfe)
 
