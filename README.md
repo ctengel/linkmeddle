@@ -28,6 +28,42 @@ OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket
 
 `OBJIDX_URL= OBJIDX_AUTH= LINKMEDDLE_PLAPI= ~/venv/bin/fastapi dev lmfe/api.py fastapi --port 29062`
 
+## Deno, etc
+
+See the [yt-dlp EJS wiki](https://github.com/yt-dlp/yt-dlp/wiki/EJS)
+
+### Installing
+
+https://docs.deno.com/runtime/getting_started/installation/
+
+From cargo on Fedora/RHEL (builds from source — takes a while):
+
+```bash
+dnf install cargo clang
+cargo install deno --locked
+ln -s ~/.cargo/bin/deno ~/.local/bin/deno   # or wherever is on your PATH
+```
+
+**Known issue** building Deno via cargo requires a recent `rustc`. If you see a compile error like:
+
+```
+error[E0658]: `let` expressions in this position are unstable
+  --> .../v8-.../build.rs:1034:8
+```
+
+your rustc is too old to compile the `v8` crate that Deno depends on. Options:
+- Install a newer rustc via [rustup](https://rust-lang.github.io/rustup/concepts/channels.html) (nightly or a recent stable)
+- Use a prebuilt Deno binary from the official installer instead of cargo
+
+### curl_cffi
+
+
+```bash
+pip install -U "yt-dlp[default,curl-cffi]"
+```
+
+See https://github.com/yt-dlp/yt-dlp#impersonation
+
 ## lm v1-2
 
 linkmeddle.py had core code; most should work via that.  Some others require the other scripts.
