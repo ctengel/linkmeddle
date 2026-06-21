@@ -5,3 +5,4 @@ typer
 psycopg[binary]
 https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip
 https://github.com/ctengel/objectindex/archive/master.zip
+https://github.com/ctengel/simpler-objects/archive/master.zip

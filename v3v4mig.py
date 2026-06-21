@@ -16,6 +16,7 @@ Mapping:
 """
 
 import argparse
+import json
 import sqlite3
 import sys
 import uuid
@@ -65,7 +66,7 @@ def main():
     v3.row_factory = sqlite3.Row
 
     playlists = v3.execute("SELECT * FROM playlistsum").fetchall()
-    schedules = {r["playlist_id"]: r
+    schedules = {r["webpage_url"]: r
                  for r in v3.execute("SELECT * FROM playlistsched").fetchall()}
     vid_rows = v3.execute("SELECT * FROM playlistvid").fetchall()
 
@@ -77,7 +78,7 @@ def main():
     skipped_pl = 0
     for pl in playlists:
         pl_id = pl["playlist_id"]
-        sched = schedules.get(pl_id)
+        sched = schedules.get(pl["webpage_url"])
         bucket = sched["oi_bucket"] if sched else args.default_bucket
         if not bucket:
             print(f"SKIP playlist {pl_id} ({pl['webpage_url']!r}): no bucket (pass --default-bucket)",
@@ -123,10 +124,10 @@ def main():
             print(f"SKIP video {key}: no resolvable parent bucket", file=sys.stderr)
             skipped_vid += 1
             continue
-        print(f"  [{i}/{len(unique_vids)}] OI lookup {extractor_id.lower()} {vid_id} ...",
-              end=" ", flush=True)
+        # print(f"  [{i}/{len(unique_vids)}] OI lookup {extractor_id.lower()} {vid_id} ...",
+        #       end=" ", flush=True)
         best_oi = _get_oi_uuid(oi, extractor_id, vid_id)
-        print("found" if best_oi else "not found")
+        # print("found" if best_oi else "not found")
         thing = Thing(
             container=False,
             native_id=vid_id or None,
@@ -177,6 +178,15 @@ def main():
     print(f"  Runs            : {len(runs)}")
 
     if args.dry_run:
+        print("\n--- THINGS ---")
+        for t in all_things:
+            print(json.dumps(t.model_dump(mode='json')))
+        print("\n--- RELS ---")
+        for r in rels:
+            print(json.dumps(r.model_dump(mode='json')))
+        print("\n--- RUNS ---")
+        for run in runs:
+            print(json.dumps(run.model_dump(mode='json')))
         print("\nDry-run: no changes written.")
         return
 
