@@ -425,6 +425,7 @@ async function renderThingPage(thingId, ctxId) {
   const isContainer = page.container === true;
   const children = (page.related || []).filter(r => r.direction === "child");
   const parents = (page.related || []).filter(r => r.direction === "parent");
+  const indirectChildren = page.indirect_children || [];
 
   // page.download_url arrives inline from GET /things/{id} (the single-thing endpoint
   // resolves the requested thing's OI URL). No separate /playback call for the current video.
@@ -440,6 +441,7 @@ async function renderThingPage(thingId, ctxId) {
         </div>
 
         ${isContainer ? renderChildrenCard(children, page.id) : ""}
+        ${isContainer && indirectChildren.length ? renderIndirectChildrenCard(indirectChildren) : ""}
         ${isVideo && parents.length ? renderParentsCard(parents) : ""}
 
       </div>
@@ -507,6 +509,22 @@ function renderChildrenCard(children, containerId) {
     `;
   }).join("");
   return `<div class="card"><h3>Contents (${children.length})</h3>${rows}</div>`;
+}
+
+function renderIndirectChildrenCard(items) {
+  const rows = items.map(ic => {
+    const t = ic.thing;
+    return `
+      <div class="item-row" onclick="location.hash='#/thing/${t.id}?ctx=${ic.container_id}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        <span class="muted">${escapeHtml(ic.container_title || "")}</span>
+        ${renderTypeBadge(t)}
+        ${renderGradeBadge(t)}
+        ${!t.file_available ? `<span class="muted">(no file)</span>` : ""}
+      </div>
+    `;
+  }).join("");
+  return `<div class="card"><h3>Videos (${items.length})</h3>${rows}</div>`;
 }
 
 function renderParentsCard(parents) {

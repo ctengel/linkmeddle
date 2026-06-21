@@ -113,13 +113,31 @@ async def get_thing(thing_id: str):
         thing_resp, related_resp = await asyncio.gather(
             client.get(_plapi(f"/things/{thing_id}")),
             client.get(_plapi(f"/things/{thing_id}/related")))
-    thing = pl_models.ThingRead.model_validate(_checked(thing_resp).json())
-    related = [pl_models.RelatedThing.model_validate(r) for r in _checked(related_resp).json()]
-    page = fe_models.ThingPage(**fe_models.ThingSummary.from_thing_read(thing).model_dump())
-    page.related = [
-        fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
-                                 thing=fe_models.ThingSummary.from_thing_read(r.thing))
-        for r in related]
+        thing = pl_models.ThingRead.model_validate(_checked(thing_resp).json())
+        related = [pl_models.RelatedThing.model_validate(r) for r in _checked(related_resp).json()]
+        page = fe_models.ThingPage(**fe_models.ThingSummary.from_thing_read(thing).model_dump())
+        page.related = [
+            fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
+                                     thing=fe_models.ThingSummary.from_thing_read(r.thing))
+            for r in related]
+
+        direct_children = [r for r in related if r.direction == "child"]
+        if direct_children and all(r.thing.container is True for r in direct_children):
+            sub_resps = await asyncio.gather(*[
+                client.get(_plapi(f"/things/{r.thing.id}/related"))
+                for r in direct_children
+            ])
+            for parent_rel, sub_resp in zip(direct_children, sub_resps):
+                for r in [pl_models.RelatedThing.model_validate(x)
+                          for x in _checked(sub_resp).json()]:
+                    if r.direction == "child" and r.thing.container is False:
+                        page.indirect_children.append(fe_models.IndirectChild(
+                            container_id=parent_rel.thing.id,
+                            container_title=parent_rel.thing.title,
+                            channel=r.channel,
+                            thing=fe_models.ThingSummary.from_thing_read(r.thing),
+                        ))
+
     # Resolve only the requested thing's OI URL inline (one cheap call; containers have no
     # best_oi so this is a no-op for them). The `related` neighbors are left unresolved — a
     # container page must not presign every child's OI URL; the SPA prefetches those it needs

@@ -111,11 +111,20 @@ class RelatedSummary(pydantic.BaseModel):
     thing: ThingSummary
 
 
+class IndirectChild(pydantic.BaseModel):
+    """A video reachable through a sub-container, surfaced when all direct children are containers."""
+    container_id: uuid.UUID
+    container_title: Optional[str] = None
+    channel: bool
+    thing: ThingSummary
+
+
 class ThingPage(ThingSummary):
     """One-call page view-model: a thing, its neighbors, and (for an acquired
     video) a resolved OI playback URL handed straight to the consumer — the data
     path is not proxied."""
     related: list[RelatedSummary] = []
+    indirect_children: list[IndirectChild] = []
     download_url: Optional[str] = None
 
 
