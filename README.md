@@ -1,42 +1,97 @@
 # linkmeddle
-LINKed MEDia DL
+LINKed MEDia DL — downloads media and tracks/schedules playlists.
 
-## lm v3-4
+## V4 (current)
 
-### API/DB
+V4 decouples playlist metadata pulls from video downloads ("fan-out") and adds per-item ratings to drive what gets fetched. The backend is FastAPI + PostgreSQL; the frontend (`lmfe`) is a separate FastAPI app for the human GUI/bookmarklet.
 
-`fastapi dev --port 29072`
+### Install
 
-### CLI
+```bash
+# System deps
+dnf install postgresql-server ffmpeg   # or apt equivalent
 
-`python -m lmdb.cli --help`
-
-### job runner all-in-one
-
-v3 only
-
-- Install deno
-- setup venv?
-
-```
-pip install -U "yt-dlp[default]"
-pip install sqlmodel  https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip https://github.com/ctengel/objectindex/archive/master.zip
-OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket bucket --no-playlist "https:/something.com/video"
+# Python deps
+pip install -U "yt-dlp[default,curl-cffi]" sqlmodel fastapi typer "psycopg[binary]" \
+    https://github.com/ctengel/yt-dlp-obj-idx/archive/master.zip \
+    https://github.com/ctengel/objectindex/archive/master.zip
 ```
 
-### lmfe
+For tests also install `pytest-postgresql` (needs system `initdb`/`pg_ctl`).
 
-`OBJIDX_URL= OBJIDX_AUTH= LINKMEDDLE_PLAPI= ~/venv/bin/fastapi dev lmfe/api.py fastapi --port 29062`
+### Environment variables
 
-## Deno, etc
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | PostgreSQL DSN; defaults to `postgresql+psycopg:///lmdb` |
+| `LINKMEDDLE_PLAPI` | Backend URL (used by CLI, frontend, yt-dlp postprocessor) |
+| `OBJIDX_URL` | Object Index base URL (required for uploads) |
+| `OBJIDX_AUTH` | Object Index auth token |
+| `OBJIDX_BUCKET_DEFAULT` | Default OI bucket (lmfe) |
+| `CRUSTULA_URL` | Cookie/auth microservice (when a schedule sets `use_cookies`) |
 
-See the [yt-dlp EJS wiki](https://github.com/yt-dlp/yt-dlp/wiki/EJS)
+### Running
 
-### Installing
+```bash
+# Backend API + DB (creates tables on first start)
+DATABASE_URL=postgresql+psycopg:///lmdb fastapi dev lmdb/api.py --port 29072
 
-https://docs.deno.com/runtime/getting_started/installation/
+# Frontend GUI
+OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user LINKMEDDLE_PLAPI=http://localhost:29072/ \
+    fastapi dev lmfe/api.py --port 29062
 
-From cargo on Fedora/RHEL (builds from source — takes a while):
+# Schedule a playlist
+LINKMEDDLE_PLAPI=http://localhost:29072/ python -m lmdb.cli --help
+
+# Run all due jobs (pull-one-and-loop; claims jobs from the API)
+OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user LINKMEDDLE_PLAPI=http://localhost:29072/ \
+    python -m lmdb.job_runner
+
+# Download one URL directly (bypasses the job queue)
+OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user \
+    python -m lmdb.run_bknd --oibucket bucket --no-playlist "https://example.com/video"
+
+# Tests
+pytest lmdb/test_api.py
+```
+
+### Migrating from V3
+
+V3 used SQLite; V4 uses PostgreSQL. The migration script reads your V3 `.db` file, looks up each downloaded video in Object Index, and writes things/rels/runs into the V4 PostgreSQL database.
+
+```bash
+# 1. Stand up the V4 DB and let the API create tables
+DATABASE_URL=postgresql+psycopg:///lmdb fastapi dev lmdb/api.py --port 29072
+# (start it once, then stop it)
+
+# 2. Dry run to check counts and spot skipped items
+DATABASE_URL=postgresql+psycopg:///lmdb \
+OBJIDX_URL=http://... OBJIDX_AUTH=user \
+    python lmdb/schema/155.py --v3-db /path/to/v3.db --dry-run
+
+# 3. Run for real (add --default-bucket if some playlists had no schedule)
+DATABASE_URL=postgresql+psycopg:///lmdb \
+OBJIDX_URL=http://... OBJIDX_AUTH=user \
+    python lmdb/schema/155.py --v3-db /path/to/v3.db [--default-bucket BUCKET]
+```
+
+What the script maps:
+
+- `playlistsched` rows → `thing(container=True, human_rating=1.0, try_on=today)`
+- other `playlistsum` → `thing(container=True, human_rating=None, try_on=today)`
+- `playlistvid` entries → `thing(container=False)`; OI is searched to backfill `best_oi`
+- `playlistvid` rows → `rel(parent=playlist, child=video, channel=False)`
+- Every migrated thing gets one synthetic `run(worker="v3-migration", success=True)`
+
+Playlists whose bucket cannot be determined (no schedule and no `--default-bucket`) are skipped with a warning.
+
+## Deno
+
+See https://github.com/yt-dlp/yt-dlp/wiki/EJS
+
+### Installing Deno
+
+See the [official install docs](https://docs.deno.com/runtime/getting_started/installation/). On Fedora/RHEL, build from cargo:
 
 ```bash
 dnf install cargo clang
@@ -44,57 +99,25 @@ cargo install deno --locked
 ln -s ~/.cargo/bin/deno ~/.local/bin/deno   # or wherever is on your PATH
 ```
 
-**Known issue** building Deno via cargo requires a recent `rustc`. If you see a compile error like:
+**Known issue:** building via cargo requires a recent `rustc`. If you see:
 
 ```
 error[E0658]: `let` expressions in this position are unstable
   --> .../v8-.../build.rs:1034:8
 ```
 
-your rustc is too old to compile the `v8` crate that Deno depends on. Options:
-- Install a newer rustc via [rustup](https://rust-lang.github.io/rustup/concepts/channels.html) (nightly or a recent stable)
-- Use a prebuilt Deno binary from the official installer instead of cargo
+your rustc is too old to compile the `v8` crate. Options:
+- Install a newer rustc via [rustup](https://rust-lang.github.io/rustup/concepts/channels.html)
+- Use a prebuilt Deno binary from the official installer instead
 
-### curl_cffi
+## V1–V2 (legacy)
 
-
-```bash
-pip install -U "yt-dlp[default,curl-cffi]"
-```
-
-See https://github.com/yt-dlp/yt-dlp#impersonation
-
-## lm v1-2
-
-linkmeddle.py had core code; most should work via that.  Some others require the other scripts.
-
-## Dependencies
-- See `requirements.txt`
-- ffmpeg
-- rabbitmq-server
-- redis-server
-- git (needed for development)
-- python3-pip (needed for install)
-- screen (recommended)
+`scripts/` is V1-era ad-hoc scrapers. `apiqueue/` is V2-era Celery (dead since ~2021); its deps (`requirements.txt`: flask/celery/redis/rabbitmq) are no longer needed for V4.
 
 ## Raspberry Pi hardware tips
-* keep an eye on CPU temp with `$ vcgencmd measure_temp`; bad things seem to start happening around 65 degrees.
-* Do use an SSD for initial download; lots of temp files etc
-* Don't use some nonsense filesystem like NTFS; prefer native Linux.
-* Do move swap to ssd instead of SD card - see `/etc/dphys-swapfile`; `CONF_SWAPFILE` and also set `CONF_SWAPSIZE` to 2048 (default is 100)
-* Try not to kill multiple ffmpeg's at same time; cleanup is lots of CPU
-* Try cutting dirty pages ratio in half - default is `vm.dirty_background_ratio = 10` and `vm.dirty_ratio = 20` - we set both to half by `/etc/sysctl.d/local.conf`
-* see https://github.com/ctengel/objectindex README
 
-## Uninstallation
-
-Overwrite hard drive
-
-```
-sudo dd if=/dev/zero of=/mnt/abc/abc.dd bs=1048576 count=524288
-sudo dd if=/dev/zero of=/dev/sda bs=1048576 count=524288 status=progress
-sudo parted /dev/sda
-sudo mkfs.ext4 /dev/sda1
-```
-
-Also hdparm can be investigated.
+- Monitor CPU temp: `vcgencmd measure_temp`; problems start around 65 °C
+- Use an SSD for downloads (lots of temp files)
+- Move swap to SSD: set `CONF_SWAPFILE` and `CONF_SWAPSIZE=2048` in `/etc/dphys-swapfile`
+- Halve dirty page ratios: set `vm.dirty_background_ratio=5` and `vm.dirty_ratio=10` in `/etc/sysctl.d/local.conf`
+- See also the [objectindex README](https://github.com/ctengel/objectindex)
