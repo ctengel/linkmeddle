@@ -53,10 +53,11 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
       described C-band video's metadata-only enrichment and an unknown URL that resolved to a
       single video (the server classifies it as a leaf, #153). Success is `info is not None`.
 
-    `download` adds the Stage-2 media outcome: the OI file UUID from info['oi_uuid'] (set by
-    ObjIdxUploadPP) as `best_oi`, and success becomes `oi_uuid is not None`, NOT merely
-    `info is not None` — _ydl uses ignoreerrors='only_download', so yt-dlp returns an info dict
-    even when the media download failed (the upload PP then never ran, leaving no oi_uuid).
+    `download` adds the Stage-2 media outcome: the OI file UUID set by ObjIdxUploadPP
+    (`run_bknd.result_oi_uuid`, which reads it from `requested_downloads` where yt-dlp leaves
+    it) as `best_oi`, and success becomes `oi_uuid is not None`, NOT merely `info is not None`
+    — yt-dlp can return an info dict even when the media download failed (the upload PP then
+    never ran, leaving no oi_uuid).
     `download` is only ever set for a single-video job, so it never collides with a playlist body.
 
     `data_json` carries the raw output (kept even on a failed download for debugging);
@@ -74,7 +75,7 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
             container = run_bknd.is_container(info)
             body['playlist' if container else 'video'] = run_bknd.extract_node(info).model_dump(mode="json")
             if not container and download:
-                oi_uuid = info.get('oi_uuid')
+                oi_uuid = run_bknd.result_oi_uuid(info)
                 success = oi_uuid is not None
                 body['best_oi'] = str(oi_uuid) if oi_uuid else None
     body['success'] = success

@@ -299,8 +299,11 @@ def reconcile_count(pl: models.PullThing) -> int:
 
 # Fields backfilled onto an existing thing from a fresher pull when they are still NULL
 # (#147). Never overwrites a value already present; `container` is classified separately
-# by the ingest endpoint (NULL -> True/False on first pull), not here.
-_BACKFILL_FIELDS = ("title", "extractor_key", "native_id",
+# by the ingest endpoint (NULL -> True/False on first pull), not here. `url` is included so a
+# stub first created without a webpage URL (e.g. a flat entry that only carried id+ie_key) gets
+# it filled on a later pull/meta — required for enough_to_rate. Safe for containers: they are
+# keyed by URL, so theirs is never NULL and is never overwritten.
+_BACKFILL_FIELDS = ("url", "title", "extractor_key", "native_id",
                     "channel", "thumbnail_url", "modified")
 
 

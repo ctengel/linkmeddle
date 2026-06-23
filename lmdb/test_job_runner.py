@@ -94,6 +94,30 @@ def test_post_result_download_sends_video_and_best_oi(monkeypatch):
     assert body["best_oi"] == "11111111-1111-1111-1111-111111111111" and body["success"] is True
 
 
+def test_post_result_download_reads_oi_uuid_from_requested_downloads(monkeypatch):
+    # yt-dlp runs post-processors on a per-format copy stashed under `requested_downloads` and
+    # returns the original top-level dict, so ObjIdxUploadPP's oi_uuid lands there, NOT at top
+    # level. post_result must still find it (regression: a successful upload was reported as a
+    # failed run with best_oi NULL).
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    info = {"id": "vid9", "webpage_url": "https://e/v/9", "extractor": "YouTube", "title": "T",
+            "requested_downloads": [{"oi_uuid": "22222222-2222-2222-2222-222222222222"}]}
+    job_runner.post_result("http://api/", "r9", info, download=True)
+    body = captured["body"]
+    assert body["best_oi"] == "22222222-2222-2222-2222-222222222222" and body["success"] is True
+
+
+def test_result_oi_uuid_prefers_top_level_then_scans_downloads():
+    assert run_bknd.result_oi_uuid({"oi_uuid": "top"}) == "top"
+    assert run_bknd.result_oi_uuid(
+        {"requested_downloads": [{}, {"oi_uuid": "nested"}]}) == "nested"
+    assert run_bknd.result_oi_uuid({"requested_downloads": []}) is None
+    assert run_bknd.result_oi_uuid({}) is None
+
+
 def test_extract_pull_video_matches_entry_mapping():
     # extract_pull_video maps a single-video info dict like extract_pull's per-entry path.
     info = {"id": "vidx", "webpage_url": "https://e/v/x", "extractor_key": "Youtube",

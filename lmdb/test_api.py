@@ -1391,6 +1391,21 @@ def test_meta_result_enriches_without_acquiring(client):
     # last_success_dt being set is sufficient to prove meta_branch won't re-dispatch this video.
 
 
+def test_meta_result_backfills_null_url(client):
+    # A stub first created without a webpage URL (only native_id) gets `url` filled from the
+    # fresh extract — url is a NULL-backfill field, required for enough_to_rate.
+    v, rid = _claimed_meta(client, native_id="uurl1", url=None)   # url-less stub
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "uurl1", "url": "http://e/real-url",
+                                    "title": "T", "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/chan/u"},
+                                    "info_json": {"id": "uurl1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["url"] == "http://e/real-url"               # NULL url backfilled from the fetch
+
+
 def test_meta_result_incomplete_is_still_terminal(client):
     # A meta result still missing identity fields (here: no channel) is nonetheless TERMINAL:
     # the full single-video extract can't be improved by re-running it, so last_success_dt is

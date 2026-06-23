@@ -106,6 +106,23 @@ def is_both(info: dict) -> bool:
         info.get("oi_uuid") or info.get("requested_downloads") or info.get("formats"))
 
 
+def result_oi_uuid(info: dict):
+    """The OI upload UUID from a download result.
+
+    yt-dlp runs post-processors on a per-format *copy* of the info dict
+    (`process_video_result` stashes those copies under `requested_downloads` and
+    returns the original), so `ObjIdxUploadPP`'s `oi_uuid` lands on the copy, not at
+    top level. Prefer a top-level value (future-proof / load-info hint) then scan the
+    per-download entries.
+    """
+    if info.get("oi_uuid"):
+        return info["oi_uuid"]
+    for dl in info.get("requested_downloads") or []:
+        if dl.get("oi_uuid"):
+            return dl["oi_uuid"]
+    return None
+
+
 def _flat_entry_container(entry: dict) -> Optional[bool]:
     """Container-ness of a flat url-result entry from its extractor's declared return type.
 
