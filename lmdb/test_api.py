@@ -676,6 +676,38 @@ def test_ingest_fans_out(client):
     assert chans and all(c["bucket"] == "plbucket" for c in chans)
 
 
+def test_ingest_duplicate_entries(client):
+    # A playlist that lists the same video twice: both stubs remap to one thing id, which used
+    # to emit duplicate (parent, child) rel rows in one ON CONFLICT batch -> CardinalityViolation
+    # (HTTP 500). The ingest must dedupe, succeed, and leave a single edge per (parent, child).
+    url = "http://example/pl/dup"
+    tid, rid = _claimed_run(client, url)
+    up = models.UlChan(native_id="dupup", title="Dup Up", url="http://example/dupup")
+    dup_vid = dict(native_id="dupvid", title="Dup Video", url="http://example/v/dup",
+                   extractor_key="youtube", channel=up)
+    payload = models.PullThing(
+        url=url, native_id="pldup", title="Dup PL", extractor_key="youtube",
+        playlist_count=2, channel=up,
+        entries=[models.PullThing(**dup_vid), models.PullThing(**dup_vid)],
+    ).model_dump(mode="json")
+
+    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert r.status_code == 200       # pre-fix this was a 500 CardinalityViolation
+    assert r.json()["success"] is True
+
+    # The duplicate collapses to one video thing, reachable by exactly one membership edge.
+    related = client.get(f"/things/{tid}/related").json()
+    kids = [e for e in related if e["direction"] == "child"]
+    assert len(kids) == 1 and kids[0]["channel"] is False
+    vids = client.get("/things/", params={"container": False}).json()
+    assert len(vids) == 1
+
+    # The video's uploader (channel=True) edge is also deduped to a single edge.
+    vid_related = client.get(f"/things/{vids[0]['id']}/related").json()
+    chan_parents = [e for e in vid_related if e["direction"] == "parent" and e["channel"]]
+    assert len(chan_parents) == 1
+
+
 def test_ingest_empty_playlist(client):
     # An empty playlist (0 entries) must be classified container=True so it is re-pulled.
     url = "http://example/pl/empty"

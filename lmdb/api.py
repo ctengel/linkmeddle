@@ -510,11 +510,18 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
     # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
     # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
     # sub-container first seen as channel=False membership becomes channel=True once it is
-    # pulled itself and reveals the parent as its owner. A single pull's graph.rels has no
-    # duplicate (parent, child) pairs (each member is a fresh child id; the only other edges
-    # are owner->child and pl_chan->pl), so DO UPDATE can't affect a row twice in one batch.
-    rows = [{"parent": remap[rel.parent], "child": remap[rel.child], "channel": rel.channel}
-            for rel in graph.rels]
+    # pulled itself and reveals the parent as its owner.
+    #
+    # graph.rels has fresh, distinct child ids, but remap can collapse distinct stubs onto the
+    # same thing id (e.g. a playlist listing the same video twice), producing duplicate
+    # (parent, child) pairs after remap. Postgres rejects a single ON CONFLICT statement that
+    # proposes the same conflict key twice (CardinalityViolation), so merge duplicates here,
+    # OR-ing channel (the same monotonic-upgrade rule as the on-conflict below).
+    edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
+    for rel in graph.rels:
+        key = (remap[rel.parent], remap[rel.child])
+        edges[key] = edges.get(key, False) or rel.channel
+    rows = [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()]
     if rows:
         stmt = pg_insert(Rel).values(rows)
         stmt = stmt.on_conflict_do_update(
