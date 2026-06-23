@@ -36,7 +36,7 @@ def _get_oi_uuid(oi, extractor_key: str, native_id: str):
         files = oi.search_files({"extra": f"ytdl-id={search_key}"})
     except Exception as exc:
         print(f"  WARN: OI search failed for {search_key!r}: {exc}", file=sys.stderr)
-        return None
+        return None, None
     for f in files:
         if not f.object or not f.object.get("completed"):
             continue
@@ -44,9 +44,21 @@ def _get_oi_uuid(oi, extractor_key: str, native_id: str):
             continue
         ek = f.info.get("extra", {}).get("ytdl-extractor", "")
         if ek.lower() == extractor_key.lower():
+            #print(f.info)
             raw = f.uuid
-            return uuid.UUID(str(raw)) if not isinstance(raw, uuid.UUID) else raw
-    return None
+            url = f.info.get('url')
+            return (uuid.UUID(str(raw)) if not isinstance(raw, uuid.UUID) else raw, url)
+    return None, None
+
+def _ves(inp):
+    if inp == 'youtube:tab':
+        return 'youtube'
+    return inp
+
+def _pes(inp):
+    if inp == 'youtube:tab':
+        return 'youtubetab'
+    return inp
 
 
 def main():
@@ -69,6 +81,13 @@ def main():
     schedules = {r["webpage_url"]: r
                  for r in v3.execute("SELECT * FROM playlistsched").fetchall()}
     vid_rows = v3.execute("SELECT * FROM playlistvid").fetchall()
+
+    playlists = [dict(x) for x in playlists]
+    for x in playlists:
+        x['extractor_id'] = _pes(x['extractor_id'])
+    vid_rows = [dict(x) for x in vid_rows]
+    for x in vid_rows:
+        x['extractor_id'] = _ves(x['extractor_id'])
 
     # --- OI client ------------------------------------------------------------
     oi = oic.get_obj_idx_env()
@@ -98,6 +117,13 @@ def main():
             created_dt=now,
         )
         pl_thing_map[pl_id] = thing
+    
+    for y in pl_thing_map.values():
+        if y.extractor_key == 'youtubetab':
+            y.extractor_key = None
+            y.native_id = None
+    for y in sorted((x.native_id, x.extractor_key, x.url) for x in pl_thing_map.values() if x.native_id is not None):
+        print(y)
 
     # --- Collect per-video bucket (inherit from first scheduled parent) --------
     vid_bucket_map: dict[tuple, str] = {}   # (vid_id, extractor_id) → bucket
@@ -116,18 +142,20 @@ def main():
     # --- Build video things (with OI lookup) ----------------------------------
     vid_thing_map: dict[tuple, Thing] = {}
     skipped_vid = 0
-    unique_vids = {(r["vid_id"], r["extractor_id"]) for r in vid_rows}
+    unique_vids = {(r["vid_id"], r['extractor_id']) for r in vid_rows}
     for i, (vid_id, extractor_id) in enumerate(sorted(unique_vids), 1):
         key = (vid_id, extractor_id)
         bucket = vid_bucket_map.get(key)
         if not bucket:
-            print(f"SKIP video {key}: no resolvable parent bucket", file=sys.stderr)
-            skipped_vid += 1
-            continue
-        # print(f"  [{i}/{len(unique_vids)}] OI lookup {extractor_id.lower()} {vid_id} ...",
-        #       end=" ", flush=True)
-        best_oi = _get_oi_uuid(oi, extractor_id, vid_id)
-        # print("found" if best_oi else "not found")
+            print(f"DEFAULT BUCKET video {key}: no resolvable parent bucket", file=sys.stderr)
+            bucket = args.default_bucket
+            #skipped_vid += 1
+            #continue
+        print(f"  [{i}/{len(unique_vids)}] OI lookup {extractor_id.lower()} {vid_id} ...",
+              end=" ", flush=True)
+        best_oi, url = _get_oi_uuid(oi, extractor_id, vid_id)
+        print("found" if best_oi else "not found")
+        #print(url)
         thing = Thing(
             container=False,
             native_id=vid_id or None,
@@ -142,8 +170,23 @@ def main():
             # next Stage-1 re-pull; a non-acquired video stays last_success_dt=NULL for that pull.
             last_success_dt=now if best_oi else None,
             created_dt=now,
+            url=url
         )
         vid_thing_map[key] = thing
+
+    print(len(vid_thing_map), len(set(x[0] for x in vid_thing_map.keys())))
+    
+    for i in set(x[0] for x in vid_thing_map.keys()):
+        same_id = [x[1] for x in vid_thing_map.keys() if x[0] == i]
+        if len(same_id) == 1:
+            continue
+        print(i, same_id)
+        for j in same_id:
+            print(vid_thing_map[(i,j)])
+        # TODO generalize
+        #del vid_thing_map[(i, 'youtube:tab')]
+    
+    print(set(x[1] for x in vid_thing_map.keys()))
 
     # --- Build rels (deduplicated) --------------------------------------------
     rel_set: set[tuple] = set()
@@ -152,6 +195,8 @@ def main():
         vid = vid_thing_map.get((row["vid_id"], row["extractor_id"]))
         if pl and vid:
             rel_set.add((pl.id, vid.id))
+        else:
+            print('skip', row["playlist_id"], row["vid_id"], row["extractor_id"], bool(pl), bool(vid))
 
     rels = [Rel(parent=p, child=c, channel=False) for p, c in rel_set]
 
@@ -179,6 +224,7 @@ def main():
 
     if args.dry_run:
         print("\n--- THINGS ---")
+        print(len(all_things), len(set(x.native_id for x in all_things)))
         for t in all_things:
             print(json.dumps(t.model_dump(mode='json')))
         print("\n--- RELS ---")
@@ -195,6 +241,9 @@ def main():
     with Session(engine) as session:
         for thing in all_things:
             session.add(thing)
+        session.commit()
+        for thing in all_things:
+            session.refresh(thing)
         for rel in rels:
             session.add(rel)
         for run in runs:

@@ -97,7 +97,7 @@ def report_failure(api_base: str, job: dict, worker: str) -> None:
                 use_cookies=job.get("cookies", False), worker=worker)
 
 
-def initiate_job(api_base: str, job: dict, worker: str) -> None:
+def initiate_job(api_base: str, job: dict, worker: str) -> bool:
     """Run one claimed job and report its result — one common path for every job kind.
 
     The only knob is `download`: when False (a container/unknown pull, or a C-band video the
@@ -126,6 +126,7 @@ def initiate_job(api_base: str, job: dict, worker: str) -> None:
         info_dict=attrs.get(xform.INFO_JSON_KEY))
     post_result(api_base, run_id, info, download=download,
                 use_cookies=cookies, worker=worker)
+    return bool(info)
 
 
 def main() -> int:
@@ -133,23 +134,30 @@ def main() -> int:
     """Pull-one-and-loop: claim -> run -> report, until nothing is due."""
     status = 0
     count = 0
+    fails = 0
     while True:
+        succ = False
         job = claim_job(LINKMEDDLE_PLAPI, WORKER)
         if job is None:
             break
         count += 1
         try:
-            initiate_job(LINKMEDDLE_PLAPI, job, WORKER)
+            succ = initiate_job(LINKMEDDLE_PLAPI, job, WORKER)
         except Exception as exc:  # never let one job kill the loop
+            succ = False
             warnings.warn(f"Job {job.get('run_id')} failed: {exc}")
             status = 1
             # Report the failure so the run is finalized and the thing backs off, rather than
-            # being re-claimed forever (the API never saw a result). Guard the report itself
-            # so a reporting failure still can't wedge the loop.
-            try:
-                report_failure(LINKMEDDLE_PLAPI, job, WORKER)
-            except Exception as rexc:
-                warnings.warn(f"Could not report failure for run {job.get('run_id')}: {rexc}")
+            # being re-claimed forever (the API never saw a result). If reporting itself fails,
+            # let the exception propagate and crash the worker — a network error here means
+            # something is structurally wrong, not just a bad job.
+            report_failure(LINKMEDDLE_PLAPI, job, WORKER)
+        if not succ:
+            status = 1
+            fails += 1
+        if fails >= 3:
+            print(f"Stopping after {fails} fails, and {count} jobs; worker={WORKER}.")
+            return status
     print(f"Ran {count} job(s); worker={WORKER}.")
     return status
 
