@@ -32,6 +32,12 @@ from .models import (Thing, Rel, Run, ThingRead, RelatedThing,
 _VIDEO_DOWNLOAD_FLOOR = xform.BAND_FLOOR["B"]
 # Run-eligibility floor for playlists/other (the C band): below it nothing is dispatched.
 _PLAYLIST_FLOOR = xform.BAND_FLOOR["C"]
+# Claim lease: a thing with an in-progress run newer than this is excluded from dispatch, so
+# concurrent workers never double-claim it (§4.5). A full day, consistent with the minimum
+# `try_on` backoff granularity (dispatch works in whole days, `try_on <= today`): a worker that
+# crashes hard (kill -9, which `report_failure` can't catch) leaves a zombie in-progress run,
+# and the lease lets the thing return on the next day — the same cadence a backed-off thing would.
+CLAIM_LEASE = datetime.timedelta(days=1)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
@@ -576,10 +582,22 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
         rating < _VIDEO_DOWNLOAD_FLOOR,
         Thing.last_success_dt == None, Thing.best_oi == None,  # noqa: E711
         Thing.try_on <= today)
+    # Exclude things with a fresh in-progress run (success IS NULL, claimed within the lease):
+    # this is what makes concurrent workers safe — once a worker claims a thing and commits its
+    # run, the row lock is gone, so SKIP LOCKED alone would let a second worker re-claim the same
+    # thing (§4.5 risk #2). The lease lets a hard-crashed worker's zombie run expire (see
+    # CLAIM_LEASE). Harmless for the single-worker case: a clean failure is finalized by
+    # report_failure/result-ingest, so no in-progress run lingers between loop iterations.
+    active = select(Run.thing_id).where(
+        Run.success == None,  # noqa: E711  (SQL IS NULL)
+        Run.starttime > models.naive_utcnow() - CLAIM_LEASE)
     stmt = (select(Thing)
-            .where(or_(stage1_branch, video_branch, meta_branch))
+            .where(or_(stage1_branch, video_branch, meta_branch), Thing.id.notin_(active))
             .order_by(sa.desc(Thing.container.isnot(False)), rating.desc(), Thing.try_on.asc())
             .limit(1).with_for_update(skip_locked=True))
+    # Worker self-selection (§4.5): a worker may pin itself to one extractor's jobs.
+    if item.extractor is not None:
+        stmt = stmt.where(Thing.extractor_key == item.extractor.lower())
     thing = session.exec(stmt).first()
     if thing is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -460,6 +460,46 @@ def test_claim_creates_in_progress_run(client):
     assert runs[0]["success"] is None and runs[0]["worker"] == "w1"   # in-progress marker
 
 
+# --- jobs: worker self-selection + concurrent-claim safety (#27, §4.5) ------------------
+# (_seed_run / _seed_run_at below insert in-progress / time-offset runs directly.)
+
+def test_claim_extractor_filter(client):
+    # Worker self-selection: a claim pinned to an extractor only sees that extractor's jobs.
+    yt = _seed_thing(type="playlist", url="http://e/yt", human_rating=1.0, try_on=_TODAY,
+                     extractor_key="youtube")
+    _seed_thing(type="playlist", url="http://e/vm", human_rating=2.0, try_on=_TODAY,
+                extractor_key="vimeo")   # higher-rated, but a different extractor
+    r = client.post("/jobs/claim", json={"extractor": "YouTube"})   # case-insensitive
+    assert r.status_code == 200 and r.json()["thing"]["id"] == yt
+    # An extractor with no eligible job yields 204 even though other jobs are due.
+    assert client.post("/jobs/claim", json={"extractor": "dailymotion"}).status_code == 204
+
+
+def test_claim_excludes_in_progress(client):
+    # Concurrent-claim safety: a thing with a fresh in-progress run is not re-handed out, so two
+    # workers partition the work instead of double-running the same thing (§4.5 risk #2).
+    a = _seed_thing(type="playlist", url="http://e/ip-a", human_rating=2.0, try_on=_TODAY)
+    b = _seed_thing(type="playlist", url="http://e/ip-b", human_rating=1.0, try_on=_TODAY)
+    assert _claim(client)["thing"]["id"] == a   # claim 1 opens an in-progress run on A
+    assert _claim(client)["thing"]["id"] == b   # claim 2 skips A, gets B
+    assert _claim(client) is None               # both in-flight -> nothing left
+
+
+def test_claim_lease_recovers_stale_run(client):
+    # A hard-crashed worker leaves a zombie in-progress run; once it's older than the lease the
+    # thing becomes claimable again (it would otherwise be blocked forever).
+    t = _seed_thing(type="playlist", url="http://e/stale", human_rating=1.0, try_on=_TODAY)
+    _seed_run_at(t, None, -(int(api.CLAIM_LEASE.total_seconds()) + 60))  # stale in-progress run
+    assert _claim(client)["thing"]["id"] == t
+
+
+def test_claim_fresh_in_progress_blocks(client):
+    # The lease's counterpart: a recent in-progress run (within the lease) hides the thing.
+    t = _seed_thing(type="playlist", url="http://e/fresh", human_rating=1.0, try_on=_TODAY)
+    _seed_run(t)   # fresh in-progress run
+    assert _claim(client) is None
+
+
 # --- machine ratings: compute-on-read (Task 2.2 / §2.4) --------------------------------
 
 def _seed_rel(parent: str, child: str, channel: bool = False) -> None:

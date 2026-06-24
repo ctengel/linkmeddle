@@ -269,9 +269,11 @@ class ThingPatch(BaseModel):
 
 
 class ClaimRequest(BaseModel):
-    """Body for POST /jobs/claim. 4.x adds self-selection filters (type/extractor/site/
-    backend — §4.5); 4.0 only records which worker claimed the job."""
+    """Body for POST /jobs/claim. `worker` records which runner claimed the job; `extractor`
+    is worker self-selection (§4.5) — pin this worker to one extractor's jobs. The remaining
+    self-selection filters (type/site/backend — §4.5) stay 4.x."""
     worker: Optional[str] = None
+    extractor: Optional[str] = None  # self-selection: only claim this extractor's jobs (§4.5)
 
 
 class JobClaim(BaseModel):

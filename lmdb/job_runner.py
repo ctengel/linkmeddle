@@ -7,27 +7,32 @@ it, pushes the result to `POST /jobs/{run_id}/result`, and asks again until noth
 Single worker in 4.0; the claim endpoint's SKIP LOCKED makes it safe once a 2nd appears.
 """
 
-# TODO allow specifying a given extractor
 # TODO use models from lmdb.models where appropriate
 
 import os
 import socket
+import argparse
 import warnings
 import requests
 from . import run_bknd, xform
 
 LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
-# TODO add pid
-WORKER = os.environ.get("LM_WORKER", socket.gethostname())
+# Include the pid so concurrent workers on one host are distinguishable in run.worker (§4.5).
+WORKER = os.environ.get("LM_WORKER", f"{socket.gethostname()}/{os.getpid()}")
 CLAIM_TIMEOUT = 30
 RESULT_TIMEOUT = 64  # large playlists make a big POST body (mirrors the old plugin)
 
 # TODO prepare for bearer auth
 
-def claim_job(api_base: str, worker: str) -> dict | None:
-    """Claim the single highest-priority due job, or None when nothing is due (204)."""
+def claim_job(api_base: str, worker: str, extractor: str | None = None) -> dict | None:
+    """Claim the single highest-priority due job, or None when nothing is due (204).
+
+    `extractor` pins this worker to one extractor's jobs (worker self-selection, §4.5)."""
+    body = {"worker": worker}
+    if extractor:
+        body["extractor"] = extractor
     resp = requests.post(f"{api_base.rstrip('/')}/jobs/claim",
-                         json={"worker": worker}, timeout=CLAIM_TIMEOUT)
+                         json=body, timeout=CLAIM_TIMEOUT)
     resp.raise_for_status()
     if resp.status_code == 204:
         return None
@@ -130,15 +135,22 @@ def initiate_job(api_base: str, job: dict, worker: str) -> bool:
     return bool(info)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     # TODO style is like a cronjob then?
-    """Pull-one-and-loop: claim -> run -> report, until nothing is due."""
+    """Pull-one-and-loop: claim -> run -> report, until nothing is due.
+
+    `--extractor` pins this worker to one extractor's jobs (worker self-selection, §4.5);
+    run the process N times (each with its own filter) for parallel/heterogeneous workers."""
+    parser = argparse.ArgumentParser(description="LinkMeddle job runner")
+    parser.add_argument("-e", "--extractor", default=None,
+                        help="only claim jobs for this yt-dlp extractor (e.g. youtube)")
+    args = parser.parse_args(argv)
     status = 0
     count = 0
     fails = 0
     while True:
         succ = False
-        job = claim_job(LINKMEDDLE_PLAPI, WORKER)
+        job = claim_job(LINKMEDDLE_PLAPI, WORKER, args.extractor)
         if job is None:
             break
         count += 1
