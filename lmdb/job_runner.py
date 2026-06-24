@@ -168,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         if not succ:
             status = 1
             fails += 1
+            # Log every failure explicitly: warnings.warn dedupes by (message, lineno) so
+            # repeated identical failures (e.g. no-url stubs) print once, and several fail
+            # paths are silent. This guarantees `fails` == count of FAIL lines for diagnosis.
+            url = (job.get("thing") or {}).get("url")
+            print(f"FAIL run={job['run_id']} download={job['download']} url={url!r}")
         if fails >= 3:
             print(f"Stopping after {fails} fails, and {count} jobs; worker={WORKER}.")
             return status

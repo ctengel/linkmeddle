@@ -238,6 +238,22 @@ def test_main_reports_failure_on_raising_job(monkeypatch):
     assert reported["run_id"] == "rX" and reported["info"] is None  # posted a failure
 
 
+def test_main_logs_each_failure(monkeypatch, capsys):
+    # Each failing job must print its own FAIL line so `fails` == count of visible lines,
+    # independent of warnings.warn dedup (the no-url stub case prints once otherwise).
+    jobs = iter([{"run_id": f"r{i}", "download": False, "cookies": False,
+                  "thing": {"id": f"t{i}", "url": None, "bucket": "b", "attrs": None}}
+                 for i in range(3)])
+    monkeypatch.setattr(job_runner, "claim_job", lambda *a, **k: next(jobs, None))
+    monkeypatch.setattr(job_runner, "initiate_job", lambda *a, **k: False)
+    rc = job_runner.main()
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert out.count("FAIL run=") == 3
+    assert "r0" in out and "r1" in out and "r2" in out
+    assert "Stopping after 3 fails" in out
+
+
 def test_init_download_uses_extract_info_without_info_dict(fake_ydl):
     run_bknd.init_download("https://x/v/abc", download=False)
     names = [c[0] for c in fake_ydl.calls]
