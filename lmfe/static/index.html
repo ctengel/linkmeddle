@@ -482,12 +482,14 @@ function renderThingInfoHTML(thing, isContainer) {
       ${renderTypeBadge(thing)}
       ${thing.channel ? `Channel: ${escapeHtml(thing.channel)}<br/>` : ""}
       ${thing.url ? `URL: ${isHttpUrl(thing.url) ? `<a href="${escapeAttr(thing.url)}" target="_blank">${escapeHtml(thing.url)}</a>` : escapeHtml(thing.url)}<br/>` : ""}
+      Library: ${thing.lpm_lib ? escapeHtml(thing.lpm_lib) : "—"}<br/>
       ${statusLines.length ? statusLines.join("<br/>") : ""}
     </div>
     ${renderRatingWidget(thing)}
     <div style="margin-top:8px;">
       ${isContainer ? `<button onclick="rescheduleToday('${thing.id}')">Run Today</button>` : ""}
       ${isFailing ? `<button onclick="permafailAck('${thing.id}')">Permafail Ack</button>` : ""}
+      <button onclick="setLpmLib('${thing.id}')">Edit Library</button>
     </div>
   `;
 }
@@ -627,6 +629,20 @@ async function permafailAck(id) {
     invalidateCache(id);
     router();
   } catch { alert("Failed to acknowledge."); }
+}
+
+async function setLpmLib(id) {
+  // Re-read the current value from cache rather than passing free text through the inline
+  // onclick (IDs are safe to interpolate; user-entered tags are not).
+  const page = await getThingCached(id);
+  const v = prompt("LPM library tag (blank to clear):", page.lpm_lib || "");
+  if (v === null) return;                          // cancelled
+  const value = v.trim() === "" ? null : v.trim(); // blank clears (PATCH lpm_lib: null)
+  try {
+    await apiPatch(`/things/${id}`, { lpm_lib: value });
+    invalidateCache(id);
+    router();
+  } catch { alert("Failed to set library."); }
 }
 
 /* === NAVIGATION === */
