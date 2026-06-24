@@ -250,6 +250,15 @@ def init_download(url: str, *,
     cookies = None
 
     # check preconditions
+    # Nothing to extract from: no URL to fetch and no pre-extracted info dict to load. Treat
+    # it as a failed run (return None, the same as a caught YoutubeDLError below) rather than
+    # handing None to ydl.extract_info, where yt-dlp's _VALID_URL regex raises an uncaught
+    # TypeError ("expected string or bytes-like object, got 'NoneType'") before it can even
+    # report the real reason. Hits e.g. a migrated stub whose deleted source video never got
+    # its url backfilled (#147).
+    if url is None and info_dict is None:
+        warnings.warn("No URL and no info_dict to extract; failing run.")
+        return None
     if lpmlib:
         assert oibucket, "oibucket must be set to use lpmlib"
     if use_cookies:
