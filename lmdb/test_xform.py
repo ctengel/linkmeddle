@@ -184,6 +184,72 @@ def test_pl_full2things_unknown_owner_subcontainer_is_membership():
     assert all(c.channel != "http://example/pl/sub" for c in g.channels)  # no node for the sub
 
 
+def _chan_with_tabs(parent_native="UC", parent_ek="youtubetab",
+                    parent_url="http://yt/@chan/featured"):
+    """A channel pull whose members are its Videos/Shorts/Live tabs -- each carrying the same
+    `id` (channel_id) as the others (and the parent) but a distinct URL."""
+    chan = models.UlChan(native_id="UC", title="Chan", url="http://yt/@chan")
+    tab = lambda name: models.PullThing(
+        native_id="UC", extractor_key="youtubetab", container=True,
+        url=f"http://yt/@chan/{name}", title=f"Chan - {name}", channel=chan)
+    return models.PullThing(
+        url=parent_url, native_id=parent_native, extractor_key=parent_ek, title="Chan",
+        channel=chan, container=True,
+        entries=[tab("videos"), tab("shorts"), tab("streams")])
+
+
+def test_facet_tabs_keyed_by_url_not_collapsed():
+    # A channel's tabs share one id (channel_id) but differ by URL -> the facet rule nulls their
+    # native_id so they stay distinct (URL-keyed) things, while the parent keeps the id.
+    g = xform.pl_full2things(_chan_with_tabs(), bucket="b")
+    assert g.playlist.native_id == "UC"                       # parent keeps the channel id
+    assert all(m.native_id is None for m in g.members)        # tabs URL-keyed
+    assert all((m.attrs or {}).get("channel_id") == "UC" for m in g.members)
+    assert len({m.url for m in g.members}) == 3               # three distinct things
+    # the parent IS the tabs' uploader -> one channel=True edge each, no separate owner node
+    for m in g.members:
+        edges = [r for r in g.rels if r.child == m.id]
+        assert len(edges) == 1 and edges[0].parent == g.playlist.id and edges[0].channel is True
+    assert g.channels == []
+
+
+def test_facet_sibling_collision_when_parent_has_no_id():
+    # Even when the parent carries no native_id, sibling sub-containers sharing one id (distinct
+    # URLs) are facets and get URL-keyed.
+    pl = _chan_with_tabs(parent_native=None, parent_ek=None, parent_url="http://yt/@chan")
+    g = xform.pl_full2things(pl, bucket="b")
+    assert all(m.native_id is None for m in g.members)
+    assert len({m.url for m in g.members}) == 3
+
+
+def test_facet_rule_leaves_distinct_subcontainers_alone():
+    # Sub-containers with genuinely distinct ids are not facets -> native_id preserved.
+    pl = _pl(0)
+    pl.entries = [_sub(native_id="subA", url="http://example/pl/a"),
+                  _sub(native_id="subB", url="http://example/pl/b")]
+    g = xform.pl_full2things(pl, bucket="b")
+    assert {m.native_id for m in g.members if m.container} == {"subA", "subB"}
+
+
+def test_subtree_hash_equals_pl_hash_for_flat_pull():
+    pl = _pl(3)
+    assert xform.subtree_hash(pl) == xform.pl_hash(pl.entries)
+
+
+def test_subtree_hash_tracks_grandchildren():
+    # A parent that inlines a sub-container tracks changes below its direct members: adding a
+    # grandchild video flips subtree_hash even though the direct membership is unchanged.
+    sub = _sub(native_id="tabV", url="http://yt/@chan/videos")
+    sub.entries = [_vid(0), _vid(1)]
+    parent = models.PullThing(url="http://yt/@chan", native_id="UC", extractor_key="youtubetab",
+                              container=True, entries=[sub])
+    before = xform.subtree_hash(parent)
+    direct_before = xform.pl_hash(parent.entries)     # direct membership = [sub]
+    sub.entries.append(_vid(2))                       # a new grandchild video
+    assert xform.subtree_hash(parent) != before       # subtree change is detected
+    assert xform.pl_hash(parent.entries) == direct_before  # ...while direct membership is unchanged
+
+
 # --- try_on backoff (Task 1.4): pure math ----------------------------------------------
 
 def _run_on(day, success, h=None):

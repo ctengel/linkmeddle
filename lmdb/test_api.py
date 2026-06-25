@@ -1098,8 +1098,9 @@ def test_curated_subcontainer_membership_and_owner(client):
 
 def test_inlined_subplaylist_ingested_as_completed_run(client):
     # yt-dlp sometimes hands back a sub-playlist already enumerated (inlined `entries`). Rather
-    # than drop them and re-pull, the endpoint ingests that sub-container as its own successful
-    # run (complete today + scheduled future try_on) and fans out its members. A normal flat
+    # than drop them and re-pull, the endpoint fans that sub-container out as part of the parent's
+    # single run (one yt-dlp call -> one run): it is marked complete today, gets a parent-fed
+    # safety-net try_on, and its members fan out — but it has NO run of its own. A normal flat
     # sub-playlist pointer (no entries) stays an unpulled stub pulled on its own schedule.
     p_url = "http://example/pl/nested"
     pid, rid = _claimed_run(client, p_url)
@@ -1134,12 +1135,14 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
     subA = next(t for t in kids if t["native_id"] == "subA")
     subB = next(t for t in kids if t["native_id"] == "subB")
 
-    # the inlined sub-playlist is recorded as a completed pull: complete today + future try_on
+    # the inlined sub-playlist is complete today + a parent-fed safety-net try_on, but rides the
+    # parent's single run (no run of its own); its date sits a margin past the parent's.
     assert subA["container"] is True
     assert subA["last_success_dt"] is not None
     assert datetime.date.fromisoformat(subA["last_success_dt"][:10]) == _TODAY
-    assert datetime.date.fromisoformat(subA["try_on"]) > _TODAY
-    assert any(run["success"] for run in client.get(f"/things/{subA['id']}/runs").json())
+    parent_try_on = datetime.date.fromisoformat(client.get(f"/things/{pid}").json()["try_on"])
+    assert datetime.date.fromisoformat(subA["try_on"]) == parent_try_on + api.SAFETY_MARGIN_DAYS
+    assert client.get(f"/things/{subA['id']}/runs").json() == []   # no per-sub run (one call, one run)
     # and it shed its load-info hint like any pulled container
     assert (subA["attrs"] or {}).get("info_json") is None
 
@@ -1152,6 +1155,63 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
     assert subB["last_success_dt"] is None
     assert subB["try_on"] == _TODAY.isoformat()
     assert client.get(f"/things/{subB['id']}/runs").json() == []
+
+
+def test_channel_tabs_one_run_distinct_things(client):
+    # A YouTube channel pull arrives with its Videos/Shorts/Live tabs inlined; every tab carries
+    # the SAME id (channel_id) but a distinct URL. The endpoint must (a) keep the tabs as four
+    # distinct things (facet rule: tabs URL-keyed), (b) record exactly ONE run on the channel
+    # covering the whole subtree, and (c) schedule the tabs parent-fed (try_on = channel + margin).
+    url = "http://yt/@geerling/featured"
+    cid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UC", title="Geerling", url="http://yt/@geerling")
+
+    def tab(name, vids):
+        return models.PullThing(
+            native_id="UC", extractor_key="youtubetab", container=True,
+            url=f"http://yt/@geerling/{name}", title=f"Geerling - {name}", channel=chan,
+            playlist_count=len(vids),
+            info_json={"id": "UC", "_type": "playlist", "entries": [{"id": v} for v in vids]},
+            entries=[models.PullThing(native_id=v, url=f"http://yt/v/{v}", title=v.upper(),
+                                      extractor_key="youtube", channel=chan) for v in vids])
+
+    payload = models.PullThing(
+        url=url, native_id="UC", extractor_key="youtubetab", title="Geerling", channel=chan,
+        container=True, playlist_count=3,
+        entries=[tab("videos", ["a", "b", "c"]), tab("shorts", ["d"]), tab("streams", ["e", "f"])],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    # exactly ONE run, on the channel; nothing duplicated onto another thing at the same instant
+    chan_runs = client.get(f"/things/{cid}/runs").json()
+    assert len(chan_runs) == 1 and chan_runs[0]["success"] is True
+
+    # four distinct things: the channel (keeps id) + three URL-keyed tabs
+    tabs = [e["thing"] for e in client.get(f"/things/{cid}/related").json()
+            if e["direction"] == "child" and e["thing"]["container"] is True]
+    assert len(tabs) == 3
+    assert {t["url"] for t in tabs} == {f"http://yt/@geerling/{n}" for n in ("videos", "shorts", "streams")}
+    assert all(t["native_id"] is None for t in tabs)               # tabs URL-keyed, not collapsed
+    assert all((t["attrs"] or {}).get("channel_id") == "UC" for t in tabs)
+    assert client.get(f"/things/{cid}").json()["native_id"] == "UC"  # channel keeps the id
+
+    # tabs are parent-fed: complete today, no run of their own, try_on = channel + safety margin
+    chan_try_on = datetime.date.fromisoformat(client.get(f"/things/{cid}").json()["try_on"])
+    for t in tabs:
+        assert t["last_success_dt"] is not None
+        assert client.get(f"/things/{t['id']}/runs").json() == []
+        assert datetime.date.fromisoformat(t["try_on"]) == chan_try_on + api.SAFETY_MARGIN_DAYS
+        # tab -> channel is a channel=True edge; no self-edge anywhere
+        parents = client.get(f"/things/{t['id']}/related", params={"direction": "parent"}).json()
+        assert any(p["thing"]["id"] == cid and p["channel"] for p in parents)
+        assert all(p["thing"]["id"] != t["id"] for p in parents)
+
+    # grandchild videos from every tab exist as things, each linked to its tab
+    videos = {v["native_id"]: v for v in client.get("/things/", params={"container": False}).json()}
+    assert set(videos) == {"a", "b", "c", "d", "e", "f"}
+    a_parents = client.get(f"/things/{videos['a']['id']}/related", params={"direction": "parent"}).json()
+    videos_tab = next(t for t in tabs if t["url"].endswith("/videos"))
+    assert any(p["thing"]["id"] == videos_tab["id"] for p in a_parents)
 
 
 def test_unknown_url_discovered_as_video(client):

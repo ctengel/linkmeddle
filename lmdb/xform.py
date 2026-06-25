@@ -54,6 +54,22 @@ def pl_hash(entries: list[models.PullThing]) -> bytes:
     hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
 
+def _subtree_entries(entries: list[models.PullThing]):
+    """Flatten a pull's membership through inlined sub-containers (depth-first)."""
+    for entry in entries:
+        yield entry
+        if entry.entries:
+            yield from _subtree_entries(entry.entries)
+
+def subtree_hash(pull: models.PullThing) -> bytes:
+    """Hash the full inlined subtree (every descendant node), so a change anywhere below a
+    container — not just in its direct members — flips the change-detection signal (`_run_stats`
+    `different`). This keeps a parent that inlines its sub-playlists "hot" enough to track its
+    fastest-changing descendant (hybrid scheduling). Equals `pl_hash(pull.entries)` for a flat
+    pull (no inlined sub-containers), so leaf-only playlists are unaffected.
+    """
+    return pl_hash(list(_subtree_entries(pull.entries)))
+
 # --- V4 layer: DLP/LM-native -> thing/rel/run ------------------------------------------
 # These convert the (reused) DLP boundary models into the frozen thing/rel/run schema
 # (LM-V4-DESIGN.md Part 2). They are pure constructors — no DB/session — so the actual
@@ -199,6 +215,23 @@ def propagate_attrs(parent_attrs: Optional[dict]) -> Optional[dict]:
     return out or None
 
 
+def _facet_keys(pl: models.PullThing) -> set:
+    """`(extractor_key, native_id)` keys that are *facets* — a sub-container that shares its id
+    with the parent or a sibling sub-container but has a distinct URL (a channel's Videos/Shorts/
+    Live tabs all carry the same `id`=channel_id but different URLs). Such a key is never one real
+    identity, so its members are URL-keyed instead (native_id nulled in `pl_full2things`) and stay
+    distinct things rather than collapsing onto the parent/each other (#173-adjacent).
+
+    A key qualifies when >1 distinct URL shares it across {parent} ∪ {container members}.
+    """
+    urls_by_key: dict[tuple, set] = {}
+    nodes = [pl] + [e for e in pl.entries if e.container is True]
+    for node in nodes:
+        if node.native_id is not None:
+            urls_by_key.setdefault((node.extractor_key, node.native_id), set()).add(node.url)
+    return {key for key, urls in urls_by_key.items() if len(urls) > 1}
+
+
 def pl_full2things(pl: models.PullThing, *, bucket: str,
                    parent_attrs: Optional[dict] = None) -> ThingGraph:
     """Convert an LM-native container pull into its thing/rel graph.
@@ -224,6 +257,7 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     the propagated soft hints (`attrs.cookies`/`attrs.lpm_lib`, §2.1). Pure constructor (no DB).
     """
     hints = propagate_attrs(parent_attrs)
+    facet_keys = _facet_keys(pl)
     pl_thing = thing_from_node(pl)
     pl_thing.bucket = bucket
     members: list[models.Thing] = []
@@ -252,7 +286,15 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     for vid in pl.entries:
         vid_thing = thing_from_node(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
+        # A facet/tab sub-container shares the parent's/sibling's id but a distinct URL; null its
+        # native_id so `_find_thing` keys it by URL (a distinct thing, never collapsed). The
+        # original id is kept as a soft `channel_id` hint.
+        facet = vid.container is True and (vid.extractor_key, vid.native_id) in facet_keys
         attrs = dict(hints) if hints is not None else {}
+        if facet:
+            vid_thing.native_id = None
+            if vid.native_id is not None:
+                attrs["channel_id"] = vid.native_id
         if vid.info_json is not None:
             # Load-info hint (§2.1); the raw dict is kept verbatim — a sub-container's inlined
             # entries ride along but never land on a stub, since refresh_info_hint no-ops for

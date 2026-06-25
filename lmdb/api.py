@@ -39,6 +39,12 @@ _PLAYLIST_FLOOR = xform.BAND_FLOOR["C"]
 # and the lease lets the thing return on the next day — the same cadence a backed-off thing would.
 CLAIM_LEASE = datetime.timedelta(days=1)
 
+# Hybrid scheduling grace period (§4.x). A sub-container refreshed via its parent's pull
+# (parent-fed: inlined in the parent's single yt-dlp call, no run of its own) carries
+# `try_on = parent.try_on + SAFETY_MARGIN_DAYS`, so the parent normally re-pulls — and re-feeds —
+# it first (fewer yt-dlp calls); the child self-pulls only if the parent is this many days overdue.
+SAFETY_MARGIN_DAYS = datetime.timedelta(days=7)
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
 
@@ -448,22 +454,35 @@ def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing
 
 def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
                  container: Thing, now: datetime.datetime) -> None:
-    """Ingest one Stage-1 container pull: record the run, fan out the thing/rel graph, and
-    classify+complete the container (the body of submit_result's Stage-1 path).
+    """Ingest one Stage-1 container pull: record the single run and fan out the (possibly
+    inlined) subtree (the body of submit_result's Stage-1 path).
 
-    `run`/`container` are the (already-fetched) in-progress run and its thing. Recurses into any
-    member that arrives with its own inlined `entries` — yt-dlp occasionally hands back a
-    sub-playlist already enumerated, and rather than dropping that and re-pulling it later, we
-    ingest it now as its own successful run with a scheduled future `try_on`, exactly as if it
-    had been pulled on its own (no extra yt-dlp extraction). Does not commit; the top-level
-    submit_result tail (`_finish`) does the single commit for the whole tree.
+    One yt-dlp call -> one `Run`: the `run`/`container` are the (already-fetched) in-progress run
+    and its thing. The run's `entries_hash` covers the *whole* inlined subtree (`subtree_hash`),
+    so a change anywhere below keeps the container's backoff hot. The fan-out (`_fanout`) recurses
+    into any member yt-dlp handed back already enumerated (inlined `entries`) to (re)establish its
+    grandchildren and re-schedule it as parent-fed — without creating further runs. Does not
+    commit; the submit_result tail (`_finish`) does the single commit for the whole tree.
+    """
+    run.entries_hash = xform.subtree_hash(pull)
+    run.playlist_count = xform.reconcile_count(pull)
+    _fanout(session, pull, container, now, parent_try_on=None)
+
+
+def _fanout(session: Session, pull: models.PullThing, container: Thing,
+            now: datetime.datetime, parent_try_on: Optional[datetime.date]) -> None:
+    """Fan out one container pull into the thing/rel graph and (re)schedule the container.
+
+    `parent_try_on` is None for the claimed top-level container — normal Fibonacci backoff over
+    its run history — and the parent's scheduled date for an inlined sub-container (parent-fed:
+    no run of its own, `try_on = parent_try_on + SAFETY_MARGIN_DAYS` so the parent refreshes it
+    first). Recurses into inlined sub-containers, fanning out their grandchildren, but creates no
+    further runs (one yt-dlp call -> one run). Idempotent: re-fans an already-known sub-container
+    every time the parent inlines it. Does not commit.
     """
     # Stubs inherit the container's bucket (immutable, [A10]) and its propagated soft hints
     # (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
     graph = xform.pl_full2things(pull, bucket=container.bucket, parent_attrs=container.attrs)
-
-    run.entries_hash = xform.pl_hash(pull.entries)
-    run.playlist_count = xform.reconcile_count(pull)
 
     # The recorded thing IS the container: backfill it, classify it, mark success.
     _apply_backfill(session, container, graph.playlist)
@@ -499,14 +518,15 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
         if (thing.container is False and thing.last_success_dt is None
                 and xform.enough_to_rate(thing)):
             thing.last_success_dt = now
-        # A sub-container yt-dlp handed back already enumerated (inlined `entries`): ingest it now
-        # as its own successful run (recursion below) instead of re-pulling it later. Only while
-        # it is still an unpulled stub (last_success_dt NULL), and never re-typing a known leaf
-        # (the container switch guard). A flat sub-playlist pointer (no entries, the normal case)
-        # falls through and is pulled on its own schedule.
+        # A sub-container yt-dlp handed back already enumerated (inlined `entries`): re-fan it out
+        # now as part of this single call (recursion below) so its grandchildren are (re)established
+        # and it is rescheduled parent-fed — every time the parent inlines it (idempotent). Never
+        # re-type a known leaf (the container-switch guard); the self-guard avoids recursing into a
+        # member that resolved to the container itself. A flat sub-playlist pointer (no entries, the
+        # normal case) falls through and self-schedules.
         node = node_by_stub.get(stub.id)
         if (node is not None and node.container is True and node.entries
-                and thing.last_success_dt is None
+                and thing.id != container.id
                 and not xform.container_switch(thing.container, True)):
             nested.append((thing, node))
         remap[stub.id] = thing.id
@@ -526,6 +546,8 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
     edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
     for rel in graph.rels:
         key = (remap[rel.parent], remap[rel.child])
+        if key[0] == key[1]:   # never a self-edge (a member that resolved to the container)
+            continue
         edges[key] = edges.get(key, False) or rel.channel
     rows = [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()]
     if rows:
@@ -535,15 +557,18 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
             set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
         session.execute(stmt)
 
-    _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+    # Schedule: the claimed top-level container backs off normally (§4.4); an inlined,
+    # parent-fed sub-container gets a long safety-net date keyed off its parent so the parent
+    # re-feeds it first and it self-pulls only if the parent goes quiet (hybrid scheduling).
+    if parent_try_on is None:
+        _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+    else:
+        container.try_on = parent_try_on + SAFETY_MARGIN_DAYS
 
-    # Inlined sub-playlists: record each as its own successful run (entries verbatim in
-    # data_json) and recurse so its members fan out and it gets a scheduled future try_on.
+    # Inlined sub-playlists: re-fan out (no run — they ride the parent's single call), passing
+    # this container's scheduled date so each is parent-fed off it.
     for sub_thing, node in nested:
-        sub_run = Run(thing_id=sub_thing.id, worker=run.worker,
-                      starttime=now, endtime=now, success=True, data_json=node.info_json)
-        session.add(sub_run)
-        _ingest_pull(session, sub_run, node, sub_thing, now)
+        _fanout(session, node, sub_thing, now, parent_try_on=container.try_on)
 
 
 @app.post("/jobs/claim", response_model=JobClaim,
