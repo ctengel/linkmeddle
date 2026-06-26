@@ -12,6 +12,7 @@ Single worker in 4.0; the claim endpoint's SKIP LOCKED makes it safe once a 2nd 
 import os
 import socket
 import argparse
+import traceback
 import warnings
 import requests
 from . import run_bknd, xform
@@ -158,7 +159,14 @@ def main(argv: list[str] | None = None) -> int:
             succ = initiate_job(LINKMEDDLE_PLAPI, job, WORKER)
         except Exception as exc:  # never let one job kill the loop
             succ = False
-            warnings.warn(f"Job {job.get('run_id')} failed: {exc}")
+            url = (job.get("thing") or {}).get("url")
+            # Unexpected crash (NOT a YoutubeDLError, which run_bknd handles cleanly): almost
+            # always an unwrapped error from inside yt-dlp. Log type + url + traceback so it
+            # reads like an extractor fault, not a mystery one-liner. print the traceback
+            # (warnings.warn dedupes by (message, lineno) and would collapse repeats).
+            warnings.warn(f"Job {job.get('run_id')} crashed on {url!r}: "
+                          f"{type(exc).__name__}: {exc}")
+            traceback.print_exc()
             status = 1
             # Report the failure so the run is finalized and the thing backs off, rather than
             # being re-claimed forever (the API never saw a result). If reporting itself fails,
