@@ -1524,6 +1524,35 @@ def test_meta_result_incomplete_is_still_terminal(client):
     assert t["try_on"] is not None         # Fibonacci backoff applied; no longer a meta job
 
 
+def test_meta_b_video_no_backoff_then_downloads(client):
+    # #191: a B+ stub the flat pull left container=NULL is claimed as a metadata pull first (to
+    # classify it), but must NOT then sit out a meta backoff before the download. The meta result
+    # leaves it due (try_on=today) so the very next claim is the Stage-2 download — no multi-day
+    # gap between the meta pull and the wanted media. (C-band keeps the normal backoff, above.)
+    v = _seed_thing(url="http://e/b-unknown", human_rating=1.0, try_on=_TODAY)  # container NULL, B
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["download"] is False          # stage1 meta first
+    r = client.post(f"/jobs/{job['run_id']}/result",
+                    json={"success": True,
+                          "video": {"native_id": "bv1", "title": "B Vid",
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/chan/b"},
+                                    "info_json": {"id": "bv1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["container"] is False                                # classified as a leaf by the meta pull
+    assert t["last_success_dt"] and t["best_oi"] is None          # complete metadata, not acquired
+    assert datetime.date.fromisoformat(t["try_on"]) == _TODAY     # B+: due now, NOT backed off
+    # the video is now download-eligible immediately (no day gap). Containers (the freshly
+    # fanned-out channel) sort first, so drain claims until our video is dispatched as a download.
+    for _ in range(5):
+        job2 = _claim(client)
+        assert job2 is not None, "video never dispatched for download"
+        if job2["thing"]["id"] == v:
+            assert job2["download"] is True
+            break
+
+
 def test_meta_result_failure_backs_off(client):
     # On failure the worker sends no `video` body; handled by the shared video-failure path.
     v, rid = _claimed_meta(client, url="http://e/m3")
