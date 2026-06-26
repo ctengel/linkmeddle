@@ -281,7 +281,15 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     if new:
         cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
         stmt = stmt.where(Thing.created_dt >= cutoff)
-    stmt = stmt.order_by(Thing.created_dt.desc())
+    if needs_rating:
+        # Container/unknown (container IS NOT False) before videos, then most-neutral
+        # machine rating first (NULL treated as neutral 0.0), newest as final tiebreak.
+        stmt = stmt.order_by(
+            sa.desc(Thing.container.isnot(False)),
+            func.abs(func.coalesce(_machine_rating_expr(), 0.0)).asc(),
+            Thing.created_dt.desc())
+    else:
+        stmt = stmt.order_by(Thing.created_dt.desc())
     return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
 
 

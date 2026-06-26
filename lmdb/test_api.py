@@ -570,6 +570,24 @@ def test_machine_rating_null_when_no_relatives(client):
     assert got["machine_rating"] is None and got["effective_rating"] is None
 
 
+def test_needs_rating_orders_container_first_then_neutral(client):
+    # Needs-rating order: containers/unknowns before videos, then most-neutral machine
+    # rating first (NULL machine rating sorts as neutral 0.0). All seeds are unrated so
+    # they show in needs_rating; the rated parents are excluded by the human_rating filter.
+    achan = _seed_thing(type="channel", url="http://e/nr-achan", human_rating=2.0)
+    apl = _seed_thing(type="playlist", url="http://e/nr-apl", human_rating=2.0)
+    cpl = _seed_thing(type="playlist", url="http://e/nr-cpl", human_rating=0.0)
+    c_strong = _seed_thing(type="playlist", url="http://e/nr-c-strong")  # machine 2.0 via A channel
+    _seed_rel(achan, c_strong, channel=True)
+    c_null = _seed_thing(type="playlist", url="http://e/nr-c-null")      # no relatives -> machine NULL
+    v_neutral = _seed_thing(type="video", url="http://e/nr-v-neutral")   # machine 0.0 via C playlist
+    _seed_rel(cpl, v_neutral)
+    v_strong = _seed_thing(type="video", url="http://e/nr-v-strong")     # machine 2.0 via A playlist
+    _seed_rel(apl, v_strong)
+    ids = [t["id"] for t in client.get("/things/", params={"needs_rating": True}).json()]
+    assert ids == [c_null, c_strong, v_neutral, v_strong]
+
+
 def test_related_things_carry_computed_ratings(client):
     # A neighbor's machine/effective rating is computed too (the subquery follows the neighbor).
     bpl = _seed_thing(type="playlist", url="http://e/rel-pl", human_rating=1.0)
