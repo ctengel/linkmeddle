@@ -212,12 +212,41 @@ function renderRatingWidget(thing) {
 }
 
 async function rateThing(id, rating) {
+  let updated;
   try {
-    await apiPatch(`/things/${id}`, { human_rating: rating });
-    invalidateCache(id);
-    router();
+    updated = await apiPatch(`/things/${id}`, { human_rating: rating });
   } catch {
     alert("Failed to save rating.");
+    return;
+  }
+  // Use the PATCH response (the updated thing) to refresh cached copies, then
+  // re-render ONLY the rating-affected DOM. We deliberately do not call router()
+  // or re-render #videoArea: routing takes the in-place path which rebuilds the
+  // <video> element and resets playback to 0 (#182). The rated thing is always
+  // the one shown in #currentThingInfo, so re-render that card and the sidebar
+  // grade badges in place; the playing video is left untouched.
+  applyRatingUpdate(id, updated);
+  const infoEl = document.getElementById("currentThingInfo");
+  if (infoEl) infoEl.innerHTML = renderThingInfoHTML(updated, updated.container === true);
+  const sidebar = document.getElementById("playlistSidebar");
+  if (sidebar) sidebar.innerHTML = sidebarRowsHTML(currentVideoId);
+}
+
+// Patch the rating-derived fields of `id` wherever it is cached (the thing's own
+// cached page and any cached container's `related` list, which the in-place
+// renderer and sidebar read from), so subsequent renders show the new rating.
+function applyRatingUpdate(id, updated) {
+  const patch = {
+    human_rating: updated.human_rating,
+    machine_rating: updated.machine_rating,
+    effective_rating: updated.effective_rating,
+    grade: updated.grade,
+  };
+  for (const cached of Object.values(thingCache)) {
+    if (cached.id === id) Object.assign(cached, patch);
+    for (const r of cached.related || []) {
+      if (r.thing.id === id) Object.assign(r.thing, patch);
+    }
   }
 }
 
@@ -317,7 +346,7 @@ function renderRunRow(r) {
     : r.success
     ? `<span class="badge badge-ok">OK</span>`
     : `<span class="badge badge-fail">Failed</span>`;
-  const time = r.starttime ? new Date(r.starttime).toLocaleString() : "";
+  const time = r.starttime ? fmtDt(r.starttime) : "";
   return `
     <div class="item-row" onclick="location.hash='#/thing/${r.thing_id}'">
       <span class="title">${escapeHtml(r.thing_title || "Untitled")}</span>
@@ -543,13 +572,13 @@ function renderParentsCard(parents) {
   return `<div class="card"><h3>In Playlists</h3>${rows}</div>`;
 }
 
-function renderSidebarHTML(activeId) {
-  if (!activeContainerData) return "";
-  const videoChildren = (activeContainerData.related || [])
+function sidebarVideoChildren() {
+  return (activeContainerData?.related || [])
     .filter(r => r.direction === "child" && r.thing.container === false);
-  if (!videoChildren.length) return "";
+}
 
-  const rows = videoChildren.map(r => {
+function sidebarRowsHTML(activeId) {
+  return sidebarVideoChildren().map(r => {
     const t = r.thing;
     const isActive = t.id === activeId;
     return `
@@ -557,14 +586,19 @@ function renderSidebarHTML(activeId) {
            onclick="location.hash='#/thing/${t.id}?ctx=${activeContainerData.id}'">
         <span class="title">${escapeHtml(t.title || "Untitled")}</span>
         ${renderGradeBadge(t)}
+        ${!t.file_available ? `<span class="muted">(no file)</span>` : ""}
       </div>
     `;
   }).join("");
+}
 
+function renderSidebarHTML(activeId) {
+  if (!activeContainerData) return "";
+  if (!sidebarVideoChildren().length) return "";
   return `
     <div class="card sidebar">
       <h3>${escapeHtml(activeContainerData.title || "Playlist")}</h3>
-      <div id="playlistSidebar">${rows}</div>
+      <div id="playlistSidebar">${sidebarRowsHTML(activeId)}</div>
     </div>
   `;
 }
@@ -646,13 +680,24 @@ async function setLpmLib(id) {
 }
 
 /* === NAVIGATION === */
+// True iff `id` is a child of the active container that has a downloaded file.
+// Sequential navigation (arrows + autoplay) jumps over videos we don't have (#184).
+function hasFile(id) {
+  const rel = (activeContainerData?.related || []).find(r => r.thing.id === id);
+  return !!rel?.thing.file_available;
+}
+
 function navigatePlaylist(direction) {
   if (!activePlaylistVideos.length || !currentVideoId) return;
   const idx = activePlaylistVideos.indexOf(currentVideoId);
   if (idx === -1) return;
-  const next = idx + direction;
-  if (next >= 0 && next < activePlaylistVideos.length) {
-    location.hash = `#/thing/${activePlaylistVideos[next]}?ctx=${activeContainerId}`;
+  // Step in `direction` past videos we don't have a file for, stopping at the
+  // first one we do (or running off the end, where we stop as before).
+  for (let next = idx + direction; next >= 0 && next < activePlaylistVideos.length; next += direction) {
+    if (hasFile(activePlaylistVideos[next])) {
+      location.hash = `#/thing/${activePlaylistVideos[next]}?ctx=${activeContainerId}`;
+      return;
+    }
   }
 }
 
@@ -750,9 +795,18 @@ function isThingFailing(thing) {
   return new Date(thing.last_failure_dt) > new Date(thing.last_success_dt);
 }
 
+// The backend serializes naive UTC datetimes with no zone suffix (e.g.
+// "2026-06-25T03:15:57.891485"); new Date() would parse those as *local*. Append
+// "Z" when no zone is present so they're anchored to UTC before display.
+function parseUtc(s) {
+  if (!s) return null;
+  const hasZone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(String(s));
+  return new Date(hasZone ? s : s + "Z");
+}
+
 function fmtDt(dt) {
   if (!dt) return "";
-  return new Date(dt).toLocaleString();
+  return parseUtc(dt).toLocaleString(undefined, { hour12: false });
 }
 
 function escapeHtml(str) {
