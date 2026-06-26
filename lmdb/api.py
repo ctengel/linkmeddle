@@ -727,9 +727,15 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             xform.clear_info_hint(pl_thing)   # acquired: drop the now-moot load-info hint
         else:                                 # meta: metadata only, still pending acquisition
             pl_thing.last_success_dt = now       # full extract is terminal → complete (§4.2),
-                                                 # even if still bare: never re-loop a meta job
+                                                 # even if still bare: never re-loop a meta job (#163)
             xform.refresh_info_hint(pl_thing, item.video.info_json)  # keep Stage-2 hint fresh
-            _set_try_on(session, pl_thing)       # backoff (§4.4)
+            # #191: a B+ leaf the pull just classified is wanted media — don't make it sit out a
+            # meta backoff before the download. Leave it due so video_branch claims it on the next
+            # loop (one extra loop, not a 5–8 day gap). C-band (rate-only) keeps the normal backoff.
+            if _effective_rating_value(session, pl_thing) >= _VIDEO_DOWNLOAD_FLOOR:
+                pl_thing.try_on = _today()
+            else:
+                _set_try_on(session, pl_thing)   # backoff (§4.4)
         return _finish(session, run)
 
     if item.playlist is None:
