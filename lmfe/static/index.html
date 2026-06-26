@@ -30,6 +30,8 @@
     .badge-ok   { background: #dfd; color: #363; }
     .badge-fail { background: #fdd; color: #633; }
     .badge-run  { background: #ffd; color: #663; }
+    .badge-ext  { background: #eee; color: #555; }
+    .url-cell { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
     /* Rating stars */
     .rating-widget { margin: 8px 0; line-height: 1; }
     .star { cursor: pointer; font-size: 22px; color: #ccc; user-select: none; }
@@ -316,7 +318,9 @@ async function loadNeedsRating() {
       <div class="item-row" onclick="location.hash='#/thing/${t.id}'">
         <span class="title">${escapeHtml(t.title || "Untitled")}</span>
         ${renderTypeBadge(t)}
+        ${renderExtractorBadge(t)}
         <span class="muted">${escapeHtml(t.channel || "")}</span>
+        ${renderUrlCell(t.url)}
       </div>
     `).join("");
   } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
@@ -352,6 +356,7 @@ function renderRunRow(r) {
       <span class="title">${escapeHtml(r.thing_title || "Untitled")}</span>
       ${renderTypeBadgeFromContainer(r.container)}${statusBadge}
       <span class="muted">${time}</span>
+      ${renderUrlCell(r.thing_url)}
     </div>
   `;
 }
@@ -787,6 +792,18 @@ function renderTypeBadgeFromContainer(container, kind) {
   }
   if (container === false) return `<span class="badge badge-v">V</span>`;
   return "";
+}
+
+// Neutral badge naming the source extractor (e.g. "youtube"); "" when unknown.
+function renderExtractorBadge(thing) {
+  if (!thing.extractor_key) return "";
+  return `<span class="badge badge-ext">${escapeHtml(thing.extractor_key)}</span>`;
+}
+
+// Small, plain-text (deliberately non-link) URL cell; "" when no url.
+function renderUrlCell(url) {
+  if (!url) return "";
+  return `<span class="muted url-cell">${escapeHtml(url)}</span>`;
 }
 
 function isThingFailing(thing) {
