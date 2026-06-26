@@ -487,7 +487,7 @@ function renderThingInfoHTML(thing, isContainer) {
     </div>
     ${renderRatingWidget(thing)}
     <div style="margin-top:8px;">
-      ${isContainer ? `<button onclick="rescheduleToday('${thing.id}')">Run Today</button>` : ""}
+      ${thing.try_on ? `<button onclick="rescheduleToday('${thing.id}')">Run Today</button>` : ""}
       ${isFailing ? `<button onclick="permafailAck('${thing.id}')">Permafail Ack</button>` : ""}
       <button onclick="setLpmLib('${thing.id}')">Edit Library</button>
     </div>
