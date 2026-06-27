@@ -766,17 +766,9 @@ def test_ingest_duplicate_entries(client):
     assert len(chan_parents) == 1
 
 
-def test_ingest_url_backfill_skips_on_clash(client):
-    # Two rows already describe one video: B holds the url (no native key), A was created
-    # native-key-first with url still NULL. A pull now carries BOTH keys, so the member matches
-    # A by native key and would backfill A.url to a value B already holds -> thing_url
-    # UniqueViolation (HTTP 500) pre-fix. The clashing url is skipped instead (cross-row merge
-    # is Phase 2); the non-colliding #147 backfill still applies.
-    clash_url = "http://example/v/clash"
-    b_id = _seed_thing(type="video", url=clash_url)                 # url, no native key
-    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
-                       native_id="clashvid")
-
+def _url_clash_pull(client, clash_url):
+    """Run a pull whose single member carries both the native key of row A and the url of row B,
+    so the member matches A by native key but its url belongs to B. Returns (tid, response)."""
     url = "http://example/pl/clash"
     tid, rid = _claimed_run(client, url)
     up = models.UlChan(native_id="clashup", title="Clash Up", url="http://example/clashup")
@@ -787,20 +779,64 @@ def test_ingest_url_backfill_skips_on_clash(client):
             native_id="clashvid", title="Clash Video", url=clash_url,
             extractor_key="youtube", channel=up)],
     ).model_dump(mode="json")
+    return tid, client.post(f"/jobs/{rid}/result", json={"playlist": payload})
 
-    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+
+def test_ingest_url_clash_merges(client):
+    # Two rows already describe one video: B holds the url (no native key), A was created
+    # native-key-first with url still NULL. A pull carries BOTH keys, so the member matches A by
+    # native key while its url belongs to B -> pre-fix thing_url UniqueViolation (HTTP 500).
+    # Convergence: B is merged into the survivor A (rel/run FKs re-pointed, state carried), then
+    # A takes the url and B is gone.
+    clash_url = "http://example/v/clash"
+    # try_on=None on the seeded rows keeps them out of dispatch so _claimed_run claims the pull.
+    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
+                       native_id="clashvid", try_on=None)
+    b_id = _seed_thing(type="video", url=clash_url, human_rating=2.0,  # url + rating, no native key
+                       try_on=None)
+    # B carries an edge + a run that must survive the merge by following B onto A.
+    par_id = _seed_thing(type="playlist", url="http://example/clashpar", try_on=None)
+    with _session() as s:
+        s.add(models.Rel(parent=uuid.UUID(par_id), child=uuid.UUID(b_id), channel=False))
+        s.add(models.Run(thing_id=uuid.UUID(b_id), success=True,
+                         starttime=models.naive_utcnow(), endtime=models.naive_utcnow()))
+        s.commit()
+
+    tid, r = _url_clash_pull(client, clash_url)
     assert r.status_code == 200            # pre-fix: 500 thing_url UniqueViolation
     assert r.json()["success"] is True
 
-    # A (matched by native key) keeps url NULL — the clashing backfill was skipped — but its
-    # other NULL fields are still filled from the pull (#147).
+    # Survivor A now holds the url (merged from B) and inherited B's rating; B is deleted.
     a = client.get(f"/things/{a_id}").json()
-    assert a["url"] is None
+    assert a["url"] == clash_url
+    assert a["native_id"] == "clashvid"
+    assert a["human_rating"] == 2.0        # carried from the loser (A had none)
     assert a["title"] == "Clash Video"
-    # B (the url holder) is untouched.
-    b = client.get(f"/things/{b_id}").json()
-    assert b["url"] == clash_url
-    assert b["native_id"] is None
+    assert client.get(f"/things/{b_id}").status_code == 404   # loser converged away
+
+    # B's edge + run followed it onto A.
+    a_related = client.get(f"/things/{a_id}/related").json()
+    assert any(e["direction"] == "parent" and e["thing"]["id"] == par_id for e in a_related)
+    assert client.get(f"/things/{a_id}/runs").json()          # A has B's run now (plus none of its own)
+
+
+def test_ingest_native_clash_merges(client):
+    # The native_id clash branch: the *container* is claimed by URL (native_id NULL), and its pull
+    # reveals a native_id that a stray row already holds. `_apply_backfill(container, ...)` would
+    # backfill that native_id and hit thing_native -> pre-fix UniqueViolation. The stray row is
+    # merged into the container (the survivor), which then takes the native key.
+    url = "http://example/pl/nclash"
+    stray = _seed_thing(type="playlist", extractor_key="youtube",   # native key, url NULL
+                        native_id="plnclash", try_on=None)          # not due -> claim the pull
+    tid, rid = _claimed_run(client, url)                            # container matched by URL
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"playlist": _pl_payload(2, url=url, native="plnclash")})
+    assert r.status_code == 200            # pre-fix: 500 thing_native UniqueViolation
+    assert r.json()["success"] is True
+
+    container = client.get(f"/things/{tid}").json()
+    assert container["native_id"] == "plnclash"   # gained the stray row's native key
+    assert client.get(f"/things/{stray}").status_code == 404   # stray converged away
 
 
 def test_ingest_empty_playlist(client):

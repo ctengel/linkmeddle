@@ -402,16 +402,74 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     return None
 
 
-def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
-    """Fill NULL fields on `existing` from `incoming` (#147), guarding the unique indexes.
+# Loser columns carried onto the survivor on a merge when the survivor still lacks them. The
+# identity fields (url/native_id/extractor_key/backend) are deliberately excluded: they arrive
+# from the fresh pull via the caller's null_backfill *after* the loser (which holds the clashing
+# unique value) is deleted, so that write can never collide. `bucket` is excluded too (immutable,
+# never NULL [A10]); `machine_rating` is excluded (computed on read, the column is unread).
+_MERGE_CARRY_FIELDS = ("title", "channel", "thumbnail_url", "modified", "container",
+                       "human_rating", "best_oi", "last_success_dt", "last_failure_dt", "try_on")
 
-    Both partial-unique indexes are guarded: if backfilling `native_id` (thing_native) or
-    `url` (thing_url) would collide with a different existing row, that one field is skipped.
-    A clash means two rows describe one video (one created url-first, one native-key-first);
-    true cross-row merge is out of 4.0 scope, so we converge later (Phase 2) and just avoid
-    the unique violation here.
+
+def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
+    """Converge a duplicate `loser` row into `survivor` — two rows that turned out to be one
+    real thing (incremental key discovery: one created url-first, one native-key-first, now a
+    pull carries both keys). Re-points `loser`'s rel/run FKs onto `survivor`, carries over the
+    survivor's still-NULL state/display fields + attrs from `loser`, then deletes `loser`.
+
+    `survivor` is the row the pull already matched (`_find_thing`: native key preferred, else
+    URL), so external refs already point at it. Identity unique fields are NOT copied here — the
+    caller sets them from the pull after this deletes the loser holding the clashing value.
+    """
+    # Re-point loser's edges onto survivor: drop the old rows, then re-insert remapped, OR-ing
+    # `channel` on any edge survivor already has (the monotonic upsert _ingest_pull uses) and
+    # dropping a self-loop the rename would create. Delete-then-insert (not UPDATE) so an edge
+    # survivor already shares can't trip the (parent, child) PK.
+    rels = session.exec(
+        select(Rel).where((Rel.parent == loser.id) | (Rel.child == loser.id))).all()
+    edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
+    for rel in rels:
+        parent = survivor.id if rel.parent == loser.id else rel.parent
+        child = survivor.id if rel.child == loser.id else rel.child
+        session.delete(rel)
+        if parent != child:
+            key = (parent, child)
+            edges[key] = edges.get(key, False) or rel.channel
+    session.flush()   # remove the loser's edges before re-inserting the remapped ones
+    if edges:
+        stmt = pg_insert(Rel).values(
+            [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()])
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["parent", "child"],
+            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
+        session.execute(stmt)
+    # Runs have no unique key on thing_id, so a plain re-point is enough.
+    session.execute(sa.update(Run).where(Run.thing_id == loser.id)
+                    .values(thing_id=survivor.id))
+    # Capture what the survivor should inherit, then delete the loser *before* writing it so the
+    # unique values it held (and the FKs) are gone first (SQLAlchemy orders deletes after updates
+    # within a flush, which would otherwise reintroduce the collision).
+    carry = {f: getattr(loser, f) for f in _MERGE_CARRY_FIELDS
+             if getattr(survivor, f) is None and getattr(loser, f) is not None}
+    loser_attrs = loser.attrs
+    session.delete(loser)
+    session.flush()
+    for field, value in carry.items():
+        setattr(survivor, field, value)
+    if loser_attrs:   # union attrs, survivor's own keys win
+        survivor.attrs = {**loser_attrs, **(survivor.attrs or {})}
+
+
+def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
+    """Fill NULL fields on `existing` from `incoming` (#147), converging any duplicate row.
+
+    `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
+    `url` (thing_url) would collide with a *different* row, that row is a duplicate of the same
+    real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
+    apply it. Both partial-unique indexes flow through the one merge path.
     """
     fields = xform.null_backfill(existing, incoming)
+    clashes: dict[uuid.UUID, Thing] = {}
     if "native_id" in fields:
         ek = fields.get("extractor_key", existing.extractor_key)
         clash = session.exec(
@@ -420,13 +478,15 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
                                 Thing.native_id == fields["native_id"],
                                 Thing.id != existing.id)).first()
         if clash is not None:
-            fields.pop("native_id")
+            clashes[clash.id] = clash
     if "url" in fields:
         clash = session.exec(
             select(Thing).where(Thing.url == fields["url"],
                                 Thing.id != existing.id)).first()
         if clash is not None:
-            fields.pop("url")
+            clashes[clash.id] = clash
+    for clash in clashes.values():
+        _merge_things(session, existing, clash)
     for key, value in fields.items():
         setattr(existing, key, value)
 
