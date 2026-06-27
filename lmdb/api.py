@@ -729,13 +729,13 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.last_success_dt = now       # full extract is terminal → complete (§4.2),
                                                  # even if still bare: never re-loop a meta job (#163)
             xform.refresh_info_hint(pl_thing, item.video.info_json)  # keep Stage-2 hint fresh
-            # #191: a B+ leaf the pull just classified is wanted media — don't make it sit out a
-            # meta backoff before the download. Leave it due so video_branch claims it on the next
-            # loop (one extra loop, not a 5–8 day gap). C-band (rate-only) keeps the normal backoff.
-            if _effective_rating_value(session, pl_thing) >= _VIDEO_DOWNLOAD_FLOOR:
-                pl_thing.try_on = _today()
-            else:
-                _set_try_on(session, pl_thing)   # backoff (§4.4)
+            # A completed meta is terminal — meta_branch is gated on last_success_dt IS NULL, now
+            # set, so it can never re-claim this leaf (#163). Leave it due (try_on=today), exactly
+            # like a never-meta'd C-band leaf, so it is claimable the instant it qualifies for
+            # download: immediately for a B+ leaf (#191, no day gap), or later when a parent rating
+            # lifts its machine rating to B (video_branch needs try_on<=today; a backoff date would
+            # only delay that, and a C-band meta backoff is otherwise inert — nothing re-reads it).
+            pl_thing.try_on = _today()
         return _finish(session, run)
 
     if item.playlist is None:

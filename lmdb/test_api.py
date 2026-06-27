@@ -1445,7 +1445,7 @@ def test_meta_result_enriches_without_acquiring(client):
     assert t["best_oi"] is None                          # metadata only, NOT acquired
     assert t["last_success_dt"]                          # human-decision metadata now in hand
     assert t["last_failure_dt"] is None
-    assert t["try_on"] is not None                       # backoff applied (not NULL: not acquired)
+    assert t["try_on"] == _TODAY.isoformat()             # terminal but stays due (today), not backed off
     # last_success_dt being set is sufficient to prove meta_branch won't re-dispatch this video.
 
 
@@ -1479,7 +1479,7 @@ def test_meta_result_incomplete_is_still_terminal(client):
     t = client.get(f"/things/{v}").json()
     assert t["last_success_dt"]             # terminal: set even though channel is missing
     assert t["best_oi"] is None            # metadata only, NOT acquired
-    assert t["try_on"] is not None         # Fibonacci backoff applied; no longer a meta job
+    assert t["try_on"] == _TODAY.isoformat()  # terminal but stays due (today); not meta-claimable (last_success set)
 
 
 def test_meta_b_video_no_backoff_then_downloads(client):
@@ -1509,6 +1509,39 @@ def test_meta_b_video_no_backoff_then_downloads(client):
         if job2["thing"]["id"] == v:
             assert job2["download"] is True
             break
+
+
+def test_meta_c_then_parent_rating_downloads(client):
+    # A C-band leaf, meta-enriched, must stay due (try_on=today) — NOT backed off — so that when
+    # its parent is later rated B+ (lifting the child's machine rating to B) it is claimed for
+    # download immediately, with no intervening backoff gap. Same behavior as a never-meta'd
+    # C-band sibling, which keeps its default try_on=today.
+    pl = _seed_thing(type="playlist", url="http://e/cpd-pl", try_on=None)   # unrated parent (not due)
+    v = _seed_thing(type="video", url="http://e/cpd-v", try_on=_TODAY)      # unrated -> C leaf
+    _seed_rel(pl, v)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["download"] is False     # C-band -> meta, not download
+    r = client.post(f"/jobs/{job['run_id']}/result",
+                    json={"success": True,
+                          "video": {"native_id": "cpd1", "title": "C Vid",
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/chan/cpd"},
+                                    "info_json": {"id": "cpd1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["last_success_dt"] and t["best_oi"] is None        # meta complete, not acquired
+    assert t["try_on"] == _TODAY.isoformat()                    # stays due, NOT backed off
+    # Rate the parent B+ -> child's machine rating becomes B -> download-eligible right now.
+    assert client.patch(f"/things/{pl}", json={"human_rating": 1.0}).status_code == 200
+    # Containers sort first, so drain claims until our video is dispatched -- it must be a download.
+    for _ in range(5):
+        job2 = _claim(client)
+        assert job2 is not None, "video never dispatched for download"
+        if job2["thing"]["id"] == v:
+            assert job2["download"] is True
+            break
+    else:
+        assert False, "video never dispatched for download"
 
 
 def test_meta_result_failure_backs_off(client):
