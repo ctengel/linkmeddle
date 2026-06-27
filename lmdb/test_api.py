@@ -766,6 +766,43 @@ def test_ingest_duplicate_entries(client):
     assert len(chan_parents) == 1
 
 
+def test_ingest_url_backfill_skips_on_clash(client):
+    # Two rows already describe one video: B holds the url (no native key), A was created
+    # native-key-first with url still NULL. A pull now carries BOTH keys, so the member matches
+    # A by native key and would backfill A.url to a value B already holds -> thing_url
+    # UniqueViolation (HTTP 500) pre-fix. The clashing url is skipped instead (cross-row merge
+    # is Phase 2); the non-colliding #147 backfill still applies.
+    clash_url = "http://example/v/clash"
+    b_id = _seed_thing(type="video", url=clash_url)                 # url, no native key
+    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
+                       native_id="clashvid")
+
+    url = "http://example/pl/clash"
+    tid, rid = _claimed_run(client, url)
+    up = models.UlChan(native_id="clashup", title="Clash Up", url="http://example/clashup")
+    payload = models.PullThing(
+        url=url, native_id="plclash", title="Clash PL", extractor_key="youtube",
+        playlist_count=1, channel=up,
+        entries=[models.PullThing(
+            native_id="clashvid", title="Clash Video", url=clash_url,
+            extractor_key="youtube", channel=up)],
+    ).model_dump(mode="json")
+
+    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert r.status_code == 200            # pre-fix: 500 thing_url UniqueViolation
+    assert r.json()["success"] is True
+
+    # A (matched by native key) keeps url NULL — the clashing backfill was skipped — but its
+    # other NULL fields are still filled from the pull (#147).
+    a = client.get(f"/things/{a_id}").json()
+    assert a["url"] is None
+    assert a["title"] == "Clash Video"
+    # B (the url holder) is untouched.
+    b = client.get(f"/things/{b_id}").json()
+    assert b["url"] == clash_url
+    assert b["native_id"] is None
+
+
 def test_ingest_empty_playlist(client):
     # An empty playlist (0 entries) must be classified container=True so it is re-pulled.
     url = "http://example/pl/empty"
