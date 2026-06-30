@@ -284,6 +284,11 @@ async function renderHome(prefillUrl = "") {
     </div>
 
     <div class="card">
+      <h2>Need to Fix</h2>
+      <div id="needToFix">Loading...</div>
+    </div>
+
+    <div class="card">
       <h2>Needs Rating</h2>
       <div id="needsRating">Loading...</div>
     </div>
@@ -303,9 +308,38 @@ async function renderHome(prefillUrl = "") {
   document.getElementById("bookmarkletLink").href =
     "javascript:(function(){var t='" + baseURL + "';var c=encodeURIComponent(window.location.href);window.location.href=t+'#/prefill/'+c;})();";
 
+  loadNeedToFix();
   loadNeedsRating();
   loadInProgress();
   loadRecentActivity();
+}
+
+async function loadNeedToFix() {
+  const el = document.getElementById("needToFix");
+  try {
+    // BFF sorts: actionable (try_on set) before acked permafails, rating-desc then
+    // most-recent-failure first. ?failing already excludes failures with a later success.
+    const data = await apiGet("/things/?failing=true");
+    if (!data.length) { el.innerHTML = "<div class='muted'>Nothing broken 🎉</div>"; return; }
+    el.innerHTML = data.map(t => {
+      const acked = !t.try_on;  // permafail acknowledged: keep visible but muted + labeled
+      const failedAt = t.last_failure_dt ? fmtDt(t.last_failure_dt) : "";
+      const actions = acked
+        ? `<button onclick="event.stopPropagation(); rescheduleToday('${t.id}')">Retry</button>`
+        : `<button onclick="event.stopPropagation(); rescheduleToday('${t.id}')">Run Today</button>
+           <button onclick="event.stopPropagation(); permafailAck('${t.id}')">Ack</button>`;
+      return `
+      <div class="item-row${acked ? " muted" : ""}" onclick="location.hash='#/thing/${t.id}'">
+        <span class="title">${escapeHtml(t.title || "Untitled")}</span>
+        ${renderTypeBadge(t)}
+        ${renderGradeBadge(t)}
+        ${acked ? `<span class="badge">Acknowledged</span>` : ""}
+        <span class="muted">${escapeHtml(t.channel || "")}</span>
+        <span class="muted">${failedAt}</span>
+        ${actions}
+      </div>`;
+    }).join("");
+  } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
 }
 
 async function loadNeedsRating() {
@@ -338,7 +372,9 @@ async function loadInProgress() {
 async function loadRecentActivity() {
   const el = document.getElementById("recentActivity");
   try {
-    const data = await apiGet("/runs/?limit=20");
+    // Completed successes only: failures live in "Need to Fix", active in "In Progress"
+    // (success=true excludes both failed=False and in-progress=NULL). (#129)
+    const data = await apiGet("/runs/?limit=20&success=true");
     if (!data.length) { el.innerHTML = "<div class='muted'>No recent activity</div>"; return; }
     el.innerHTML = data.map(renderRunRow).join("");
   } catch { el.innerHTML = "<div class='muted'>Error loading</div>"; }
