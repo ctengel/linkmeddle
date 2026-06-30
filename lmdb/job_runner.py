@@ -10,6 +10,7 @@ Single worker in 4.0; the claim endpoint's SKIP LOCKED makes it safe once a 2nd 
 # TODO use models from lmdb.models where appropriate
 
 import os
+import shutil
 import socket
 import argparse
 import traceback
@@ -22,8 +23,28 @@ LINKMEDDLE_PLAPI = os.environ.get("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 WORKER = os.environ.get("LM_WORKER", f"{socket.gethostname()}/{os.getpid()}")
 CLAIM_TIMEOUT = 30
 RESULT_TIMEOUT = 64  # large playlists make a big POST body (mirrors the old plugin)
+# Free-space floor below which the worker refuses to claim. Shared env var/default with
+# pervellam (pervellam 6cffa41, #43) so the two tools share one knob.
+DEFAULT_MIN_FREE_BYTES = 32 * 1024**3  # 32 GiB
+MIN_FREE_ENV = "WORKER_MIN_FREE_BYTES"
 
 # TODO prepare for bearer auth
+
+
+def enough_free_space(path: str = ".") -> bool:
+    """False (and prints why) when free space under `path` is below the WORKER_MIN_FREE_BYTES
+    floor (default 32 GiB; 0 disables). Shared env var with pervellam (#195). `path` is the
+    cwd because yt-dlp writes the media file there before ObjIdxUploadPP uploads it to OI, so
+    a near-full scratch disk fails the download mid-write and orphans partial files."""
+    min_free = int(os.environ.get(MIN_FREE_ENV, DEFAULT_MIN_FREE_BYTES))
+    if min_free <= 0:
+        return True
+    free = shutil.disk_usage(path).free
+    if free < min_free:
+        print(f"Refusing to claim job: only {free} bytes free in {path}, "
+              f"need {min_free} (set {MIN_FREE_ENV}=0 to disable)")
+        return False
+    return True
 
 def claim_job(api_base: str, worker: str, extractor: str | None = None) -> dict | None:
     """Claim the single highest-priority due job, or None when nothing is due (204).
@@ -151,6 +172,11 @@ def main(argv: list[str] | None = None) -> int:
     fails = 0
     while True:
         succ = False
+        # Disk-space backpressure: stop claiming once the scratch disk is near-full (#195),
+        # rather than failing the download mid-write and orphaning a partial file.
+        if not enough_free_space():
+            status = 1
+            break
         job = claim_job(LINKMEDDLE_PLAPI, WORKER, args.extractor)
         if job is None:
             break
