@@ -287,7 +287,15 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     if new:
         cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
         stmt = stmt.where(Thing.created_dt >= cutoff)
-    stmt = stmt.order_by(Thing.created_dt.desc())
+    if needs_rating:
+        # Container/unknown (container IS NOT False) before videos, then most-neutral
+        # machine rating first (NULL treated as neutral 0.0), newest as final tiebreak.
+        stmt = stmt.order_by(
+            sa.desc(Thing.container.isnot(False)),
+            func.abs(func.coalesce(_machine_rating_expr(), 0.0)).asc(),
+            Thing.created_dt.desc())
+    else:
+        stmt = stmt.order_by(Thing.created_dt.desc())
     return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
 
 
@@ -401,10 +409,13 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
 
 
 def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
-    """Fill NULL fields on `existing` from `incoming` (#147), guarding the native-key index.
+    """Fill NULL fields on `existing` from `incoming` (#147), guarding the unique indexes.
 
-    If backfilling `native_id` would collide with a different existing row, that one field
-    is skipped (true cross-row merge is out of 4.0 scope).
+    Both partial-unique indexes are guarded: if backfilling `native_id` (thing_native) or
+    `url` (thing_url) would collide with a different existing row, that one field is skipped.
+    A clash means two rows describe one video (one created url-first, one native-key-first);
+    true cross-row merge is out of 4.0 scope, so we converge later (Phase 2) and just avoid
+    the unique violation here.
     """
     fields = xform.null_backfill(existing, incoming)
     if "native_id" in fields:
@@ -416,6 +427,12 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
                                 Thing.id != existing.id)).first()
         if clash is not None:
             fields.pop("native_id")
+    if "url" in fields:
+        clash = session.exec(
+            select(Thing).where(Thing.url == fields["url"],
+                                Thing.id != existing.id)).first()
+        if clash is not None:
+            fields.pop("url")
     for key, value in fields.items():
         setattr(existing, key, value)
 
@@ -746,13 +763,13 @@ def submit_result(run_id: uuid.UUID, item: RunResultIn,
             pl_thing.last_success_dt = now       # full extract is terminal → complete (§4.2),
                                                  # even if still bare: never re-loop a meta job (#163)
             xform.refresh_info_hint(pl_thing, item.video.info_json)  # keep Stage-2 hint fresh
-            # #191: a B+ leaf the pull just classified is wanted media — don't make it sit out a
-            # meta backoff before the download. Leave it due so video_branch claims it on the next
-            # loop (one extra loop, not a 5–8 day gap). C-band (rate-only) keeps the normal backoff.
-            if _effective_rating_value(session, pl_thing) >= _VIDEO_DOWNLOAD_FLOOR:
-                pl_thing.try_on = _today()
-            else:
-                _set_try_on(session, pl_thing)   # backoff (§4.4)
+            # A completed meta is terminal — meta_branch is gated on last_success_dt IS NULL, now
+            # set, so it can never re-claim this leaf (#163). Leave it due (try_on=today), exactly
+            # like a never-meta'd C-band leaf, so it is claimable the instant it qualifies for
+            # download: immediately for a B+ leaf (#191, no day gap), or later when a parent rating
+            # lifts its machine rating to B (video_branch needs try_on<=today; a backoff date would
+            # only delay that, and a C-band meta backoff is otherwise inert — nothing re-reads it).
+            pl_thing.try_on = _today()
         return _finish(session, run)
 
     if item.playlist is None:

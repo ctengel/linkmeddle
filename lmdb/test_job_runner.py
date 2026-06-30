@@ -496,3 +496,43 @@ def test_pl_full2things_puts_info_json_in_video_attrs():
         assert vid.attrs["cookies"] is True                     # propagated hint preserved
         assert vid.attrs[xform.INFO_JSON_KEY]["id"] == vid.native_id
         assert "formats" in vid.attrs[xform.INFO_JSON_KEY]
+
+
+# --- free-space guard (#195): refuse to claim when scratch disk is near-full -----------
+
+class _DU:
+    """Stand-in for shutil.disk_usage()'s named tuple (only .free is read)."""
+    def __init__(self, free):
+        self.free = free
+
+
+def test_enough_free_space_true_when_above_floor(monkeypatch):
+    monkeypatch.delenv(job_runner.MIN_FREE_ENV, raising=False)
+    monkeypatch.setattr(job_runner.shutil, "disk_usage",
+                        lambda path: _DU(job_runner.DEFAULT_MIN_FREE_BYTES + 1))
+    assert job_runner.enough_free_space() is True
+
+
+def test_enough_free_space_false_when_below_floor(monkeypatch, capsys):
+    monkeypatch.delenv(job_runner.MIN_FREE_ENV, raising=False)
+    monkeypatch.setattr(job_runner.shutil, "disk_usage", lambda path: _DU(1))
+    assert job_runner.enough_free_space() is False
+    assert "Refusing to claim job" in capsys.readouterr().out
+
+
+def test_enough_free_space_disabled_with_zero(monkeypatch):
+    # WORKER_MIN_FREE_BYTES=0 disables the check even on a near-full disk (disk_usage unused).
+    monkeypatch.setenv(job_runner.MIN_FREE_ENV, "0")
+    monkeypatch.setattr(job_runner.shutil, "disk_usage",
+                        lambda path: (_ for _ in ()).throw(AssertionError("should not check")))
+    assert job_runner.enough_free_space() is True
+
+
+def test_main_stops_without_claiming_when_space_low(monkeypatch):
+    # Low space short-circuits the loop: main() returns 1 and never claims a job.
+    monkeypatch.setattr(job_runner, "enough_free_space", lambda *a, **k: False)
+    claims = []
+    monkeypatch.setattr(job_runner, "claim_job",
+                        lambda *a, **k: claims.append(a) or None)
+    assert job_runner.main([]) == 1
+    assert claims == []

@@ -81,6 +81,17 @@ async def add_thing(item: fe_models.ThingCreate, response: Response):
     return fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(resp.json()))
 
 
+def _failing_sort_key(t: fe_models.ThingSummary):
+    """Order the actionable-failed list (#129): actionable (try_on set) before
+    acknowledged permafails (try_on null); within each, highest effective rating
+    first, then most-recent failure first. Negated so a plain ascending sort puts
+    the most urgent row on top; None rating sorts as lowest, no failure as oldest.
+    """
+    rating = t.effective_rating if t.effective_rating is not None else float("-inf")
+    failed_at = t.last_failure_dt.timestamp() if t.last_failure_dt is not None else 0.0
+    return (t.try_on is None, -rating, -failed_at)
+
+
 @app.get("/things/", response_model=list[fe_models.ThingSummary])
 async def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
                       rating: Optional[float] = None, min_rating: Optional[float] = None,
@@ -101,8 +112,11 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
             params[name] = True
     async with httpx.AsyncClient(timeout=5) as client:
         resp = _checked(await client.get(_plapi("/things/"), params=params))
-    return [fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(t))
-            for t in resp.json()]
+    things = [fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(t))
+              for t in resp.json()]
+    if failing:
+        things.sort(key=_failing_sort_key)
+    return things
 
 
 @app.get("/things/{thing_id}", response_model=fe_models.ThingPage)

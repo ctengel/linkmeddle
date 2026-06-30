@@ -570,6 +570,24 @@ def test_machine_rating_null_when_no_relatives(client):
     assert got["machine_rating"] is None and got["effective_rating"] is None
 
 
+def test_needs_rating_orders_container_first_then_neutral(client):
+    # Needs-rating order: containers/unknowns before videos, then most-neutral machine
+    # rating first (NULL machine rating sorts as neutral 0.0). All seeds are unrated so
+    # they show in needs_rating; the rated parents are excluded by the human_rating filter.
+    achan = _seed_thing(type="channel", url="http://e/nr-achan", human_rating=2.0)
+    apl = _seed_thing(type="playlist", url="http://e/nr-apl", human_rating=2.0)
+    cpl = _seed_thing(type="playlist", url="http://e/nr-cpl", human_rating=0.0)
+    c_strong = _seed_thing(type="playlist", url="http://e/nr-c-strong")  # machine 2.0 via A channel
+    _seed_rel(achan, c_strong, channel=True)
+    c_null = _seed_thing(type="playlist", url="http://e/nr-c-null")      # no relatives -> machine NULL
+    v_neutral = _seed_thing(type="video", url="http://e/nr-v-neutral")   # machine 0.0 via C playlist
+    _seed_rel(cpl, v_neutral)
+    v_strong = _seed_thing(type="video", url="http://e/nr-v-strong")     # machine 2.0 via A playlist
+    _seed_rel(apl, v_strong)
+    ids = [t["id"] for t in client.get("/things/", params={"needs_rating": True}).json()]
+    assert ids == [c_null, c_strong, v_neutral, v_strong]
+
+
 def test_related_things_carry_computed_ratings(client):
     # A neighbor's machine/effective rating is computed too (the subquery follows the neighbor).
     bpl = _seed_thing(type="playlist", url="http://e/rel-pl", human_rating=1.0)
@@ -746,6 +764,43 @@ def test_ingest_duplicate_entries(client):
     vid_related = client.get(f"/things/{vids[0]['id']}/related").json()
     chan_parents = [e for e in vid_related if e["direction"] == "parent" and e["channel"]]
     assert len(chan_parents) == 1
+
+
+def test_ingest_url_backfill_skips_on_clash(client):
+    # Two rows already describe one video: B holds the url (no native key), A was created
+    # native-key-first with url still NULL. A pull now carries BOTH keys, so the member matches
+    # A by native key and would backfill A.url to a value B already holds -> thing_url
+    # UniqueViolation (HTTP 500) pre-fix. The clashing url is skipped instead (cross-row merge
+    # is Phase 2); the non-colliding #147 backfill still applies.
+    clash_url = "http://example/v/clash"
+    b_id = _seed_thing(type="video", url=clash_url)                 # url, no native key
+    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
+                       native_id="clashvid")
+
+    url = "http://example/pl/clash"
+    tid, rid = _claimed_run(client, url)
+    up = models.UlChan(native_id="clashup", title="Clash Up", url="http://example/clashup")
+    payload = models.PullThing(
+        url=url, native_id="plclash", title="Clash PL", extractor_key="youtube",
+        playlist_count=1, channel=up,
+        entries=[models.PullThing(
+            native_id="clashvid", title="Clash Video", url=clash_url,
+            extractor_key="youtube", channel=up)],
+    ).model_dump(mode="json")
+
+    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert r.status_code == 200            # pre-fix: 500 thing_url UniqueViolation
+    assert r.json()["success"] is True
+
+    # A (matched by native key) keeps url NULL — the clashing backfill was skipped — but its
+    # other NULL fields are still filled from the pull (#147).
+    a = client.get(f"/things/{a_id}").json()
+    assert a["url"] is None
+    assert a["title"] == "Clash Video"
+    # B (the url holder) is untouched.
+    b = client.get(f"/things/{b_id}").json()
+    assert b["url"] == clash_url
+    assert b["native_id"] is None
 
 
 def test_ingest_empty_playlist(client):
@@ -1487,7 +1542,7 @@ def test_meta_result_enriches_without_acquiring(client):
     assert t["best_oi"] is None                          # metadata only, NOT acquired
     assert t["last_success_dt"]                          # human-decision metadata now in hand
     assert t["last_failure_dt"] is None
-    assert t["try_on"] is not None                       # backoff applied (not NULL: not acquired)
+    assert t["try_on"] == _TODAY.isoformat()             # terminal but stays due (today), not backed off
     # last_success_dt being set is sufficient to prove meta_branch won't re-dispatch this video.
 
 
@@ -1521,7 +1576,7 @@ def test_meta_result_incomplete_is_still_terminal(client):
     t = client.get(f"/things/{v}").json()
     assert t["last_success_dt"]             # terminal: set even though channel is missing
     assert t["best_oi"] is None            # metadata only, NOT acquired
-    assert t["try_on"] is not None         # Fibonacci backoff applied; no longer a meta job
+    assert t["try_on"] == _TODAY.isoformat()  # terminal but stays due (today); not meta-claimable (last_success set)
 
 
 def test_meta_b_video_no_backoff_then_downloads(client):
@@ -1551,6 +1606,39 @@ def test_meta_b_video_no_backoff_then_downloads(client):
         if job2["thing"]["id"] == v:
             assert job2["download"] is True
             break
+
+
+def test_meta_c_then_parent_rating_downloads(client):
+    # A C-band leaf, meta-enriched, must stay due (try_on=today) — NOT backed off — so that when
+    # its parent is later rated B+ (lifting the child's machine rating to B) it is claimed for
+    # download immediately, with no intervening backoff gap. Same behavior as a never-meta'd
+    # C-band sibling, which keeps its default try_on=today.
+    pl = _seed_thing(type="playlist", url="http://e/cpd-pl", try_on=None)   # unrated parent (not due)
+    v = _seed_thing(type="video", url="http://e/cpd-v", try_on=_TODAY)      # unrated -> C leaf
+    _seed_rel(pl, v)
+    job = _claim(client)
+    assert job and job["thing"]["id"] == v and job["download"] is False     # C-band -> meta, not download
+    r = client.post(f"/jobs/{job['run_id']}/result",
+                    json={"success": True,
+                          "video": {"native_id": "cpd1", "title": "C Vid",
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/chan/cpd"},
+                                    "info_json": {"id": "cpd1"}}})
+    assert r.status_code == 200
+    t = client.get(f"/things/{v}").json()
+    assert t["last_success_dt"] and t["best_oi"] is None        # meta complete, not acquired
+    assert t["try_on"] == _TODAY.isoformat()                    # stays due, NOT backed off
+    # Rate the parent B+ -> child's machine rating becomes B -> download-eligible right now.
+    assert client.patch(f"/things/{pl}", json={"human_rating": 1.0}).status_code == 200
+    # Containers sort first, so drain claims until our video is dispatched -- it must be a download.
+    for _ in range(5):
+        job2 = _claim(client)
+        assert job2 is not None, "video never dispatched for download"
+        if job2["thing"]["id"] == v:
+            assert job2["download"] is True
+            break
+    else:
+        assert False, "video never dispatched for download"
 
 
 def test_meta_result_failure_backs_off(client):
