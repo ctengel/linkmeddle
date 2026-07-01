@@ -92,7 +92,47 @@ def test_pl_full2things_no_channel_url():
         vid.channel = models.UlChan()  # ...nor any entry
     g = xform.pl_full2things(pl, bucket="b")
     assert g.channels == []
-    assert not any(r.channel for r in g.rels)   # no uploader edges without a channel url
+    assert not any(r.channel for r in g.rels)   # no uploader edges without id or url
+
+
+def test_thing_from_chan_url_less():
+    # #160: an uploader with only an id (no URL) still yields a channel stub, keyed by native id,
+    # extractor_key left NULL, the discovering extractor recorded as provenance.
+    t = xform.thing_from_chan(models.UlChan(native_id="UCxyz", title="Chan X"),
+                              source_extractor="somesite")
+    assert t is not None
+    assert t.container is True
+    assert t.url is None and t.channel is None
+    assert t.native_id == "UCxyz"
+    assert t.extractor_key is None
+    assert t.attrs == {"kind": "channel", "channel_id": "UCxyz",
+                       "source_extractor": "somesite"}
+    # neither url nor id -> nothing to key on
+    assert xform.thing_from_chan(models.UlChan()) is None
+
+
+def test_thing_from_chan_url_keyed_unchanged():
+    # URL present -> keyed by URL, native_id nulled (kept as channel_id hint), no source_extractor.
+    t = xform.thing_from_chan(models.UlChan(url="http://e/c", native_id="UC1", title="C"),
+                              source_extractor="somesite")
+    assert t.url == "http://e/c" and t.native_id is None and t.channel == "http://e/c"
+    assert t.attrs == {"kind": "channel", "channel_id": "UC1"}
+
+
+def test_pl_full2things_url_less_uploader_links_orphans():
+    # #160: a curated playlist whose entries expose only an uploader id (no URL) still links each
+    # video to a channel thing (keyed by that id), one node per distinct id, via channel=True edges.
+    pl = _pl(2)
+    pl.channel = models.UlChan(native_id="pl1", url="http://example/pl/owner")  # playlist's own
+    for vid in pl.entries:
+        vid.channel = models.UlChan(native_id="UCorphan", title="Orphan")  # url-less, shared
+    g = xform.pl_full2things(pl, bucket="b")
+    assert len(g.channels) == 1                              # one node for the shared id
+    chan = g.channels[0]
+    assert chan.native_id == "UCorphan" and chan.url is None
+    assert chan.attrs["kind"] == "channel" and chan.attrs["source_extractor"] == "youtube"
+    chan_edges = [r for r in g.rels if r.parent == chan.id and r.channel]
+    assert len(chan_edges) == 2                              # both videos linked to the channel
 
 
 def test_pl_hash_order_independent():

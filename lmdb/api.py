@@ -390,13 +390,39 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
 
 # --- Jobs / runs: Stage-1 ingest (Task 1.1) -------------------------------------------
 
+def _find_channel_by_id(session: Session, native_id: str) -> Optional[Thing]:
+    """Locate an existing channel Thing by uploader/channel ID (#160).
+
+    The link some video extractors give us is an uploader/channel *ID* only (no URL) — vk,
+    twitchvod, etc. The design join is `video.uploader_id -> channel.native_id`, and it is
+    **extractor-agnostic**: the channel's own sub-extractor (e.g. `twitchvideos`) differs from
+    the video's (`twitchvod`) and is never carried in the video, so we match on the id alone.
+
+    Matched strictly on `native_id` (plus `attrs.kind='channel'`). This deliberately never hits a
+    channel *tab* (Videos/Shorts/Live): tabs are URL-keyed with `native_id=NULL` and only stash
+    the shared id in `attrs.channel_id`, so keying off `channel_id` could mis-link a video to a
+    tab. `native_id` matches the canonical channel (which keeps its id, e.g. twitchvideos/
+    vkuservideos) and a prior url-less stub, never a tab."""
+    return session.exec(
+        select(Thing).where(Thing.native_id == native_id,
+                            Thing.attrs["kind"].astext == "channel")).first()
+
+
 def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     """Locate an existing thing matching `thing`'s identity: native key, then URL.
+
+    A url-less channel stub (an id-only uploader, #160) resolves by uploader/channel ID against
+    any existing channel (`_find_channel_by_id`, extractor-agnostic) so a video links to the
+    real channel container when it already exists, and repeated id-only references share one
+    node — rather than the extractor-scoped native key (which would never match the real
+    channel's own extractor).
 
     (`col == None` deliberately becomes SQL `IS NULL` here for stubs without an
     extractor_key — see the module docstring gotcha.)
     """
     if thing.native_id is not None:
+        if thing.url is None and (thing.attrs or {}).get("kind") == "channel":
+            return _find_channel_by_id(session, thing.native_id)
         found = session.exec(
             select(Thing).where(Thing.backend == thing.backend,
                                 Thing.extractor_key == thing.extractor_key,
@@ -497,10 +523,17 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
         # REVIEW-DEFERRED-4 #1: never converge a channel away. A sub-container that shares its
         # channel's id (a self-pulling Videos/Shorts/Live tab, #46) would otherwise clash its id
         # onto the channel and merge — deleting — it. Leave the channel (and its native_id, which
-        # ID-based video->channel linking relies on) intact and drop the clashing identity backfill,
-        # so `existing` (the tab) stays URL-keyed. The pull otherwise succeeds. (When ID-based
-        # linking lands, allow a genuine channel->channel convergence: skip only when `existing`
-        # is not itself a channel.)
+        # ID-based video->channel linking relies on, #160) intact and drop the clashing identity
+        # backfill, so `existing` (the tab) stays URL-keyed. The pull otherwise succeeds.
+        #
+        # NB (#160): the earlier note here — "once ID-based linking lands, allow a channel->channel
+        # convergence: skip only when existing is not itself a channel" — turns out to be UNSAFE. A
+        # channel *tab* is itself tagged `kind='channel'` (it parents channel=True edges to its own
+        # videos), so `existing.kind == 'channel'` does NOT distinguish a canonical channel from a
+        # tab; keying off it would delete the real channel on a tab re-pull. So this guard stays
+        # blunt. The legitimate channel convergence — a url-less id-only stub meeting the real
+        # channel — is done elsewhere (`_converge_urlless_channel`), keyed on the URL-less shape a
+        # tab never has, so it can never delete a tab.
         if (clash.attrs or {}).get("kind") == "channel":
             for field in clash_fields:
                 fields.pop(field, None)
@@ -514,9 +547,12 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
     """Upsert the video's uploader container + a `channel=True` rel (the flat-pull omits it).
 
     Mirrors the Stage-1 channel fan-out, used when a `meta` job's full extract discovers the
-    uploader a flat playlist pull left out. No-op if the uploader has no URL.
+    uploader a flat playlist pull left out. No-op only if the uploader has neither URL nor id;
+    a url-less uploader (id only) still links via a native-id-keyed channel stub (#160), with
+    the video's extractor recorded as `source_extractor` provenance (never inherited as the
+    channel's extractor_key).
     """
-    stub = xform.thing_from_chan(chan)
+    stub = xform.thing_from_chan(chan, video.extractor_key)
     if stub is None:
         return
     existing = _find_thing(session, stub)
@@ -529,6 +565,29 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         chan_id = existing.id
     session.execute(pg_insert(Rel).values(
         parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
+
+
+def _converge_urlless_channel(session: Session, channel: Thing) -> None:
+    """Absorb a url-less id-only channel stub into the real channel once it is pulled (#160).
+
+    A video whose uploader is exposed by ID only links to a native-id-keyed stub (`url=NULL`)
+    when the real channel isn't known yet. When the channel is later pulled directly it gains a
+    URL + native_id; this merges the earlier stub into it (`_merge_things`), re-pointing the
+    stub's `channel=True` video edges onto the real channel and deleting the stub.
+
+    Safe by the URL-less discriminator: only a stub with `url IS NULL` is ever the merge loser,
+    so a channel *tab* (always URL-keyed, with a URL) can never be selected and deleted. No-op
+    unless `channel` is a real channel with both a URL and a native_id.
+    """
+    if channel.native_id is None or channel.url is None:
+        return
+    stub = session.exec(
+        select(Thing).where(Thing.native_id == channel.native_id,
+                            Thing.url == None,  # noqa: E711  url-less stub only (never a tab)
+                            Thing.attrs["kind"].astext == "channel",
+                            Thing.id != channel.id)).first()
+    if stub is not None:
+        _merge_things(session, channel, stub)   # survivor = real channel, loser = url-less stub
 
 
 def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing) -> None:
@@ -595,6 +654,9 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # channel — tag the display hint (any channel=True edge it parents, idempotent).
     if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):
         xform.merge_attr(container, "kind", "channel")
+        # Now that this channel has a URL + native_id, absorb any url-less id-only stub created
+        # for it before it was pulled (#160), re-pointing that stub's video edges onto it.
+        _converge_urlless_channel(session, container)
 
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
@@ -693,9 +755,14 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     rating = _effective_rating_expr(default=0.0)
     today = _today()
     # Stage-1 pull: a container or an unknown thing (`container` is True/NULL), grade >= C
-    # band, due, not already succeeded today.
+    # band, due, not already succeeded today, and *runnable* — it has a URL to pull OR a
+    # load-info hint (`attrs.info_json`) the worker can hand to yt-dlp. A url-less channel stub
+    # (an id-only uploader linked via #160) has neither, so it's a pure graph node that is never
+    # dispatched; a container that only carries a hint still is.
+    runnable = or_(Thing.url.isnot(None), Thing.attrs[xform.INFO_JSON_KEY].isnot(None))
     stage1_branch = sa.and_(
-        Thing.container.isnot(False), rating >= _PLAYLIST_FLOOR, Thing.try_on <= today,
+        Thing.container.isnot(False), runnable, rating >= _PLAYLIST_FLOOR,
+        Thing.try_on <= today,
         or_(Thing.last_success_dt == None,  # noqa: E711  (SQL IS NULL)
             func.date(Thing.last_success_dt) < today))
     # Stage-2 video download: a leaf (container False), grade >= B band, never acquired, due.

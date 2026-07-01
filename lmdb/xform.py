@@ -94,25 +94,49 @@ def thing_from_node(node: models.PullThing) -> models.Thing:
                         modified=node.modified)
 
 
-def thing_from_chan(chan: models.UlChan) -> Optional[models.Thing]:
-    """Build a channel `thing` from an uploader/channel descriptor, or None if no URL.
+def thing_from_chan(chan: models.UlChan,
+                    source_extractor: Optional[str] = None) -> Optional[models.Thing]:
+    """Build a channel `thing` from an uploader/channel descriptor, or None if it has neither
+    a URL nor a native id (nothing to key on).
 
     A channel is just a container (container=True); its channel-ness rides the soft
     `attrs.kind='channel'` display hint plus the `channel=True` rel edges pointing at it.
     extractor_key is left None — yt-dlp does not provide the channel's sub-extractor in a
     parent info dict; it is filled in only when a job runs directly on the channel URL.
+
+    Two shapes (#160):
+    - URL present -> the channel is keyed by its URL (native_id nulled, kept as an
+      `attrs.channel_id` hint), following the container-keyed-by-webpage_url convention.
+    - URL absent but native_id present -> a *url-less* channel keyed by its native id, so a
+      video whose extractor only exposes an uploader/channel ID (no URL) is still linked to a
+      channel Thing (the V3 regression this fixes). It is a pure graph node the worker can't run
+      (no URL to pull); the dispatch (`claim_job` stage1_branch) excludes url-less containers, so
+      it is never claimed. `source_extractor` (the discovering video's extractor) is recorded as
+      a provenance hint since extractor_key stays NULL — we never inherit the video's extractor
+      (usually a different sub-extractor).
     """
-    if not chan.url:
+    if chan.url:
+        attrs: dict = {'kind': 'channel'}
+        if chan.native_id is not None:
+            attrs['channel_id'] = chan.native_id
+        return models.Thing(url=chan.url,
+                            extractor_key=None,
+                            native_id=None,
+                            container=True,
+                            title=chan.title,
+                            channel=chan.url,
+                            attrs=attrs)
+    if chan.native_id is None:
         return None
-    attrs: dict = {'kind': 'channel'}
-    if chan.native_id is not None:
-        attrs['channel_id'] = chan.native_id
-    return models.Thing(url=chan.url,
+    attrs = {'kind': 'channel', 'channel_id': chan.native_id}
+    if source_extractor is not None:
+        attrs['source_extractor'] = source_extractor
+    return models.Thing(url=None,
                         extractor_key=None,
-                        native_id=None,
+                        native_id=chan.native_id,
                         container=True,
                         title=chan.title,
-                        channel=chan.url,
+                        channel=None,
                         attrs=attrs)
 
 
@@ -244,24 +268,29 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     pl_thing.bucket = bucket
     members: list[models.Thing] = []
     rels: list[models.Rel] = []
-    # One channel node per uploader URL, shared across the container + its videos.
-    channels_by_url: dict[str, models.Thing] = {}
+    # One channel node per uploader, shared across the container + its videos. Keyed by URL
+    # when known, else by native id (a url-less uploader, #160) so the same id maps to one node.
+    channels_by_key: dict[str, models.Thing] = {}
 
-    def channel_for(chan: models.UlChan) -> Optional[models.Thing]:
-        if not chan.url:
+    def channel_for(chan: models.UlChan,
+                    source_extractor: Optional[str] = None) -> Optional[models.Thing]:
+        key = chan.url or (f"id:{chan.native_id}" if chan.native_id else None)
+        if key is None:
             return None
-        existing = channels_by_url.get(chan.url)
+        existing = channels_by_key.get(key)
         if existing is None:
-            existing = thing_from_chan(chan)
+            existing = thing_from_chan(chan, source_extractor)
+            if existing is None:
+                return None
             existing.bucket = bucket
-            channels_by_url[chan.url] = existing
+            channels_by_key[key] = existing
         return existing
 
     # The container's own uploader -> a channel=True edge, but only for a *curated playlist*
     # owned by someone else; when the container IS its own uploader (a channel) skip the
-    # self-edge.
-    if pl.channel.url and not _same_identity(pl_thing, pl.channel):
-        pl_chan = channel_for(pl.channel)
+    # self-edge. A url-less owner (id only) still links (#160).
+    if (pl.channel.url or pl.channel.native_id) and not _same_identity(pl_thing, pl.channel):
+        pl_chan = channel_for(pl.channel, pl.extractor_key)
         if pl_chan is not None:
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
@@ -298,12 +327,12 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=False))
-            vid_chan = channel_for(vid.channel)
+            vid_chan = channel_for(vid.channel, vid.extractor_key)
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
     return ThingGraph(playlist=pl_thing, members=members,
-                      channels=list(channels_by_url.values()), rels=rels)
+                      channels=list(channels_by_key.values()), rels=rels)
 
 
 def reconcile_count(pl: models.PullThing) -> int:

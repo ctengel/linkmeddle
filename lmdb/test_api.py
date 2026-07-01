@@ -13,6 +13,7 @@ from pytest_postgresql import factories
 
 from lmdb import api
 from lmdb import models
+from lmdb import xform
 
 # Fedora keeps pg_ctl in /usr/bin (pytest-postgresql's default assumes a Debian path).
 postgresql_proc = factories.postgresql_proc(executable="/usr/bin/pg_ctl")
@@ -917,6 +918,24 @@ def test_meta_result_fans_out_channel(client):
     assert chan[0]["thing"]["url"] == "http://e/chan9"
 
 
+def test_meta_result_fans_out_url_less_channel(client):
+    # #160: a meta extract whose uploader has only an id (no URL) still links the video to a
+    # native-id-keyed channel thing, with the video's extractor recorded as provenance.
+    v, rid = _claimed_meta(client, url="http://e/mul")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "mulv", "title": "MUL", "extractor_key": "somesite",
+                                "channel": {"native_id": "UCidonly", "title": "IdOnly"},
+                                "info_json": {"id": "mulv"}}})
+    related = client.get(f"/things/{v}/related").json()
+    chan = [e for e in related if e["channel"]]
+    assert len(chan) == 1 and chan[0]["thing"]["container"] is True
+    assert chan[0]["thing"]["url"] is None
+    assert chan[0]["thing"]["native_id"] == "UCidonly"
+    assert chan[0]["thing"]["extractor_key"] is None
+    assert chan[0]["thing"]["attrs"]["source_extractor"] == "somesite"
+
+
 def test_ingest_propagates_hints(client):
     # 1.3b: a playlist's cookies/lpm_lib hints propagate onto its video stubs (attrs);
     # channels do not carry the hints (bucket only).
@@ -1085,6 +1104,118 @@ def test_ingest_shared_uploader_one_channel(client):
                           params={"direction": "child"}).json()
     # one shared channel owns the playlist + each video, all via channel=True edges
     assert len(children) == 4 and all(e["channel"] is True for e in children)
+
+
+def test_ingest_url_less_uploader_links_orphans(client):
+    # #160: entries whose uploader exposes only an id (no URL) are still linked to a channel
+    # thing (keyed by that id) instead of orphaned. Two videos share one id -> one channel node,
+    # keyed by native id, extractor_key NULL (never inherited from the video), source extractor
+    # recorded as provenance, and never dispatched (no URL for the worker to pull).
+    url = "http://example/pl/urlless"
+    tid, rid = _claimed_run(client, url)
+    pl = models.PullThing(
+        url=url, native_id="plurlless", title="PL", extractor_key="youtube", playlist_count=2,
+        channel=models.UlChan(native_id="plurlless", url=url),   # the playlist's own identity
+        entries=[models.PullThing(
+            native_id=f"v{i}", url=f"http://example/v/urlless{i}", title=f"V{i}",
+            extractor_key="somesite",
+            channel=models.UlChan(native_id="UCorphan", title="Orphan"),  # url-less, shared
+        ) for i in range(2)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pl}).status_code == 200
+
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1                                    # one channel for the shared id
+    chan = chans[0]
+    assert chan["url"] is None and chan["native_id"] == "UCorphan"
+    assert chan["extractor_key"] is None                     # never inherited from the video
+    assert chan["attrs"]["source_extractor"] == "somesite"   # provenance recorded
+    children = client.get(f"/things/{chan['id']}/related",
+                          params={"direction": "child"}).json()
+    assert len(children) == 2 and all(e["channel"] is True for e in children)
+    # the url-less channel (container, no URL) is never dispatched as a Stage-1 pull; only the
+    # two videos are claimable, so no claim ever hands back this channel.
+    seen = set()
+    while (job := _claim(client)) is not None:
+        seen.add(job["thing"]["id"])
+        client.post(f"/jobs/{job['run_id']}/result",
+                    json={"success": False})   # fail it so the loop terminates
+    assert chan["id"] not in seen
+
+
+def test_ingest_url_less_uploader_links_existing_channel(client):
+    # #160: when the real channel already exists (e.g. a twitchvideos container with a URL + its
+    # own native_id), an id-only uploader on a video links to THAT channel by id — extractor
+    # differs (twitchvod vs twitchvideos) and the video carries no URL — instead of spawning a
+    # duplicate url-less stub. The join is video.uploader_id -> channel.native_id.
+    chan_id = _seed_thing(type="channel", url="http://tw/c/streamer", extractor_key="twitchvideos",
+                          native_id="TW123", try_on=None)   # real channel; not due -> not claimed
+    url = "http://example/pl/tw"
+    tid, rid = _claimed_run(client, url)
+    pl = models.PullThing(
+        url=url, native_id="pltw", title="PL", extractor_key="youtube", playlist_count=1,
+        channel=models.UlChan(native_id="pltw", url=url),        # playlist's own identity
+        entries=[models.PullThing(
+            native_id="tv1", url="http://tw/v/tv1", title="Stream VOD", extractor_key="twitchvod",
+            channel=models.UlChan(native_id="TW123", title="Streamer"),  # id-only uploader
+        )],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pl}).status_code == 200
+
+    # no duplicate channel: only the pre-seeded real channel exists
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1 and chans[0]["id"] == chan_id
+    # the video is linked to the real channel by a channel=True edge
+    children = client.get(f"/things/{chan_id}/related", params={"direction": "child"}).json()
+    assert [e["thing"]["native_id"] for e in children if e["channel"]] == ["tv1"]
+
+
+def test_claim_runnable_without_url_via_info_json(client):
+    # R1 (#160): claim_job gates Stage-1 on *runnable* (a URL or a load-info hint), not URL alone.
+    # A url-less container carrying an info_json hint is claimable; a url-less channel stub (no
+    # URL, no hint) is never dispatched.
+    hinted = _seed_thing(container=None, url=None, native_id="uh1", extractor_key="somesite",
+                         attrs={xform.INFO_JSON_KEY: {"id": "uh1"}}, try_on=_TODAY)
+    stub = _seed_thing(type="channel", url=None, native_id="UCstub", try_on=_TODAY)
+    claimed = set()
+    while (job := _claim(client)) is not None:
+        claimed.add(job["thing"]["id"])
+        client.post(f"/jobs/{job['run_id']}/result", json={"success": False})  # fail -> loop ends
+    assert hinted in claimed        # runnable via the info_json hint despite no URL
+    assert stub not in claimed      # url-less channel stub: not runnable, never claimed
+
+
+def test_url_less_stub_converges_into_pulled_channel(client):
+    # R3 (#160): a video linked to a url-less id-only channel stub re-points onto the real channel
+    # when it is later pulled by URL; the stub is merged away (one channel row remains).
+    v, rid = _claimed_meta(client, url="http://e/cv")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "cvv", "title": "CV", "extractor_key": "twitchvod",
+                                "channel": {"native_id": "TW9", "title": "Streamer"},
+                                "info_json": {"id": "cvv"}}})
+    stubs = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(stubs) == 1 and stubs[0]["url"] is None and stubs[0]["native_id"] == "TW9"
+    stub_id = stubs[0]["id"]
+
+    # the real channel is added by URL and pulled -> it carries native_id TW9
+    curl = "http://tw/c/streamer"
+    cid, crid = _claimed_run(client, curl)
+    chan_pull = models.PullThing(
+        url=curl, native_id="TW9", title="Streamer", extractor_key="twitchvideos", playlist_count=1,
+        channel=models.UlChan(native_id="TW9", url=curl),
+        entries=[models.PullThing(native_id="cv2", url="http://tw/v/cv2", title="CV2",
+                                  extractor_key="twitchvod",
+                                  channel=models.UlChan(native_id="TW9", url=curl))],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{crid}/result", json={"playlist": chan_pull}).status_code == 200
+
+    # stub merged away: one channel row (the pulled channel), stub gone, first video re-pointed
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1 and chans[0]["id"] == cid
+    assert client.get(f"/things/{stub_id}").status_code == 404
+    related = client.get(f"/things/{v}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [cid]
 
 
 def test_channel_pull_videos_and_subplaylists(client):
