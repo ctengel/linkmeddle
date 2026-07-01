@@ -1306,6 +1306,33 @@ def test_channel_tabs_one_run_distinct_things(client):
     assert any(p["thing"]["id"] == videos_tab["id"] for p in a_parents)
 
 
+def test_channel_tab_self_pull_preserves_channel(client):
+    # REVIEW-DEFERRED-4 #1: a channel tab that falls silent past the safety margin can be claimed and
+    # self-pulled as a top-level container, carrying the shared channel id. Backfilling that id onto the
+    # tab would collide with the channel row; pre-guard, _merge_things deleted the channel. The channel
+    # guard leaves the channel (and its id, kept for ID-based video->channel linking) intact and drops
+    # the clashing native_id backfill, so the tab stays URL-keyed and the pull otherwise succeeds.
+    chan_id = _seed_thing(type="channel", url="http://yt/@chan", extractor_key="youtubetab",
+                          native_id="UC", try_on=None)             # channel keeps its id; not due -> not claimed
+    tab_url = "http://yt/@chan/videos"
+    tid, rid = _claimed_run(client, tab_url)                       # the tab self-pulls, top-level
+    chan = models.UlChan(native_id="UC", title="Chan", url="http://yt/@chan")
+    tab = models.PullThing(
+        url=tab_url, native_id="UC", extractor_key="youtubetab", title="Chan - videos",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="v1", url="http://yt/v/v1", title="V1",
+                                  extractor_key="youtube", channel=chan)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": tab}).status_code == 200
+
+    channel = client.get(f"/things/{chan_id}")
+    assert channel.status_code == 200                              # channel NOT merged/deleted
+    assert channel.json()["native_id"] == "UC"                    # channel keeps its id
+    tab_thing = client.get(f"/things/{tid}").json()
+    assert tab_thing["id"] != chan_id                             # tab stays a distinct thing
+    assert tab_thing["native_id"] is None                        # tab left URL-keyed (clash backfill dropped)
+
+
 def test_unknown_url_discovered_as_video(client):
     # #153: an unknown URL (container=None) the pull resolves to a single video is sent as a
     # `video` body and classified as a leaf (container=False), then download/meta-eligible.

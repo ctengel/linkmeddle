@@ -472,26 +472,39 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
     `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
     `url` (thing_url) would collide with a *different* row, that row is a duplicate of the same
     real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
-    apply it. Both partial-unique indexes flow through the one merge path.
+    apply it. Both partial-unique indexes flow through the one merge path — except a *channel*
+    clash, which is never converged away (see the guard below).
     """
     fields = xform.null_backfill(existing, incoming)
-    clashes: dict[uuid.UUID, Thing] = {}
+    clashes: dict[uuid.UUID, tuple[Thing, list[str]]] = {}
+
+    def _note(clash: Optional[Thing], field: str) -> None:
+        if clash is not None:
+            clashes.setdefault(clash.id, (clash, []))[1].append(field)
+
     if "native_id" in fields:
         ek = fields.get("extractor_key", existing.extractor_key)
-        clash = session.exec(
+        _note(session.exec(
             select(Thing).where(Thing.backend == existing.backend,
                                 Thing.extractor_key == ek,
                                 Thing.native_id == fields["native_id"],
-                                Thing.id != existing.id)).first()
-        if clash is not None:
-            clashes[clash.id] = clash
+                                Thing.id != existing.id)).first(), "native_id")
     if "url" in fields:
-        clash = session.exec(
+        _note(session.exec(
             select(Thing).where(Thing.url == fields["url"],
-                                Thing.id != existing.id)).first()
-        if clash is not None:
-            clashes[clash.id] = clash
-    for clash in clashes.values():
+                                Thing.id != existing.id)).first(), "url")
+    for clash, clash_fields in clashes.values():
+        # REVIEW-DEFERRED-4 #1: never converge a channel away. A sub-container that shares its
+        # channel's id (a self-pulling Videos/Shorts/Live tab, #46) would otherwise clash its id
+        # onto the channel and merge — deleting — it. Leave the channel (and its native_id, which
+        # ID-based video->channel linking relies on) intact and drop the clashing identity backfill,
+        # so `existing` (the tab) stays URL-keyed. The pull otherwise succeeds. (When ID-based
+        # linking lands, allow a genuine channel->channel convergence: skip only when `existing`
+        # is not itself a channel.)
+        if (clash.attrs or {}).get("kind") == "channel":
+            for field in clash_fields:
+                fields.pop(field, None)
+            continue
         _merge_things(session, existing, clash)
     for key, value in fields.items():
         setattr(existing, key, value)
