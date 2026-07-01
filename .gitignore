@@ -137,9 +137,14 @@ cookies.json
 # custom addtions
 # V4 design notes: kept local only, not tracked
 lm-v4-design/
+# branch-vs-master comparison tooling + snapshots: local only, not tracked
+compare/
+COMPARISON-FINDINGS.md
 apiqueue/celeryconfig.py
 apiqueue/tempweb.sh
 *.csv
 scripts/*.txt
 *.info.json
 *.mp4
+REVIEW-DEFERRED*.md
+/*.json
