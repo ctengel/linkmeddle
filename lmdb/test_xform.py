@@ -198,9 +198,10 @@ def _chan_with_tabs(parent_native="UC", parent_ek="youtubetab",
         entries=[tab("videos"), tab("shorts"), tab("streams")])
 
 
-def test_facet_tabs_keyed_by_url_not_collapsed():
-    # A channel's tabs share one id (channel_id) but differ by URL -> the facet rule nulls their
-    # native_id so they stay distinct (URL-keyed) things, while the parent keeps the id.
+def test_subcontainer_members_url_keyed():
+    # Every sub-container member is URL-keyed: its native_id is nulled (kept as a channel_id hint)
+    # so a channel's tabs -- which all share the channel id -- stay distinct things rather than
+    # collapsing onto the parent/each other, while the parent keeps its own id.
     g = xform.pl_full2things(_chan_with_tabs(), bucket="b")
     assert g.playlist.native_id == "UC"                       # parent keeps the channel id
     assert all(m.native_id is None for m in g.members)        # tabs URL-keyed
@@ -213,22 +214,26 @@ def test_facet_tabs_keyed_by_url_not_collapsed():
     assert g.channels == []
 
 
-def test_facet_sibling_collision_when_parent_has_no_id():
-    # Even when the parent carries no native_id, sibling sub-containers sharing one id (distinct
-    # URLs) are facets and get URL-keyed.
+def test_subcontainer_members_url_keyed_when_parent_has_no_id():
+    # The rule is unconditional and needs no collision detection: even with no parent native_id,
+    # sub-container members are URL-keyed.
     pl = _chan_with_tabs(parent_native=None, parent_ek=None, parent_url="http://yt/@chan")
     g = xform.pl_full2things(pl, bucket="b")
     assert all(m.native_id is None for m in g.members)
     assert len({m.url for m in g.members}) == 3
 
 
-def test_facet_rule_leaves_distinct_subcontainers_alone():
-    # Sub-containers with genuinely distinct ids are not facets -> native_id preserved.
+def test_distinct_subcontainers_also_url_keyed():
+    # Blanket rule: sub-containers with genuinely distinct ids are URL-keyed too (id kept as a
+    # channel_id hint). A cross-URL id match converges later via the dedup merge, not by id-collapse
+    # here -- consistent with keying containers by webpage_url.
     pl = _pl(0)
     pl.entries = [_sub(native_id="subA", url="http://example/pl/a"),
                   _sub(native_id="subB", url="http://example/pl/b")]
     g = xform.pl_full2things(pl, bucket="b")
-    assert {m.native_id for m in g.members if m.container} == {"subA", "subB"}
+    subs = [m for m in g.members if m.container]
+    assert all(m.native_id is None for m in subs)
+    assert {(m.attrs or {}).get("channel_id") for m in subs} == {"subA", "subB"}
 
 
 def test_subtree_hash_equals_pl_hash_for_flat_pull():

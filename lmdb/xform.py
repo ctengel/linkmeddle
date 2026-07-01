@@ -215,23 +215,6 @@ def propagate_attrs(parent_attrs: Optional[dict]) -> Optional[dict]:
     return out or None
 
 
-def _facet_keys(pl: models.PullThing) -> set:
-    """`(extractor_key, native_id)` keys that are *facets* — a sub-container that shares its id
-    with the parent or a sibling sub-container but has a distinct URL (a channel's Videos/Shorts/
-    Live tabs all carry the same `id`=channel_id but different URLs). Such a key is never one real
-    identity, so its members are URL-keyed instead (native_id nulled in `pl_full2things`) and stay
-    distinct things rather than collapsing onto the parent/each other (#173-adjacent).
-
-    A key qualifies when >1 distinct URL shares it across {parent} ∪ {container members}.
-    """
-    urls_by_key: dict[tuple, set] = {}
-    nodes = [pl] + [e for e in pl.entries if e.container is True]
-    for node in nodes:
-        if node.native_id is not None:
-            urls_by_key.setdefault((node.extractor_key, node.native_id), set()).add(node.url)
-    return {key for key, urls in urls_by_key.items() if len(urls) > 1}
-
-
 def pl_full2things(pl: models.PullThing, *, bucket: str,
                    parent_attrs: Optional[dict] = None) -> ThingGraph:
     """Convert an LM-native container pull into its thing/rel graph.
@@ -257,7 +240,6 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     the propagated soft hints (`attrs.cookies`/`attrs.lpm_lib`, §2.1). Pure constructor (no DB).
     """
     hints = propagate_attrs(parent_attrs)
-    facet_keys = _facet_keys(pl)
     pl_thing = thing_from_node(pl)
     pl_thing.bucket = bucket
     members: list[models.Thing] = []
@@ -286,12 +268,14 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     for vid in pl.entries:
         vid_thing = thing_from_node(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
-        # A facet/tab sub-container shares the parent's/sibling's id but a distinct URL; null its
-        # native_id so `_find_thing` keys it by URL (a distinct thing, never collapsed). The
+        # Every sub-container member is URL-keyed: null its native_id so `_find_thing` keys it by
+        # URL (a distinct thing, never collapsed onto the parent/a sibling). This matches the
+        # convention that containers are keyed by webpage_url — a channel's Videos/Shorts/Live
+        # tabs all share the channel's `id` but have distinct URLs, and a curated sub-playlist that
+        # recurs under two URLs converges later via the dedup merge, not by id-collapse here. The
         # original id is kept as a soft `channel_id` hint.
-        facet = vid.container is True and (vid.extractor_key, vid.native_id) in facet_keys
         attrs = dict(hints) if hints is not None else {}
-        if facet:
+        if vid.container is True:
             vid_thing.native_id = None
             if vid.native_id is not None:
                 attrs["channel_id"] = vid.native_id

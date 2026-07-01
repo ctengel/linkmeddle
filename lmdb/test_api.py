@@ -1223,8 +1223,9 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
 
     kids = [e["thing"] for e in client.get(f"/things/{pid}/related").json()
             if e["direction"] == "child"]
-    subA = next(t for t in kids if t["native_id"] == "subA")
-    subB = next(t for t in kids if t["native_id"] == "subB")
+    # Sub-containers are URL-keyed (native_id nulled, kept as a channel_id hint), so match by URL.
+    subA = next(t for t in kids if t["url"] == inlined_url)
+    subB = next(t for t in kids if t["url"] == flat_url)
 
     # the inlined sub-playlist is complete today + a parent-fed safety-net try_on, but rides the
     # parent's single run (no run of its own); its date sits a margin past the parent's.
@@ -1251,7 +1252,7 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
 def test_channel_tabs_one_run_distinct_things(client):
     # A YouTube channel pull arrives with its Videos/Shorts/Live tabs inlined; every tab carries
     # the SAME id (channel_id) but a distinct URL. The endpoint must (a) keep the tabs as four
-    # distinct things (facet rule: tabs URL-keyed), (b) record exactly ONE run on the channel
+    # distinct things (sub-container members are URL-keyed), (b) record exactly ONE run on the channel
     # covering the whole subtree, and (c) schedule the tabs parent-fed (try_on = channel + margin).
     url = "http://yt/@geerling/featured"
     cid, rid = _claimed_run(client, url)

@@ -547,8 +547,7 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
 
 
 def _fanout(session: Session, pull: models.PullThing, container: Thing,
-            now: datetime.datetime, parent_try_on: Optional[datetime.date],
-            *, facet: bool = False) -> None:
+            now: datetime.datetime, parent_try_on: Optional[datetime.date]) -> None:
     """Fan out one container pull into the thing/rel graph and (re)schedule the container.
 
     `parent_try_on` is None for the claimed top-level container — normal Fibonacci backoff over
@@ -556,21 +555,21 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     no run of its own, `try_on = parent_try_on + SAFETY_MARGIN_DAYS` so the parent refreshes it
     first). Recurses into inlined sub-containers, fanning out their grandchildren, but creates no
     further runs (one yt-dlp call -> one run). Idempotent: re-fans an already-known sub-container
-    every time the parent inlines it. `facet` marks an inlined channel tab (see below). Does not
-    commit.
+    every time the parent inlines it. Does not commit.
     """
     # Stubs inherit the container's bucket (immutable, [A10]) and its propagated soft hints
     # (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
     graph = xform.pl_full2things(pull, bucket=container.bucket, parent_attrs=container.attrs)
 
-    # A facet sub-container (a channel tab — shares its parent's native_id under a distinct URL)
-    # stays URL-keyed even when re-fanned as its own container. Its own pull node still carries the
-    # shared native_id, so null it on the container stub *after* the graph (and its edges, which
-    # used the original id) are built — keeping the identity decision pl_full2things already made
-    # at the member level. Otherwise the shared id backfills onto the tab and collides with the
-    # channel, and the thing_native index (or the duplicate-row merge) collapses the tab back onto
-    # it. The id is kept as a soft channel_id hint, mirroring the member-level facet handling.
-    if facet and graph.playlist.native_id is not None:
+    # An inlined sub-container (parent_try_on set) is URL-keyed, just like it was as a member of
+    # its parent (pl_full2things nulls every sub-container member's native_id). Its own pull node
+    # still carries the shared id, so null it on the container stub *after* the graph (and its
+    # edges, which used the id) are built — keeping the URL-keyed identity. Otherwise the id
+    # backfills onto the sub-container and, for a channel tab that shares the channel's id, the
+    # thing_native index (or the duplicate-row merge) collapses the tab back onto the channel. The
+    # id is kept as a soft channel_id hint. The top-level claimed container (parent_try_on None) is
+    # left alone — a directly-pulled channel/playlist keeps its own native_id.
+    if parent_try_on is not None and graph.playlist.native_id is not None:
         xform.merge_attr(container, "channel_id", graph.playlist.native_id)
         graph.playlist.native_id = None
 
@@ -587,7 +586,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
     node_by_stub = {member.id: node for member, node in zip(graph.members, pull.entries)}
-    nested: list[tuple[Thing, models.PullThing, bool]] = []
+    nested: list[tuple[Thing, models.PullThing]] = []
 
     remap = {graph.playlist.id: container.id}
     for stub in graph.members + graph.channels:
@@ -618,10 +617,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         if (node is not None and node.container is True and node.entries
                 and thing.id != container.id
                 and not xform.container_switch(thing.container, True)):
-            # A facet member (a channel tab) had its native_id nulled by pl_full2things (shared
-            # with the parent under a distinct URL); flag it so its own re-fan keeps it URL-keyed.
-            is_facet = stub.native_id is None and node.native_id is not None
-            nested.append((thing, node, is_facet))
+            nested.append((thing, node))
         remap[stub.id] = thing.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
@@ -660,8 +656,8 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
 
     # Inlined sub-playlists: re-fan out (no run — they ride the parent's single call), passing
     # this container's scheduled date so each is parent-fed off it.
-    for sub_thing, node, sub_facet in nested:
-        _fanout(session, node, sub_thing, now, parent_try_on=container.try_on, facet=sub_facet)
+    for sub_thing, node in nested:
+        _fanout(session, node, sub_thing, now, parent_try_on=container.try_on)
 
 
 @app.post("/jobs/claim", response_model=JobClaim,
