@@ -289,7 +289,8 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     # The container's own uploader -> a channel=True edge, but only for a *curated playlist*
     # owned by someone else; when the container IS its own uploader (a channel) skip the
     # self-edge. A url-less owner (id only) still links (#160).
-    if (pl.channel.url or pl.channel.native_id) and not _same_identity(pl_thing, pl.channel):
+    pull_is_channel = _same_identity(pl_thing, pl.channel)   # container IS its own uploader
+    if (pl.channel.url or pl.channel.native_id) and not pull_is_channel:
         pl_chan = channel_for(pl.channel, pl.extractor_key)
         if pl_chan is not None:
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
@@ -297,6 +298,14 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     for vid in pl.entries:
         vid_thing = thing_from_node(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
+        # #156: when pulling a channel, its flat video entries often omit the uploader. Inherit
+        # the channel's own identity onto such a leaf so it links channel=True (below) and is
+        # rate-able (enough_to_rate needs a channel URL) without a separate Stage-2 meta pull.
+        vid_owner = vid.channel
+        if (pull_is_channel and vid.container is False
+                and not vid.channel.url and not vid.channel.native_id):
+            vid_owner = pl.channel
+            vid_thing.channel = pl_thing.channel or pl_thing.url
         # Every sub-container member is URL-keyed: null its native_id so `_find_thing` keys it by
         # URL (a distinct thing, never collapsed onto the parent/a sibling). This matches the
         # convention that containers are keyed by webpage_url — a channel's Videos/Shorts/Live
@@ -323,11 +332,11 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
         # uploader edge, above); the monotonic rel upsert upgrades a stale False->True then.
         # So curated nesting (a container listing someone else's sub-playlist) records a
         # channel=False membership edge here, exactly like a curated video.
-        if _same_identity(pl_thing, vid.channel):
+        if _same_identity(pl_thing, vid_owner):
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=False))
-            vid_chan = channel_for(vid.channel, vid.extractor_key)
+            vid_chan = channel_for(vid_owner, vid.extractor_key)
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
@@ -336,20 +345,24 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
 
 
 def reconcile_count(pl: models.PullThing) -> int:
-    """Reconcile a container's reported `playlist_count` against its actual members.
+    """Reconcile a container's reported `playlist_count` against its leaf membership.
 
-    Members = all `entries` (leaf videos + sub-containers, so a channel's count covers both).
-    Returns the count to record (provided count wins on mismatch), warning on disagreement.
-    Used by the Stage-1 ingest endpoint.
+    Counts only *leaf* members (`container is not True`), never sub-containers (a channel's
+    Videos/Shorts/Live tabs, nested playlists): yt-dlp's `playlist_count` for a channel is a
+    *video* count, so counting all `entries` understates membership and warns spuriously when
+    tabs are present (#167). Returns the count to record (provided count wins when present);
+    only reconciles/warns against the provided count when this level is pure leaves — with
+    sub-containers present the two aren't comparable (this level's tabs vs. the aggregate video
+    count). Used by the Stage-1 ingest endpoint.
     """
-    count = len(pl.entries)
+    leaves = sum(1 for e in pl.entries if e.container is not True)
     if pl.playlist_count is None:
-        warnings.warn(f'No provided playlist_count; leveraging length of {count}.')
-    elif count != pl.playlist_count:
+        warnings.warn(f'No provided playlist_count; leveraging length of {leaves}.')
+        return leaves
+    if not any(e.container is True for e in pl.entries) and leaves != pl.playlist_count:
         warnings.warn(f"Provided playlist count {pl.playlist_count} doesn't match actual "
-                      f"length of {count}; will record provided.")
-        count = pl.playlist_count
-    return count
+                      f"length of {leaves}; will record provided.")
+    return pl.playlist_count
 
 
 # Fields backfilled onto an existing thing from a fresher pull when they are still NULL

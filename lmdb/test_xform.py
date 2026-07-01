@@ -157,6 +157,18 @@ def test_reconcile_count_mismatch_warns():
     assert count == 5  # provided wins
 
 
+def test_reconcile_count_ignores_subcontainers(recwarn):
+    # #167: a channel pull mixing leaf videos + sub-container tabs; yt-dlp's playlist_count is
+    # the video count, so counting leaves alone matches and the tabs must not trigger a
+    # spurious "doesn't match" warning. Records the provided (video) count.
+    pl = _pl(3)                         # 3 leaf videos
+    pl.entries.append(_sub())           # + one sub-container tab
+    pl.playlist_count = 3               # yt-dlp's video count (excludes the tab)
+    count = xform.reconcile_count(pl)
+    assert count == 3
+    assert not recwarn.list           # no spurious mismatch warning
+
+
 def test_pl_full2things_does_not_set_last_success():
     # The builder is pure construction now; the API endpoint owns the last_success decision.
     g = xform.pl_full2things(_pl(2), bucket="b")
@@ -208,6 +220,40 @@ def test_pl_full2things_owned_subcontainer_is_channel():
     assert len(sub_edges) == 1
     assert sub_edges[0].parent == g.playlist.id and sub_edges[0].channel is True
     assert g.channels == []           # parent is its own owner -> no separate node
+
+
+def test_pl_full2things_channel_autopopulates_video_channel():
+    # #156: a channel pull (parent IS its own uploader) whose flat video entry omits the
+    # uploader -> inherit the channel's identity so the video links channel=True (to the
+    # container, no separate node) and is rate-able without a Stage-2 meta pull.
+    chan = models.UlChan(native_id="chan1", title="Chan", url="http://example/chan1")
+    pl = models.PullThing(url="http://example/chan1", native_id="chan1", title="Chan",
+                          extractor_key="youtube", channel=chan,
+                          entries=[models.PullThing(
+                              native_id="v1", url="http://example/v/v1", title="V1",
+                              extractor_key="youtube", channel=models.UlChan())])  # no uploader
+    g = xform.pl_full2things(pl, bucket="b")
+    vid = next(m for m in g.members if m.container is False)
+    assert vid.channel == "http://example/chan1"      # inherited the channel URL
+    assert xform.enough_to_rate(vid)                  # now rate-able -> no meta pull
+    vid_edges = [r for r in g.rels if r.child == vid.id]
+    assert len(vid_edges) == 1
+    assert vid_edges[0].parent == g.playlist.id and vid_edges[0].channel is True
+    assert g.channels == []                           # parent is the uploader -> no owner node
+
+
+def test_pl_full2things_curated_playlist_does_not_autopopulate():
+    # #156 must not fire for a curated playlist (parent node is NOT the owner): an entry with
+    # no uploader stays channel-less (a channel=False membership edge, no channel URL) and is
+    # resolved later by its own meta pull.
+    pl = _pl(0)                       # curated playlist owned by up1 (!= the pl1 node)
+    pl.entries = [models.PullThing(native_id="v1", url="http://example/v/v1", title="V1",
+                                   extractor_key="youtube", channel=models.UlChan())]
+    g = xform.pl_full2things(pl, bucket="b")
+    vid = next(m for m in g.members if m.container is False)
+    assert vid.channel is None
+    vid_edges = [r for r in g.rels if r.child == vid.id]
+    assert len(vid_edges) == 1 and vid_edges[0].channel is False
 
 
 def test_pl_full2things_unknown_owner_subcontainer_is_membership():

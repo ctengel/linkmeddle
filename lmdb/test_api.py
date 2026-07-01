@@ -664,7 +664,7 @@ def _chan_payload(url="http://example/chan/ingest", native="chanX",
     chan = models.UlChan(native_id=native, title="The Channel", url=url)
     pl = models.PullThing(
         url=url, native_id=native, title="The Channel", extractor_key="youtube",
-        playlist_count=n_videos + n_playlists,          # members = videos + sub-containers
+        playlist_count=n_videos,        # yt-dlp reports the video count; tabs excluded (#167)
         channel=chan,                                   # the channel is its own uploader
         entries=[models.PullThing(
             native_id=f"cv{i}", title=f"CVid {i}", url=f"http://example/cv/{i}",
@@ -901,6 +901,28 @@ def test_ingest_last_success_from_required_fields(client):
     vids = {v["native_id"]: v for v in client.get("/things/", params={"container": False}).json()}
     assert vids["complete"]["last_success_dt"]            # all 5 fields -> metadata-complete
     assert vids["notitle"]["last_success_dt"] is None     # missing any field -> needs a meta job
+
+
+def test_ingest_channel_autopopulates_video_channel(client):
+    # #156: a channel pull whose flat video entry omits the uploader -> the ingest inherits the
+    # channel's identity, so the video is metadata-complete (last_success_dt set, no meta job)
+    # and carries a channel=True edge to the channel container.
+    url = "http://example/chan/auto"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="chanA", title="Chan A", url=url)
+    pl = models.PullThing(
+        url=url, native_id="chanA", title="Chan A", extractor_key="youtube",
+        playlist_count=1, channel=chan,                 # the channel is its own uploader
+        entries=[models.PullThing(native_id="av", title="A Vid", url="http://example/v/av",
+                                  extractor_key="youtube", channel=models.UlChan())])  # no uploader
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": pl.model_dump(mode="json")}).status_code == 200
+    vid = {v["native_id"]: v for v in
+           client.get("/things/", params={"container": False}).json()}["av"]
+    assert vid["channel"] == url                          # inherited the channel URL
+    assert vid["last_success_dt"]                         # metadata-complete -> no meta job
+    related = client.get(f"/things/{vid['id']}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [tid]   # channel edge to chan
 
 
 def test_meta_result_fans_out_channel(client):
@@ -1226,7 +1248,7 @@ def test_channel_pull_videos_and_subplaylists(client):
     payload = _chan_payload(url=url, native="chanc1", n_videos=2, n_playlists=2)
     run = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
     assert run.status_code == 200
-    assert run.json()["playlist_count"] == 4    # videos + sub-containers (channel-aware count)
+    assert run.json()["playlist_count"] == 2    # leaf videos only; sub-containers excluded (#167)
 
     chan = client.get(f"/things/{tid}").json()
     assert chan["container"] is True
