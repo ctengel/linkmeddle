@@ -118,34 +118,34 @@ def thing_from_chan(chan: models.UlChan,
       a provenance hint since extractor_key stays NULL — we never inherit the video's extractor
       (usually a different sub-extractor).
     """
-    if chan.url:
-        attrs: dict = {'kind': 'channel'}
-        if chan.native_id is not None:
-            attrs['channel_id'] = chan.native_id
-        return models.Thing(url=chan.url,
-                            extractor_key=None,
-                            native_id=None,
-                            container=True,
-                            title=chan.title,
-                            channel=chan.url,
-                            attrs=attrs)
-    if chan.native_id is None:
+    if not chan.url and chan.native_id is None:
         return None
-    attrs = {'kind': 'channel', 'channel_id': chan.native_id}
-    if source_extractor is not None:
-        attrs['source_extractor'] = source_extractor
-    return models.Thing(url=None,
+    attrs: dict = {'kind': 'channel'}
+    if chan.native_id is not None:
+        attrs['channel_id'] = chan.native_id   # kept as a soft hint in both shapes
+    if chan.url:
+        url, native_id, channel = chan.url, None, chan.url
+    else:
+        url, native_id, channel = None, chan.native_id, None
+        if source_extractor is not None:
+            attrs['source_extractor'] = source_extractor
+    return models.Thing(url=url,
                         extractor_key=None,
-                        native_id=chan.native_id,
+                        native_id=native_id,
                         container=True,
                         title=chan.title,
-                        channel=None,
+                        channel=channel,
                         attrs=attrs)
 
 
 def merge_attr(thing: models.Thing, key: str, value) -> None:
     """Set one key on a thing's `attrs` JSONB, preserving the rest (handles attrs=None)."""
     thing.attrs = {**(thing.attrs or {}), key: value}
+
+
+def is_channel(thing: models.Thing) -> bool:
+    """Whether a thing carries the soft `attrs.kind='channel'` display hint (handles attrs=None)."""
+    return (thing.attrs or {}).get("kind") == "channel"
 
 
 # yt-dlp's two flat url-result `_type`s: a bare pointer (no media/formats). Any other shape
@@ -362,7 +362,7 @@ def reconcile_count(pl: models.PullThing) -> int:
     if pl.playlist_count is None:
         warnings.warn(f'No provided playlist_count; leveraging length of {leaves}.')
         return leaves
-    if not any(e.container is True for e in pl.entries) and leaves != pl.playlist_count:
+    if leaves == len(pl.entries) and leaves != pl.playlist_count:  # pure leaves -> comparable
         warnings.warn(f"Provided playlist count {pl.playlist_count} doesn't match actual "
                       f"length of {leaves}; will record provided.")
     return pl.playlist_count

@@ -421,7 +421,7 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     extractor_key — see the module docstring gotcha.)
     """
     if thing.native_id is not None:
-        if thing.url is None and (thing.attrs or {}).get("kind") == "channel":
+        if thing.url is None and xform.is_channel(thing):
             return _find_channel_by_id(session, thing.native_id)
         found = session.exec(
             select(Thing).where(Thing.backend == thing.backend,
@@ -432,6 +432,22 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     if thing.url is not None:
         return session.exec(select(Thing).where(Thing.url == thing.url)).first()
     return None
+
+
+def _upsert_rel_edges(session: Session,
+                      edges: dict[tuple[uuid.UUID, uuid.UUID], bool]) -> None:
+    """Bulk-upsert (parent, child, channel) edges in one statement keyed on the (parent, child)
+    PK, *monotonically upgrading* channel on conflict (existing OR incoming): never downgrades,
+    idempotent on re-pull, and lets a later better-informed run raise a stale False->True.
+    """
+    if not edges:
+        return
+    stmt = pg_insert(Rel).values(
+        [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["parent", "child"],
+        set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
+    session.execute(stmt)
 
 
 # Loser columns carried onto the survivor on a merge when the survivor still lacks them. The
@@ -470,13 +486,7 @@ def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
             key = (parent, child)
             edges[key] = edges.get(key, False) or rel.channel
     session.flush()   # remove the loser's edges before re-inserting the remapped ones
-    if edges:
-        stmt = pg_insert(Rel).values(
-            [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()])
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["parent", "child"],
-            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
-        session.execute(stmt)
+    _upsert_rel_edges(session, edges)
     # Runs have no unique key on thing_id, so a plain re-point is enough.
     session.execute(sa.update(Run).where(Run.thing_id == loser.id)
                     .values(thing_id=survivor.id))
@@ -547,7 +557,7 @@ def _apply_backfill(session: Session, existing: Thing,
         # blunt. The legitimate channel convergence — a url-less id-only stub meeting the real
         # channel — is done elsewhere (`_converge_urlless_channel`), keyed on the URL-less shape a
         # tab never has, so it can never delete a tab.
-        if (clash.attrs or {}).get("kind") == "channel":
+        if xform.is_channel(clash):
             for field in clash_fields:
                 fields.pop(field, None)
             continue
@@ -690,7 +700,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         # for it before it was pulled (#160), re-pointing that stub's video edges onto it.
         gone = _converge_urlless_channel(session, container)
         if gone is not None:
-            merged.update([gone])
+            merged[gone[0]] = gone[1]
 
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
@@ -705,7 +715,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
             merged.update(_apply_backfill(session, existing, stub))
             xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
             # Carry a freshly-discovered channel hint onto a pre-existing container.
-            if (stub.attrs or {}).get("kind") == "channel":
+            if xform.is_channel(stub):
                 xform.merge_attr(existing, "kind", "channel")
         else:
             thing = stub
@@ -730,17 +740,12 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         remap[stub.id] = thing.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
-    # Bulk upsert the edges in one statement keyed on the (parent, child) PK. On conflict we
-    # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
-    # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
-    # sub-container first seen as channel=False membership becomes channel=True once it is
-    # pulled itself and reveals the parent as its owner.
-    #
-    # graph.rels has fresh, distinct child ids, but remap can collapse distinct stubs onto the
-    # same thing id (e.g. a playlist listing the same video twice), producing duplicate
-    # (parent, child) pairs after remap. Postgres rejects a single ON CONFLICT statement that
-    # proposes the same conflict key twice (CardinalityViolation), so merge duplicates here,
-    # OR-ing channel (the same monotonic-upgrade rule as the on-conflict below).
+    # Build the edge set for the monotonic bulk upsert (`_upsert_rel_edges`). graph.rels has
+    # fresh, distinct child ids, but remap can collapse distinct stubs onto the same thing id
+    # (e.g. a playlist listing the same video twice), producing duplicate (parent, child) pairs
+    # after remap. Postgres rejects a single ON CONFLICT statement that proposes the same conflict
+    # key twice (CardinalityViolation), so merge duplicates here, OR-ing channel (the same
+    # monotonic-upgrade rule the upsert applies across pulls).
     edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
     for rel in graph.rels:
         # remap entries recorded before a mid-loop merge can point at a deleted loser row —
@@ -749,13 +754,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         if key[0] == key[1]:   # never a self-edge (a member that resolved to the container)
             continue
         edges[key] = edges.get(key, False) or rel.channel
-    rows = [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()]
-    if rows:
-        stmt = pg_insert(Rel).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["parent", "child"],
-            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
-        session.execute(stmt)
+    _upsert_rel_edges(session, edges)
 
     # Schedule: the claimed top-level container backs off normally (§4.4); an inlined,
     # parent-fed sub-container gets a long safety-net date keyed off its parent so the parent
