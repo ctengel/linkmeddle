@@ -112,11 +112,33 @@ def test_thing_from_chan_url_less():
 
 
 def test_thing_from_chan_url_keyed_unchanged():
-    # URL present -> keyed by URL, native_id nulled (kept as channel_id hint), no source_extractor.
+    # URL present -> keyed by URL, native_id nulled (kept as channel_id hint), no provenance.
     t = xform.thing_from_chan(models.UlChan(url="http://e/c", native_id="UC1", title="C"),
-                              source_extractor="somesite")
+                              source_extractor="somesite", source_url="http://e/v/1")
     assert t.url == "http://e/c" and t.native_id is None and t.channel == "http://e/c"
     assert t.attrs == {"kind": "channel", "channel_id": "UC1"}
+
+
+def test_thing_from_chan_url_less_records_source_host():
+    # The url-less shape records the discovering video's site: native ids are only unique per
+    # site, so the id-join and the stub->channel merge are scoped to it (`same_site`).
+    t = xform.thing_from_chan(models.UlChan(native_id="12345", title="U"),
+                              source_extractor="vk", source_url="https://www.vk.com/video1")
+    assert t.attrs[xform.SOURCE_HOST_KEY] == "vk.com"
+    # unknowable source -> no host recorded (stays compatible with anything)
+    t = xform.thing_from_chan(models.UlChan(native_id="12345", title="U"), "vk")
+    assert xform.SOURCE_HOST_KEY not in t.attrs
+
+
+def test_url_domain_and_same_site():
+    assert xform.url_domain("https://www.twitch.tv/videos/1?t=1") == "twitch.tv"
+    assert xform.url_domain("http://m.youtube.com/watch") == "youtube.com"   # m. is not a site
+    assert xform.url_domain("http://vk.com:8080/v") == "vk.com"
+    assert xform.url_domain(None) is None and xform.url_domain("") is None
+    assert xform.same_site("twitch.tv", "twitch.tv")
+    assert not xform.same_site("vk.com", "twitch.tv")
+    # an unknown side is compatible (pre-domain behavior; old rows converge as re-touched)
+    assert xform.same_site(None, "twitch.tv") and xform.same_site("vk.com", None)
 
 
 def test_pl_full2things_url_less_uploader_links_orphans():
@@ -307,6 +329,18 @@ def test_subcontainer_members_url_keyed_when_parent_has_no_id():
     g = xform.pl_full2things(pl, bucket="b")
     assert all(m.native_id is None for m in g.members)
     assert len({m.url for m in g.members}) == 3
+
+
+def test_url_less_subcontainer_keeps_native_id():
+    # A sub-container member with an id but no URL keeps its native_id: it is the row's only
+    # key, so demoting it to a channel_id hint would leave the stub unfindable (both unique
+    # keys NULL) and mint a duplicate row on every re-pull.
+    pl = _pl(0)
+    pl.entries = [_sub(native_id="subX", url=None)]
+    g = xform.pl_full2things(pl, bucket="b")
+    sub = next(m for m in g.members if m.container)
+    assert sub.native_id == "subX"
+    assert "channel_id" not in (sub.attrs or {})
 
 
 def test_distinct_subcontainers_also_url_keyed():

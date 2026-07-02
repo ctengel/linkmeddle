@@ -1261,18 +1261,24 @@ def test_claim_runnable_without_url_via_info_json(client):
     hinted = _seed_thing(container=None, url=None, native_id="uh1", extractor_key="somesite",
                          attrs={xform.INFO_JSON_KEY: {"id": "uh1"}}, try_on=_TODAY)
     stub = _seed_thing(type="channel", url=None, native_id="UCstub", try_on=_TODAY)
+    # a *cleared* hint is JSON null (clear_info_hint keeps the key): `->>` must read it as gone,
+    # or a url-less pulled container would stay claimable forever with nothing to run.
+    cleared = _seed_thing(container=True, url=None, native_id="uh2", extractor_key="somesite",
+                          attrs={xform.INFO_JSON_KEY: None}, try_on=_TODAY)
     claimed = set()
     while (job := _claim(client)) is not None:
         claimed.add(job["thing"]["id"])
         client.post(f"/jobs/{job['run_id']}/result", json={"success": False})  # fail -> loop ends
     assert hinted in claimed        # runnable via the info_json hint despite no URL
     assert stub not in claimed      # url-less channel stub: not runnable, never claimed
+    assert cleared not in claimed   # a cleared (json-null) hint is not runnable either
 
 
 def test_url_less_stub_converges_into_pulled_channel(client):
     # R3 (#160): a video linked to a url-less id-only channel stub re-points onto the real channel
-    # when it is later pulled by URL; the stub is merged away (one channel row remains).
-    v, rid = _claimed_meta(client, url="http://e/cv")
+    # when it is later pulled by URL; the stub is merged away (one channel row remains). The video
+    # lives on the same site as the channel — the merge is scoped by source host (`same_site`).
+    v, rid = _claimed_meta(client, url="http://tw/v/cv")
     client.post(f"/jobs/{rid}/result",
                 json={"success": True,
                       "video": {"native_id": "cvv", "title": "CV", "extractor_key": "twitchvod",
@@ -1300,6 +1306,80 @@ def test_url_less_stub_converges_into_pulled_channel(client):
     assert client.get(f"/things/{stub_id}").status_code == 404
     related = client.get(f"/things/{v}/related").json()
     assert [e["thing"]["id"] for e in related if e["channel"]] == [cid]
+
+
+def test_url_less_stub_cross_site_never_converges(client):
+    # Native ids are only unique per site: a channel pulled on a DIFFERENT site that happens to
+    # share the stub's id (numeric vk vs twitch ids) must neither absorb the stub nor be chosen
+    # by the id-join — the vk videos stay on the vk stub, not the twitch channel.
+    v, rid = _claimed_meta(client, url="http://vk.com/video1")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "vkv1", "title": "VKV1", "extractor_key": "vk",
+                                "channel": {"native_id": "12345", "title": "VK User"},
+                                "info_json": {"id": "vkv1"}}})
+    stubs = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(stubs) == 1 and stubs[0]["url"] is None
+    assert stubs[0]["attrs"]["source_host"] == "vk.com"   # the discovering video's site
+    stub_id = stubs[0]["id"]
+
+    # a twitch channel sharing the numeric id is pulled directly
+    curl = "http://twitch.tv/c/streamer"
+    cid, crid = _claimed_run(client, curl)
+    chan_pull = models.PullThing(
+        url=curl, native_id="12345", title="Streamer", extractor_key="twitchvideos",
+        playlist_count=1, channel=models.UlChan(native_id="12345", url=curl),
+        entries=[models.PullThing(native_id="tv1", url="http://twitch.tv/v/tv1", title="TV1",
+                                  extractor_key="twitchvod",
+                                  channel=models.UlChan(native_id="12345", url=curl))],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{crid}/result", json={"playlist": chan_pull}).status_code == 200
+
+    # the vk stub survives (no cross-site merge) and the vk video still points at it
+    assert client.get(f"/things/{stub_id}").status_code == 200
+    related = client.get(f"/things/{v}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [stub_id]
+
+    # a second vk video with the same uploader id joins the vk stub, not the twitch channel
+    v2, rid2 = _claimed_meta(client, url="http://vk.com/video2")
+    client.post(f"/jobs/{rid2}/result",
+                json={"success": True,
+                      "video": {"native_id": "vkv2", "title": "VKV2", "extractor_key": "vk",
+                                "channel": {"native_id": "12345", "title": "VK User"},
+                                "info_json": {"id": "vkv2"}}})
+    related2 = client.get(f"/things/{v2}/related").json()
+    assert [e["thing"]["id"] for e in related2 if e["channel"]] == [stub_id]
+    assert len(client.get("/things/", params={"kind": "channel"}).json()) == 2  # no third node
+
+
+def test_url_less_subcontainer_keeps_native_id_no_duplicates(client):
+    # A sub-container member with an id but NO url keeps its native_id — it is its only key, so
+    # demoting it to a channel_id hint would leave the row unfindable and mint a duplicate on
+    # every re-pull of the parent.
+    url = "http://example/pl/idonly"
+    tid, rid = _claimed_run(client, url)
+
+    def payload():
+        return models.PullThing(
+            url=url, native_id="plidonly", title="PL", extractor_key="youtube",
+            playlist_count=0, channel=models.UlChan(native_id="plidonly", url=url),
+            entries=[models.PullThing(native_id="subX", title="Sub X",
+                                      extractor_key="youtube", container=True)],
+        ).model_dump(mode="json")
+
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload()}).status_code == 200
+    # re-pull the parent (seed the run directly; the same-day claim gate would skip it)
+    with _session() as s:
+        run2 = models.Run(thing_id=uuid.UUID(tid), success=None,
+                          starttime=models.naive_utcnow())
+        s.add(run2)
+        s.commit()
+        rid2 = str(run2.id)
+    assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload()}).status_code == 200
+
+    subs = client.get("/things/", params={"native_id": "subX"}).json()
+    assert len(subs) == 1                        # found again by its id (pre-fix: a row per pull)
+    assert subs[0]["url"] is None and subs[0]["container"] is True
 
 
 def test_channel_pull_videos_and_subplaylists(client):

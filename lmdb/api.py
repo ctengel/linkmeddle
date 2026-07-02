@@ -390,22 +390,33 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
 
 # --- Jobs / runs: Stage-1 ingest (Task 1.1) -------------------------------------------
 
-def _find_channel_by_id(session: Session, native_id: str) -> Optional[Thing]:
+def _chan_site(thing: Thing) -> Optional[str]:
+    """A channel row's site for the #160 id-join: its own URL's domain, or (url-less stub)
+    the recorded `attrs.source_host` of the video that discovered it."""
+    return xform.url_domain(thing.url) or (thing.attrs or {}).get(xform.SOURCE_HOST_KEY)
+
+
+def _find_channel_by_id(session: Session, native_id: str,
+                        source_host: Optional[str]) -> Optional[Thing]:
     """Locate an existing channel Thing by uploader/channel ID (#160).
 
     The link some video extractors give us is an uploader/channel *ID* only (no URL) — vk,
     twitchvod, etc. The design join is `video.uploader_id -> channel.native_id`, and it is
     **extractor-agnostic**: the channel's own sub-extractor (e.g. `twitchvideos`) differs from
-    the video's (`twitchvod`) and is never carried in the video, so we match on the id alone.
+    the video's (`twitchvod`) and is never carried in the video, so we match on the id — scoped
+    to `source_host` (the discovering video's site, `same_site`): native ids are only unique per
+    site, so a numeric vk id must never resolve to a twitch channel that happens to share it.
 
-    Matched strictly on `native_id` (plus `attrs.kind='channel'`). This deliberately never hits a
+    Matched on `native_id` (plus `attrs.kind='channel'`). This deliberately never hits a
     channel *tab* (Videos/Shorts/Live): tabs are URL-keyed with `native_id=NULL` and only stash
     the shared id in `attrs.channel_id`, so keying off `channel_id` could mis-link a video to a
     tab. `native_id` matches the canonical channel (which keeps its id, e.g. twitchvideos/
     vkuservideos) and a prior url-less stub, never a tab."""
-    return session.exec(
+    candidates = session.exec(
         select(Thing).where(Thing.native_id == native_id,
-                            Thing.attrs["kind"].astext == "channel")).first()
+                            Thing.attrs["kind"].astext == "channel")).all()
+    return next((c for c in candidates
+                 if xform.same_site(source_host, _chan_site(c))), None)
 
 
 def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
@@ -422,7 +433,8 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     """
     if thing.native_id is not None:
         if thing.url is None and xform.is_channel(thing):
-            return _find_channel_by_id(session, thing.native_id)
+            return _find_channel_by_id(session, thing.native_id,
+                                       (thing.attrs or {}).get(xform.SOURCE_HOST_KEY))
         found = session.exec(
             select(Thing).where(Thing.backend == thing.backend,
                                 Thing.extractor_key == thing.extractor_key,
@@ -577,7 +589,7 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
     the video's extractor recorded as `source_extractor` provenance (never inherited as the
     channel's extractor_key).
     """
-    stub = xform.thing_from_chan(chan, video.extractor_key)
+    stub = xform.thing_from_chan(chan, video.extractor_key, video.url)
     if stub is None:
         return
     existing = _find_thing(session, stub)
@@ -593,30 +605,36 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
 
 
 def _converge_urlless_channel(session: Session,
-                              channel: Thing) -> Optional[tuple[uuid.UUID, uuid.UUID]]:
-    """Absorb a url-less id-only channel stub into the real channel once it is pulled (#160).
+                              channel: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Absorb url-less id-only channel stubs into the real channel once it is pulled (#160).
 
     A video whose uploader is exposed by ID only links to a native-id-keyed stub (`url=NULL`)
     when the real channel isn't known yet. When the channel is later pulled directly it gains a
-    URL + native_id; this merges the earlier stub into it (`_merge_things`), re-pointing the
+    URL + native_id; this merges the earlier stubs into it (`_merge_things`), re-pointing each
     stub's `channel=True` video edges onto the real channel and deleting the stub. Returns the
-    `(loser_id, survivor_id)` pair when a merge happened (for `_fanout`'s remap), else None.
+    merges as `(loser_id, survivor_id)` pairs (for `_fanout`'s remap).
 
-    Safe by the URL-less discriminator: only a stub with `url IS NULL` is ever the merge loser,
-    so a channel *tab* (always URL-keyed, with a URL) can never be selected and deleted. No-op
-    unless `channel` is a real channel with both a URL and a native_id.
+    Only a stub from the *same site* is absorbed (`same_site` on its recorded source host vs the
+    channel URL's domain): native ids are only unique per site, so a same-id stub from another
+    site is a different channel and must stay. Safe by the URL-less discriminator: only a stub
+    with `url IS NULL` is ever the merge loser, so a channel *tab* (always URL-keyed, with a
+    URL) can never be selected and deleted. No-op unless `channel` is a real channel with both
+    a URL and a native_id.
     """
     if channel.native_id is None or channel.url is None:
-        return None
-    stub = session.exec(
+        return []
+    stubs = session.exec(
         select(Thing).where(Thing.native_id == channel.native_id,
                             Thing.url == None,  # noqa: E711  url-less stub only (never a tab)
                             Thing.attrs["kind"].astext == "channel",
-                            Thing.id != channel.id)).first()
-    if stub is None:
-        return None
-    _merge_things(session, channel, stub)   # survivor = real channel, loser = url-less stub
-    return (stub.id, channel.id)
+                            Thing.id != channel.id)).all()
+    site = xform.url_domain(channel.url)
+    merged = []
+    for stub in stubs:
+        if xform.same_site(site, (stub.attrs or {}).get(xform.SOURCE_HOST_KEY)):
+            _merge_things(session, channel, stub)   # survivor = real channel, loser = stub
+            merged.append((stub.id, channel.id))
+    return merged
 
 
 def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing) -> None:
@@ -682,8 +700,10 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # backfills onto the sub-container and, for a channel tab that shares the channel's id, the
     # thing_native index (or the duplicate-row merge) collapses the tab back onto the channel. The
     # id is kept as a soft channel_id hint. The top-level claimed container (parent_try_on None) is
-    # left alone — a directly-pulled channel/playlist keeps its own native_id.
-    if parent_try_on is not None and graph.playlist.native_id is not None:
+    # left alone — a directly-pulled channel/playlist keeps its own native_id — and so is a
+    # url-less sub (the id is its only key; demoting it would leave the row unfindable).
+    if (parent_try_on is not None and graph.playlist.native_id is not None
+            and graph.playlist.url is not None):
         xform.merge_attr(container, "channel_id", graph.playlist.native_id)
         graph.playlist.native_id = None
 
@@ -698,9 +718,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         xform.merge_attr(container, "kind", "channel")
         # Now that this channel has a URL + native_id, absorb any url-less id-only stub created
         # for it before it was pulled (#160), re-pointing that stub's video edges onto it.
-        gone = _converge_urlless_channel(session, container)
-        if gone is not None:
-            merged[gone[0]] = gone[1]
+        merged.update(_converge_urlless_channel(session, container))
 
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
@@ -810,7 +828,10 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     # load-info hint (`attrs.info_json`) the worker can hand to yt-dlp. A url-less channel stub
     # (an id-only uploader linked via #160) has neither, so it's a pure graph node that is never
     # dispatched; a container that only carries a hint still is.
-    runnable = or_(Thing.url.isnot(None), Thing.attrs[xform.INFO_JSON_KEY].isnot(None))
+    # `.astext` (`->>`) maps a json-null hint — what clear_info_hint leaves behind — and a
+    # missing key both to SQL NULL; bare `->` would count a cleared hint as still runnable.
+    runnable = or_(Thing.url.isnot(None),
+                   Thing.attrs[xform.INFO_JSON_KEY].astext.isnot(None))
     stage1_branch = sa.and_(
         Thing.container.isnot(False), runnable, rating >= _PLAYLIST_FLOOR,
         Thing.try_on <= today,

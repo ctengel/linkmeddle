@@ -4,6 +4,7 @@ import statistics
 import datetime
 from typing import NamedTuple, Optional
 import hashlib
+import urllib.parse
 import warnings
 from . import models
 
@@ -98,7 +99,8 @@ def thing_from_node(node: models.PullThing) -> models.Thing:
 
 
 def thing_from_chan(chan: models.UlChan,
-                    source_extractor: Optional[str] = None) -> Optional[models.Thing]:
+                    source_extractor: Optional[str] = None,
+                    source_url: Optional[str] = None) -> Optional[models.Thing]:
     """Build a channel `thing` from an uploader/channel descriptor, or None if it has neither
     a URL nor a native id (nothing to key on).
 
@@ -116,7 +118,9 @@ def thing_from_chan(chan: models.UlChan,
       (no URL to pull); the dispatch (`claim_job` stage1_branch) excludes url-less containers, so
       it is never claimed. `source_extractor` (the discovering video's extractor) is recorded as
       a provenance hint since extractor_key stays NULL — we never inherit the video's extractor
-      (usually a different sub-extractor).
+      (usually a different sub-extractor). `source_url` (the discovering video's URL) supplies
+      the stub's site (`attrs.source_host`): native ids are only unique per site, so the
+      id-join and the stub->channel merge are scoped to it (`same_site`).
     """
     if not chan.url and chan.native_id is None:
         return None
@@ -129,6 +133,8 @@ def thing_from_chan(chan: models.UlChan,
         url, native_id, channel = None, chan.native_id, None
         if source_extractor is not None:
             attrs['source_extractor'] = source_extractor
+        if (host := url_domain(source_url)) is not None:
+            attrs[SOURCE_HOST_KEY] = host
     return models.Thing(url=url,
                         extractor_key=None,
                         native_id=native_id,
@@ -146,6 +152,26 @@ def merge_attr(thing: models.Thing, key: str, value) -> None:
 def is_channel(thing: models.Thing) -> bool:
     """Whether a thing carries the soft `attrs.kind='channel'` display hint (handles attrs=None)."""
     return (thing.attrs or {}).get("kind") == "channel"
+
+
+SOURCE_HOST_KEY = "source_host"   # attrs key: the site a url-less channel stub's id came from
+
+
+def url_domain(url: Optional[str]) -> Optional[str]:
+    """The site identity of a URL: its lowercased host, with a leading `www.`/`m.` label
+    stripped (the mobile/desktop split is not a site boundary). None when unknowable."""
+    host = (urllib.parse.urlsplit(url).hostname or "") if url else ""
+    for label in ("www.", "m."):
+        if host.startswith(label):
+            host = host[len(label):]
+    return host or None
+
+
+def same_site(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two `url_domain` results are compatible for the #160 uploader-id join: native
+    ids are only unique per site, so a match requires the same domain — but an unknown side
+    stays compatible (the pre-domain behavior; old rows converge as they are re-touched)."""
+    return a is None or b is None or a == b
 
 
 # yt-dlp's two flat url-result `_type`s: a bare pointer (no media/formats). Any other shape
@@ -275,14 +301,14 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     # when known, else by native id (a url-less uploader, #160) so the same id maps to one node.
     channels_by_key: dict[str, models.Thing] = {}
 
-    def channel_for(chan: models.UlChan,
-                    source_extractor: Optional[str] = None) -> Optional[models.Thing]:
+    def channel_for(chan: models.UlChan, source_extractor: Optional[str] = None,
+                    source_url: Optional[str] = None) -> Optional[models.Thing]:
         key = chan.url or (f"id:{chan.native_id}" if chan.native_id else None)
         if key is None:
             return None
         existing = channels_by_key.get(key)
         if existing is None:
-            existing = thing_from_chan(chan, source_extractor)
+            existing = thing_from_chan(chan, source_extractor, source_url)
             if existing is None:
                 return None
             existing.bucket = bucket
@@ -294,7 +320,7 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     # self-edge. A url-less owner (id only) still links (#160).
     pull_is_channel = _same_identity(pl_thing, pl.channel)   # container IS its own uploader
     if (pl.channel.url or pl.channel.native_id) and not pull_is_channel:
-        pl_chan = channel_for(pl.channel, pl.extractor_key)
+        pl_chan = channel_for(pl.channel, pl.extractor_key, pl.url)
         if pl_chan is not None:
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
@@ -314,9 +340,11 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
         # convention that containers are keyed by webpage_url — a channel's Videos/Shorts/Live
         # tabs all share the channel's `id` but have distinct URLs, and a curated sub-playlist that
         # recurs under two URLs converges later via the dedup merge, not by id-collapse here. The
-        # original id is kept as a soft `channel_id` hint.
+        # original id is kept as a soft `channel_id` hint. A url-less member keeps its native_id
+        # — its only key; demoting it would leave the stub unfindable, minting a duplicate row
+        # on every re-pull.
         attrs = dict(hints) if hints is not None else {}
-        if vid.container is True:
+        if vid.container is True and vid.url is not None:
             vid_thing.native_id = None
             if vid.native_id is not None:
                 attrs["channel_id"] = vid.native_id
@@ -339,7 +367,7 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=False))
-            vid_chan = channel_for(vid_owner, vid.extractor_key)
+            vid_chan = channel_for(vid_owner, vid.extractor_key, vid.url)
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
