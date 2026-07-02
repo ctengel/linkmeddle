@@ -439,8 +439,10 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
 # from the fresh pull via the caller's null_backfill *after* the loser (which holds the clashing
 # unique value) is deleted, so that write can never collide. `bucket` is excluded too (immutable,
 # never NULL [A10]); `machine_rating` is excluded (computed on read, the column is unread).
+# `try_on` is excluded: it defaults to today at creation, so a NULL survivor try_on only ever
+# means *acquired* or *permafail-acked* (§2.5) — carrying the loser's date would resurrect both.
 _MERGE_CARRY_FIELDS = ("title", "channel", "thumbnail_url", "modified", "container",
-                       "human_rating", "best_oi", "last_success_dt", "last_failure_dt", "try_on")
+                       "human_rating", "best_oi", "last_success_dt", "last_failure_dt")
 
 
 def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
@@ -483,16 +485,23 @@ def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
     # within a flush, which would otherwise reintroduce the collision).
     carry = {f: getattr(loser, f) for f in _MERGE_CARRY_FIELDS
              if getattr(survivor, f) is None and getattr(loser, f) is not None}
+    if survivor.last_success_dt is not None:
+        # last_failure_dt means "currently failing" ([C3-A], nulled on success) — don't stamp it
+        # onto a survivor whose own history says it last succeeded.
+        carry.pop("last_failure_dt", None)
     loser_attrs = loser.attrs
     session.delete(loser)
     session.flush()
     for field, value in carry.items():
         setattr(survivor, field, value)
+    if "best_oi" in carry:
+        survivor.try_on = None   # acquired via the loser -> never re-fetch (§2.5)
     if loser_attrs:   # union attrs, survivor's own keys win
         survivor.attrs = {**loser_attrs, **(survivor.attrs or {})}
 
 
-def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
+def _apply_backfill(session: Session, existing: Thing,
+                    incoming: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Fill NULL fields on `existing` from `incoming` (#147), converging any duplicate row.
 
     `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
@@ -500,6 +509,9 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
     real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
     apply it. Both partial-unique indexes flow through the one merge path — except a *channel*
     clash, which is never converged away (see the guard below).
+
+    Returns the merges performed as `(loser_id, survivor_id)` pairs (normally empty), so a
+    caller holding ids to merged-away rows (`_fanout`'s remap) can re-resolve them.
     """
     fields = xform.null_backfill(existing, incoming)
     clashes: dict[uuid.UUID, tuple[Thing, list[str]]] = {}
@@ -519,6 +531,7 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
         _note(session.exec(
             select(Thing).where(Thing.url == fields["url"],
                                 Thing.id != existing.id)).first(), "url")
+    merged: list[tuple[uuid.UUID, uuid.UUID]] = []
     for clash, clash_fields in clashes.values():
         # REVIEW-DEFERRED-4 #1: never converge a channel away. A sub-container that shares its
         # channel's id (a self-pulling Videos/Shorts/Live tab, #46) would otherwise clash its id
@@ -539,8 +552,10 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
                 fields.pop(field, None)
             continue
         _merge_things(session, existing, clash)
+        merged.append((clash.id, existing.id))
     for key, value in fields.items():
         setattr(existing, key, value)
+    return merged
 
 
 def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -> None:
@@ -567,27 +582,31 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
 
 
-def _converge_urlless_channel(session: Session, channel: Thing) -> None:
+def _converge_urlless_channel(session: Session,
+                              channel: Thing) -> Optional[tuple[uuid.UUID, uuid.UUID]]:
     """Absorb a url-less id-only channel stub into the real channel once it is pulled (#160).
 
     A video whose uploader is exposed by ID only links to a native-id-keyed stub (`url=NULL`)
     when the real channel isn't known yet. When the channel is later pulled directly it gains a
     URL + native_id; this merges the earlier stub into it (`_merge_things`), re-pointing the
-    stub's `channel=True` video edges onto the real channel and deleting the stub.
+    stub's `channel=True` video edges onto the real channel and deleting the stub. Returns the
+    `(loser_id, survivor_id)` pair when a merge happened (for `_fanout`'s remap), else None.
 
     Safe by the URL-less discriminator: only a stub with `url IS NULL` is ever the merge loser,
     so a channel *tab* (always URL-keyed, with a URL) can never be selected and deleted. No-op
     unless `channel` is a real channel with both a URL and a native_id.
     """
     if channel.native_id is None or channel.url is None:
-        return
+        return None
     stub = session.exec(
         select(Thing).where(Thing.native_id == channel.native_id,
                             Thing.url == None,  # noqa: E711  url-less stub only (never a tab)
                             Thing.attrs["kind"].astext == "channel",
                             Thing.id != channel.id)).first()
-    if stub is not None:
-        _merge_things(session, channel, stub)   # survivor = real channel, loser = url-less stub
+    if stub is None:
+        return None
+    _merge_things(session, channel, stub)   # survivor = real channel, loser = url-less stub
+    return (stub.id, channel.id)
 
 
 def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing) -> None:
@@ -619,7 +638,8 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
 
 
 def _fanout(session: Session, pull: models.PullThing, container: Thing,
-            now: datetime.datetime, parent_try_on: Optional[datetime.date]) -> None:
+            now: datetime.datetime,
+            parent_try_on: Optional[datetime.date]) -> dict[uuid.UUID, uuid.UUID]:
     """Fan out one container pull into the thing/rel graph and (re)schedule the container.
 
     `parent_try_on` is None for the claimed top-level container — normal Fibonacci backoff over
@@ -628,10 +648,22 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     first). Recurses into inlined sub-containers, fanning out their grandchildren, but creates no
     further runs (one yt-dlp call -> one run). Idempotent: re-fans an already-known sub-container
     every time the parent inlines it. Does not commit.
+
+    Returns the loser->survivor id map of every duplicate-row merge performed in this subtree:
+    a backfill mid-loop can merge away a row an *earlier* member already resolved to, so ids
+    held across the loop (remap, nested, and the caller's own bookkeeping) must be re-resolved
+    through this map rather than used stale (a deleted id would FK-fail the rel insert).
     """
     # Stubs inherit the container's bucket (immutable, [A10]) and its propagated soft hints
     # (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
     graph = xform.pl_full2things(pull, bucket=container.bucket, parent_attrs=container.attrs)
+
+    merged: dict[uuid.UUID, uuid.UUID] = {}
+
+    def _resolve(thing_id: uuid.UUID) -> uuid.UUID:
+        while thing_id in merged:   # follow chains (a survivor can later lose a merge itself)
+            thing_id = merged[thing_id]
+        return thing_id
 
     # An inlined sub-container (parent_try_on set) is URL-keyed, just like it was as a member of
     # its parent (pl_full2things nulls every sub-container member's native_id). Its own pull node
@@ -646,7 +678,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         graph.playlist.native_id = None
 
     # The recorded thing IS the container: backfill it, classify it, mark success.
-    _apply_backfill(session, container, graph.playlist)
+    merged.update(_apply_backfill(session, container, graph.playlist))
     container.container = True
     container.last_success_dt = now
     xform.clear_info_hint(container)   # "just a playlist": hint cleared after its own pull
@@ -656,7 +688,9 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         xform.merge_attr(container, "kind", "channel")
         # Now that this channel has a URL + native_id, absorb any url-less id-only stub created
         # for it before it was pulled (#160), re-pointing that stub's video edges onto it.
-        _converge_urlless_channel(session, container)
+        gone = _converge_urlless_channel(session, container)
+        if gone is not None:
+            merged.update([gone])
 
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
@@ -668,7 +702,7 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         existing = _find_thing(session, stub)
         if existing is not None:
             thing = existing
-            _apply_backfill(session, existing, stub)
+            merged.update(_apply_backfill(session, existing, stub))
             xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
             # Carry a freshly-discovered channel hint onto a pre-existing container.
             if (stub.attrs or {}).get("kind") == "channel":
@@ -709,7 +743,9 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # OR-ing channel (the same monotonic-upgrade rule as the on-conflict below).
     edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
     for rel in graph.rels:
-        key = (remap[rel.parent], remap[rel.child])
+        # remap entries recorded before a mid-loop merge can point at a deleted loser row —
+        # resolve through the merge map so the insert never references a dead id.
+        key = (_resolve(remap[rel.parent]), _resolve(remap[rel.child]))
         if key[0] == key[1]:   # never a self-edge (a member that resolved to the container)
             continue
         edges[key] = edges.get(key, False) or rel.channel
@@ -726,13 +762,29 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # re-feeds it first and it self-pulls only if the parent goes quiet (hybrid scheduling).
     if parent_try_on is None:
         _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+        sched = container.try_on
     else:
-        container.try_on = parent_try_on + SAFETY_MARGIN_DAYS
+        sched = parent_try_on + SAFETY_MARGIN_DAYS
+        # A user permafail ack (try_on=NULL, §2.5) sticks: the sub stays parent-fed (its content
+        # is still re-fanned below) but is never rescheduled to self-pull.
+        if container.try_on is not None:
+            container.try_on = sched
 
     # Inlined sub-playlists: re-fan out (no run — they ride the parent's single call), passing
-    # this container's scheduled date so each is parent-fed off it.
+    # this container's scheduled date so each is parent-fed off it (`sched`, not `try_on`: an
+    # acked sub's NULL try_on must not flip its children into the top-level backoff branch).
+    # A sub merged away since it was queued (by a later member's backfill, or by a sibling's
+    # recursion) is re-resolved to its survivor — or skipped if it collapsed into the container
+    # or its survivor is a known leaf.
     for sub_thing, node in nested:
-        _fanout(session, node, sub_thing, now, parent_try_on=container.try_on)
+        sub_id = _resolve(sub_thing.id)
+        if sub_id != sub_thing.id:
+            sub_thing = session.get(Thing, sub_id)
+            if (sub_thing is None or sub_id == container.id
+                    or xform.container_switch(sub_thing.container, True)):
+                continue
+        merged.update(_fanout(session, node, sub_thing, now, parent_try_on=sched))
+    return merged
 
 
 @app.post("/jobs/claim", response_model=JobClaim,

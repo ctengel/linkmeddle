@@ -840,6 +840,68 @@ def test_ingest_native_clash_merges(client):
     assert client.get(f"/things/{stray}").status_code == 404   # stray converged away
 
 
+def test_merge_acquired_loser_nulls_survivor_try_on(client):
+    # The loser is already acquired (best_oi set, try_on NULL) while the survivor still carries a
+    # scheduled date. Carrying best_oi must also null the survivor's try_on — acquired means
+    # never re-fetch (§2.5) — or the merged row would sit acquired-yet-scheduled.
+    clash_url = "http://example/v/acqloser"
+    oi = uuid.uuid4()
+    a_id = _seed_thing(type="video", extractor_key="youtube", native_id="clashvid",
+                       try_on=_FUTURE)                                # scheduled survivor
+    _seed_thing(type="video", url=clash_url, best_oi=oi, try_on=None)  # acquired loser
+    _, r = _url_clash_pull(client, clash_url)
+    assert r.status_code == 200
+    a = client.get(f"/things/{a_id}").json()
+    assert a["best_oi"] == str(oi)     # media carried from the loser
+    assert a["try_on"] is None         # acquired -> never re-fetch
+
+
+def test_merge_never_resurrects_acquired_survivor(client):
+    # The survivor is acquired (best_oi, try_on NULL) and currently fine (last_success set,
+    # last_failure NULL). The loser's due try_on and failure stamp must NOT land on it: a NULL
+    # survivor try_on only ever means acquired/acked (never carried), and last_failure_dt is a
+    # "currently failing" marker ([C3-A]) that can't override a recorded success.
+    clash_url = "http://example/v/resurrect"
+    now = models.naive_utcnow()
+    a_id = _seed_thing(type="video", extractor_key="youtube", native_id="clashvid",
+                       best_oi=uuid.uuid4(), try_on=None, last_success_dt=now)
+    _seed_thing(type="video", url=clash_url, try_on=_TODAY, last_failure_dt=now)
+    _, r = _url_clash_pull(client, clash_url)
+    assert r.status_code == 200
+    a = client.get(f"/things/{a_id}").json()
+    assert a["try_on"] is None            # not resurrected by the loser's date
+    assert a["last_failure_dt"] is None   # loser's failure stamp not carried over a success
+
+
+def test_ingest_duplicate_member_merge_keeps_remap_valid(client):
+    # One pull lists the same video twice under different keys: entry 1 (url only) resolves to
+    # the url-keyed row; entry 2 (native key + url) resolves to the native-keyed row, whose url
+    # backfill then merges the url row away. Entry 1's remap must follow the merge onto the
+    # survivor — pre-fix the rel insert referenced the deleted row's id (FK violation -> 500).
+    url = "http://example/pl/dup"
+    vurl = "http://example/v/dup"
+    r_url = _seed_thing(type="video", url=vurl, try_on=None)
+    r_native = _seed_thing(type="video", extractor_key="youtube", native_id="dupvid",
+                           try_on=None)
+    tid, rid = _claimed_run(client, url)
+    up = models.UlChan(native_id="dupup", title="Dup Up", url="http://example/dupup")
+    payload = models.PullThing(
+        url=url, native_id="pldup", title="Dup PL", extractor_key="youtube",
+        playlist_count=2, channel=up,
+        entries=[
+            models.PullThing(url=vurl, title="Dup Video", extractor_key="youtube", channel=up),
+            models.PullThing(url=vurl, native_id="dupvid", title="Dup Video",
+                             extractor_key="youtube", channel=up),
+        ]).model_dump(mode="json")
+    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert r.status_code == 200            # pre-fix: 500 (rel FK onto the merged-away row)
+    assert client.get(f"/things/{r_url}").status_code == 404     # merged away
+    survivor = client.get(f"/things/{r_native}").json()
+    assert survivor["url"] == vurl and survivor["native_id"] == "dupvid"
+    parents = client.get(f"/things/{r_native}/related", params={"direction": "parent"}).json()
+    assert any(p["thing"]["id"] == tid for p in parents)         # edge landed on the survivor
+
+
 def test_ingest_empty_playlist(client):
     # An empty playlist (0 entries) must be classified container=True so it is re-pulled.
     url = "http://example/pl/empty"
@@ -1484,6 +1546,60 @@ def test_channel_tab_self_pull_preserves_channel(client):
     tab_thing = client.get(f"/things/{tid}").json()
     assert tab_thing["id"] != chan_id                             # tab stays a distinct thing
     assert tab_thing["native_id"] is None                        # tab left URL-keyed (clash backfill dropped)
+
+
+def test_tab_permafail_ack_survives_parent_refeed(client):
+    # A user acks a parent-fed tab (PATCH try_on=null, §2.5). A later channel pull must keep
+    # feeding the tab's content but never reschedule it to self-pull — pre-fix the re-fan
+    # unconditionally wrote try_on = parent + margin, resurrecting the ack on every pull.
+    url = "http://yt/@ack/featured"
+    cid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UCACK", title="Ack", url="http://yt/@ack")
+
+    def payload(shorts_vids):
+        def tab(name, vids):
+            return models.PullThing(
+                native_id="UCACK", extractor_key="youtubetab", container=True,
+                url=f"http://yt/@ack/{name}", title=f"Ack - {name}", channel=chan,
+                entries=[models.PullThing(native_id=v, url=f"http://yt/v/{v}", title=v.upper(),
+                                          extractor_key="youtube", channel=chan)
+                         for v in vids])
+        return models.PullThing(
+            url=url, native_id="UCACK", extractor_key="youtubetab", title="Ack",
+            channel=chan, container=True, playlist_count=len(shorts_vids) + 1,
+            entries=[tab("videos", ["av1"]), tab("shorts", shorts_vids)],
+        ).model_dump(mode="json")
+
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": payload(["as1"])}).status_code == 200
+    tabs = {e["thing"]["url"]: e["thing"] for e in client.get(f"/things/{cid}/related").json()
+            if e["direction"] == "child"}
+    shorts_id = tabs["http://yt/@ack/shorts"]["id"]
+    assert client.patch(f"/things/{shorts_id}",
+                        json={"try_on": None}).json()["try_on"] is None   # user ack
+
+    # Re-pull the channel (seed the run directly; the same-day claim gate would skip it).
+    with _session() as s:
+        run2 = models.Run(thing_id=uuid.UUID(cid), success=None,
+                          starttime=models.naive_utcnow())
+        s.add(run2)
+        s.commit()
+        rid2 = str(run2.id)
+    assert client.post(f"/jobs/{rid2}/result",
+                       json={"playlist": payload(["as1", "as2"])}).status_code == 200
+
+    chan_try_on = datetime.date.fromisoformat(client.get(f"/things/{cid}").json()["try_on"])
+    shorts = client.get(f"/things/{shorts_id}").json()
+    assert shorts["try_on"] is None                       # ack survives the re-feed
+    videos = client.get(f"/things/{tabs['http://yt/@ack/videos']['id']}").json()
+    assert (datetime.date.fromisoformat(videos["try_on"])
+            == chan_try_on + api.SAFETY_MARGIN_DAYS)      # unacked sibling still parent-fed
+    # The acked tab's content is still re-fanned: the new grandchild exists and links to it.
+    new_vid = client.get("/things/", params={"native_id": "as2"}).json()
+    assert len(new_vid) == 1
+    vid_parents = client.get(f"/things/{new_vid[0]['id']}/related",
+                             params={"direction": "parent"}).json()
+    assert any(p["thing"]["id"] == shorts_id for p in vid_parents)
 
 
 def test_unknown_url_discovered_as_video(client):

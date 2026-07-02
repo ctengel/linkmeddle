@@ -28,11 +28,14 @@ def next_fib(existing: int | float | None, up: bool) -> int:
 def entry2text(entry: models.PullThing) -> str:
     """Change a pl member into a single unique string.
 
-    Sub-containers (container=True) get a 'pl:' prefix (keyed by native_id, else url) so a
-    video and a sub-playlist sharing an id can never collide; videos key by native_id.
+    Sub-containers (container=True) get a 'pl:' prefix so a video and a sub-playlist sharing an
+    id can never collide, and key by URL first — matching the URL-keyed sub-container convention:
+    a channel's tabs all share the channel's native_id, so an id-first key would collapse them to
+    one membership entry and a tab appearing/vanishing would not flip change-detection. Videos
+    key by native_id.
     """
     if entry.container is True:
-        return f"pl:{entry.native_id or entry.url or ''}"
+        return f"pl:{entry.url or entry.native_id or ''}"
     # A leaf/unknown member keys by native_id, falling back to url (then '') so a member with no
     # yt-dlp id never yields None — sorted()/join() in pl2txt require comparable, joinable strings.
     return entry.native_id or entry.url or ""

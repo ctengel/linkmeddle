@@ -322,6 +322,19 @@ def test_distinct_subcontainers_also_url_keyed():
     assert {(m.attrs or {}).get("channel_id") for m in subs} == {"subA", "subB"}
 
 
+def test_pl_hash_tabs_with_shared_id_are_distinct_keys():
+    # A channel's tabs all share the channel's native_id but have distinct URLs; the container
+    # hash key is URL-first (matching the URL-keyed sub-container convention), so each tab is
+    # its own membership entry and a tab appearing/vanishing — even an empty one — flips the
+    # hash. An id-first key collapsed every tab to one entry ("pl:UC").
+    def tab(name):
+        return models.PullThing(native_id="UC", url=f"http://yt/@c/{name}",
+                                extractor_key="youtubetab", container=True)
+    two = [tab("videos"), tab("shorts")]
+    assert xform.pl_hash(two) != xform.pl_hash([tab("videos")])
+    assert xform.pl_hash(two) != xform.pl_hash(two + [tab("streams")])
+
+
 def test_subtree_hash_equals_pl_hash_for_flat_pull():
     pl = _pl(3)
     assert xform.subtree_hash(pl) == xform.pl_hash(pl.entries)
