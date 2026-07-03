@@ -54,6 +54,19 @@ OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user \
 pytest lmdb/test_api.py
 ```
 
+### Backup and restore
+
+The V4 DB is plain PostgreSQL, so `pg_dump`/`pg_restore` work directly against it. They accept the same connection URI as `DATABASE_URL`, except they don't recognize SQLAlchemy's `+psycopg` driver tag — drop that piece (e.g. `postgresql+psycopg://user:pass@host:5432/lmdb` becomes `postgresql://user:pass@host:5432/lmdb`) before using it.
+
+```bash
+# Backup (custom format: compressed, supports selective restore)
+pg_dump -Fc "postgresql://user:pass@host:5432/lmdb" > lmdb-$(date +%F).dump
+
+# Restore into a fresh DB (create it first)
+createdb lmdb
+pg_restore -d "postgresql://user:pass@host:5432/lmdb" lmdb-2026-07-03.dump
+```
+
 ### Migrating from V3
 
 V3 used SQLite; V4 uses PostgreSQL. The migration script reads your V3 `.db` file, looks up each downloaded video in Object Index, and writes things/rels/runs into the V4 PostgreSQL database.
