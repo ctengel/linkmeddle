@@ -13,6 +13,7 @@ from pytest_postgresql import factories
 
 from lmdb import api
 from lmdb import models
+from lmdb import xform
 
 # Fedora keeps pg_ctl in /usr/bin (pytest-postgresql's default assumes a Debian path).
 postgresql_proc = factories.postgresql_proc(executable="/usr/bin/pg_ctl")
@@ -663,7 +664,7 @@ def _chan_payload(url="http://example/chan/ingest", native="chanX",
     chan = models.UlChan(native_id=native, title="The Channel", url=url)
     pl = models.PullThing(
         url=url, native_id=native, title="The Channel", extractor_key="youtube",
-        playlist_count=n_videos + n_playlists,          # members = videos + sub-containers
+        playlist_count=n_videos,        # yt-dlp reports the video count; tabs excluded (#167)
         channel=chan,                                   # the channel is its own uploader
         entries=[models.PullThing(
             native_id=f"cv{i}", title=f"CVid {i}", url=f"http://example/cv/{i}",
@@ -766,17 +767,9 @@ def test_ingest_duplicate_entries(client):
     assert len(chan_parents) == 1
 
 
-def test_ingest_url_backfill_skips_on_clash(client):
-    # Two rows already describe one video: B holds the url (no native key), A was created
-    # native-key-first with url still NULL. A pull now carries BOTH keys, so the member matches
-    # A by native key and would backfill A.url to a value B already holds -> thing_url
-    # UniqueViolation (HTTP 500) pre-fix. The clashing url is skipped instead (cross-row merge
-    # is Phase 2); the non-colliding #147 backfill still applies.
-    clash_url = "http://example/v/clash"
-    b_id = _seed_thing(type="video", url=clash_url)                 # url, no native key
-    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
-                       native_id="clashvid")
-
+def _url_clash_pull(client, clash_url):
+    """Run a pull whose single member carries both the native key of row A and the url of row B,
+    so the member matches A by native key but its url belongs to B. Returns (tid, response)."""
     url = "http://example/pl/clash"
     tid, rid = _claimed_run(client, url)
     up = models.UlChan(native_id="clashup", title="Clash Up", url="http://example/clashup")
@@ -787,20 +780,126 @@ def test_ingest_url_backfill_skips_on_clash(client):
             native_id="clashvid", title="Clash Video", url=clash_url,
             extractor_key="youtube", channel=up)],
     ).model_dump(mode="json")
+    return tid, client.post(f"/jobs/{rid}/result", json={"playlist": payload})
 
-    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+
+def test_ingest_url_clash_merges(client):
+    # Two rows already describe one video: B holds the url (no native key), A was created
+    # native-key-first with url still NULL. A pull carries BOTH keys, so the member matches A by
+    # native key while its url belongs to B -> pre-fix thing_url UniqueViolation (HTTP 500).
+    # Convergence: B is merged into the survivor A (rel/run FKs re-pointed, state carried), then
+    # A takes the url and B is gone.
+    clash_url = "http://example/v/clash"
+    # try_on=None on the seeded rows keeps them out of dispatch so _claimed_run claims the pull.
+    a_id = _seed_thing(type="video", extractor_key="youtube",       # native key, url NULL
+                       native_id="clashvid", try_on=None)
+    b_id = _seed_thing(type="video", url=clash_url, human_rating=2.0,  # url + rating, no native key
+                       try_on=None)
+    # B carries an edge + a run that must survive the merge by following B onto A.
+    par_id = _seed_thing(type="playlist", url="http://example/clashpar", try_on=None)
+    with _session() as s:
+        s.add(models.Rel(parent=uuid.UUID(par_id), child=uuid.UUID(b_id), channel=False))
+        s.add(models.Run(thing_id=uuid.UUID(b_id), success=True,
+                         starttime=models.naive_utcnow(), endtime=models.naive_utcnow()))
+        s.commit()
+
+    tid, r = _url_clash_pull(client, clash_url)
     assert r.status_code == 200            # pre-fix: 500 thing_url UniqueViolation
     assert r.json()["success"] is True
 
-    # A (matched by native key) keeps url NULL — the clashing backfill was skipped — but its
-    # other NULL fields are still filled from the pull (#147).
+    # Survivor A now holds the url (merged from B) and inherited B's rating; B is deleted.
     a = client.get(f"/things/{a_id}").json()
-    assert a["url"] is None
+    assert a["url"] == clash_url
+    assert a["native_id"] == "clashvid"
+    assert a["human_rating"] == 2.0        # carried from the loser (A had none)
     assert a["title"] == "Clash Video"
-    # B (the url holder) is untouched.
-    b = client.get(f"/things/{b_id}").json()
-    assert b["url"] == clash_url
-    assert b["native_id"] is None
+    assert client.get(f"/things/{b_id}").status_code == 404   # loser converged away
+
+    # B's edge + run followed it onto A.
+    a_related = client.get(f"/things/{a_id}/related").json()
+    assert any(e["direction"] == "parent" and e["thing"]["id"] == par_id for e in a_related)
+    assert client.get(f"/things/{a_id}/runs").json()          # A has B's run now (plus none of its own)
+
+
+def test_ingest_native_clash_merges(client):
+    # The native_id clash branch: the *container* is claimed by URL (native_id NULL), and its pull
+    # reveals a native_id that a stray row already holds. `_apply_backfill(container, ...)` would
+    # backfill that native_id and hit thing_native -> pre-fix UniqueViolation. The stray row is
+    # merged into the container (the survivor), which then takes the native key.
+    url = "http://example/pl/nclash"
+    stray = _seed_thing(type="playlist", extractor_key="youtube",   # native key, url NULL
+                        native_id="plnclash", try_on=None)          # not due -> claim the pull
+    tid, rid = _claimed_run(client, url)                            # container matched by URL
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"playlist": _pl_payload(2, url=url, native="plnclash")})
+    assert r.status_code == 200            # pre-fix: 500 thing_native UniqueViolation
+    assert r.json()["success"] is True
+
+    container = client.get(f"/things/{tid}").json()
+    assert container["native_id"] == "plnclash"   # gained the stray row's native key
+    assert client.get(f"/things/{stray}").status_code == 404   # stray converged away
+
+
+def test_merge_acquired_loser_nulls_survivor_try_on(client):
+    # The loser is already acquired (best_oi set, try_on NULL) while the survivor still carries a
+    # scheduled date. Carrying best_oi must also null the survivor's try_on — acquired means
+    # never re-fetch (§2.5) — or the merged row would sit acquired-yet-scheduled.
+    clash_url = "http://example/v/acqloser"
+    oi = uuid.uuid4()
+    a_id = _seed_thing(type="video", extractor_key="youtube", native_id="clashvid",
+                       try_on=_FUTURE)                                # scheduled survivor
+    _seed_thing(type="video", url=clash_url, best_oi=oi, try_on=None)  # acquired loser
+    _, r = _url_clash_pull(client, clash_url)
+    assert r.status_code == 200
+    a = client.get(f"/things/{a_id}").json()
+    assert a["best_oi"] == str(oi)     # media carried from the loser
+    assert a["try_on"] is None         # acquired -> never re-fetch
+
+
+def test_merge_never_resurrects_acquired_survivor(client):
+    # The survivor is acquired (best_oi, try_on NULL) and currently fine (last_success set,
+    # last_failure NULL). The loser's due try_on and failure stamp must NOT land on it: a NULL
+    # survivor try_on only ever means acquired/acked (never carried), and last_failure_dt is a
+    # "currently failing" marker ([C3-A]) that can't override a recorded success.
+    clash_url = "http://example/v/resurrect"
+    now = models.naive_utcnow()
+    a_id = _seed_thing(type="video", extractor_key="youtube", native_id="clashvid",
+                       best_oi=uuid.uuid4(), try_on=None, last_success_dt=now)
+    _seed_thing(type="video", url=clash_url, try_on=_TODAY, last_failure_dt=now)
+    _, r = _url_clash_pull(client, clash_url)
+    assert r.status_code == 200
+    a = client.get(f"/things/{a_id}").json()
+    assert a["try_on"] is None            # not resurrected by the loser's date
+    assert a["last_failure_dt"] is None   # loser's failure stamp not carried over a success
+
+
+def test_ingest_duplicate_member_merge_keeps_remap_valid(client):
+    # One pull lists the same video twice under different keys: entry 1 (url only) resolves to
+    # the url-keyed row; entry 2 (native key + url) resolves to the native-keyed row, whose url
+    # backfill then merges the url row away. Entry 1's remap must follow the merge onto the
+    # survivor — pre-fix the rel insert referenced the deleted row's id (FK violation -> 500).
+    url = "http://example/pl/dup"
+    vurl = "http://example/v/dup"
+    r_url = _seed_thing(type="video", url=vurl, try_on=None)
+    r_native = _seed_thing(type="video", extractor_key="youtube", native_id="dupvid",
+                           try_on=None)
+    tid, rid = _claimed_run(client, url)
+    up = models.UlChan(native_id="dupup", title="Dup Up", url="http://example/dupup")
+    payload = models.PullThing(
+        url=url, native_id="pldup", title="Dup PL", extractor_key="youtube",
+        playlist_count=2, channel=up,
+        entries=[
+            models.PullThing(url=vurl, title="Dup Video", extractor_key="youtube", channel=up),
+            models.PullThing(url=vurl, native_id="dupvid", title="Dup Video",
+                             extractor_key="youtube", channel=up),
+        ]).model_dump(mode="json")
+    r = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
+    assert r.status_code == 200            # pre-fix: 500 (rel FK onto the merged-away row)
+    assert client.get(f"/things/{r_url}").status_code == 404     # merged away
+    survivor = client.get(f"/things/{r_native}").json()
+    assert survivor["url"] == vurl and survivor["native_id"] == "dupvid"
+    parents = client.get(f"/things/{r_native}/related", params={"direction": "parent"}).json()
+    assert any(p["thing"]["id"] == tid for p in parents)         # edge landed on the survivor
 
 
 def test_ingest_empty_playlist(client):
@@ -866,6 +965,28 @@ def test_ingest_last_success_from_required_fields(client):
     assert vids["notitle"]["last_success_dt"] is None     # missing any field -> needs a meta job
 
 
+def test_ingest_channel_autopopulates_video_channel(client):
+    # #156: a channel pull whose flat video entry omits the uploader -> the ingest inherits the
+    # channel's identity, so the video is metadata-complete (last_success_dt set, no meta job)
+    # and carries a channel=True edge to the channel container.
+    url = "http://example/chan/auto"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="chanA", title="Chan A", url=url)
+    pl = models.PullThing(
+        url=url, native_id="chanA", title="Chan A", extractor_key="youtube",
+        playlist_count=1, channel=chan,                 # the channel is its own uploader
+        entries=[models.PullThing(native_id="av", title="A Vid", url="http://example/v/av",
+                                  extractor_key="youtube", channel=models.UlChan())])  # no uploader
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": pl.model_dump(mode="json")}).status_code == 200
+    vid = {v["native_id"]: v for v in
+           client.get("/things/", params={"container": False}).json()}["av"]
+    assert vid["channel"] == url                          # inherited the channel URL
+    assert vid["last_success_dt"]                         # metadata-complete -> no meta job
+    related = client.get(f"/things/{vid['id']}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [tid]   # channel edge to chan
+
+
 def test_meta_result_fans_out_channel(client):
     # A full meta extract reveals the uploader a flat pull omitted -> channel thing + rel.
     v, rid = _claimed_meta(client, url="http://e/mc")
@@ -879,6 +1000,24 @@ def test_meta_result_fans_out_channel(client):
     assert len(chan) == 1 and chan[0]["thing"]["container"] is True
     assert chan[0]["thing"]["attrs"]["kind"] == "channel"
     assert chan[0]["thing"]["url"] == "http://e/chan9"
+
+
+def test_meta_result_fans_out_url_less_channel(client):
+    # #160: a meta extract whose uploader has only an id (no URL) still links the video to a
+    # native-id-keyed channel thing, with the video's extractor recorded as provenance.
+    v, rid = _claimed_meta(client, url="http://e/mul")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "mulv", "title": "MUL", "extractor_key": "somesite",
+                                "channel": {"native_id": "UCidonly", "title": "IdOnly"},
+                                "info_json": {"id": "mulv"}}})
+    related = client.get(f"/things/{v}/related").json()
+    chan = [e for e in related if e["channel"]]
+    assert len(chan) == 1 and chan[0]["thing"]["container"] is True
+    assert chan[0]["thing"]["url"] is None
+    assert chan[0]["thing"]["native_id"] == "UCidonly"
+    assert chan[0]["thing"]["extractor_key"] is None
+    assert chan[0]["thing"]["attrs"]["source_extractor"] == "somesite"
 
 
 def test_ingest_propagates_hints(client):
@@ -1051,6 +1190,198 @@ def test_ingest_shared_uploader_one_channel(client):
     assert len(children) == 4 and all(e["channel"] is True for e in children)
 
 
+def test_ingest_url_less_uploader_links_orphans(client):
+    # #160: entries whose uploader exposes only an id (no URL) are still linked to a channel
+    # thing (keyed by that id) instead of orphaned. Two videos share one id -> one channel node,
+    # keyed by native id, extractor_key NULL (never inherited from the video), source extractor
+    # recorded as provenance, and never dispatched (no URL for the worker to pull).
+    url = "http://example/pl/urlless"
+    tid, rid = _claimed_run(client, url)
+    pl = models.PullThing(
+        url=url, native_id="plurlless", title="PL", extractor_key="youtube", playlist_count=2,
+        channel=models.UlChan(native_id="plurlless", url=url),   # the playlist's own identity
+        entries=[models.PullThing(
+            native_id=f"v{i}", url=f"http://example/v/urlless{i}", title=f"V{i}",
+            extractor_key="somesite",
+            channel=models.UlChan(native_id="UCorphan", title="Orphan"),  # url-less, shared
+        ) for i in range(2)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pl}).status_code == 200
+
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1                                    # one channel for the shared id
+    chan = chans[0]
+    assert chan["url"] is None and chan["native_id"] == "UCorphan"
+    assert chan["extractor_key"] is None                     # never inherited from the video
+    assert chan["attrs"]["source_extractor"] == "somesite"   # provenance recorded
+    children = client.get(f"/things/{chan['id']}/related",
+                          params={"direction": "child"}).json()
+    assert len(children) == 2 and all(e["channel"] is True for e in children)
+    # the url-less channel (container, no URL) is never dispatched as a Stage-1 pull; only the
+    # two videos are claimable, so no claim ever hands back this channel.
+    seen = set()
+    while (job := _claim(client)) is not None:
+        seen.add(job["thing"]["id"])
+        client.post(f"/jobs/{job['run_id']}/result",
+                    json={"success": False})   # fail it so the loop terminates
+    assert chan["id"] not in seen
+
+
+def test_ingest_url_less_uploader_links_existing_channel(client):
+    # #160: when the real channel already exists (e.g. a twitchvideos container with a URL + its
+    # own native_id), an id-only uploader on a video links to THAT channel by id — extractor
+    # differs (twitchvod vs twitchvideos) and the video carries no URL — instead of spawning a
+    # duplicate url-less stub. The join is video.uploader_id -> channel.native_id.
+    chan_id = _seed_thing(type="channel", url="http://tw/c/streamer", extractor_key="twitchvideos",
+                          native_id="TW123", try_on=None)   # real channel; not due -> not claimed
+    url = "http://example/pl/tw"
+    tid, rid = _claimed_run(client, url)
+    pl = models.PullThing(
+        url=url, native_id="pltw", title="PL", extractor_key="youtube", playlist_count=1,
+        channel=models.UlChan(native_id="pltw", url=url),        # playlist's own identity
+        entries=[models.PullThing(
+            native_id="tv1", url="http://tw/v/tv1", title="Stream VOD", extractor_key="twitchvod",
+            channel=models.UlChan(native_id="TW123", title="Streamer"),  # id-only uploader
+        )],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pl}).status_code == 200
+
+    # no duplicate channel: only the pre-seeded real channel exists
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1 and chans[0]["id"] == chan_id
+    # the video is linked to the real channel by a channel=True edge
+    children = client.get(f"/things/{chan_id}/related", params={"direction": "child"}).json()
+    assert [e["thing"]["native_id"] for e in children if e["channel"]] == ["tv1"]
+
+
+def test_claim_runnable_without_url_via_info_json(client):
+    # R1 (#160): claim_job gates Stage-1 on *runnable* (a URL or a load-info hint), not URL alone.
+    # A url-less container carrying an info_json hint is claimable; a url-less channel stub (no
+    # URL, no hint) is never dispatched.
+    hinted = _seed_thing(container=None, url=None, native_id="uh1", extractor_key="somesite",
+                         attrs={xform.INFO_JSON_KEY: {"id": "uh1"}}, try_on=_TODAY)
+    stub = _seed_thing(type="channel", url=None, native_id="UCstub", try_on=_TODAY)
+    # a *cleared* hint is JSON null (clear_info_hint keeps the key): `->>` must read it as gone,
+    # or a url-less pulled container would stay claimable forever with nothing to run.
+    cleared = _seed_thing(container=True, url=None, native_id="uh2", extractor_key="somesite",
+                          attrs={xform.INFO_JSON_KEY: None}, try_on=_TODAY)
+    claimed = set()
+    while (job := _claim(client)) is not None:
+        claimed.add(job["thing"]["id"])
+        client.post(f"/jobs/{job['run_id']}/result", json={"success": False})  # fail -> loop ends
+    assert hinted in claimed        # runnable via the info_json hint despite no URL
+    assert stub not in claimed      # url-less channel stub: not runnable, never claimed
+    assert cleared not in claimed   # a cleared (json-null) hint is not runnable either
+
+
+def test_url_less_stub_converges_into_pulled_channel(client):
+    # R3 (#160): a video linked to a url-less id-only channel stub re-points onto the real channel
+    # when it is later pulled by URL; the stub is merged away (one channel row remains). The video
+    # lives on the same site as the channel — the merge is scoped by source host (`same_site`).
+    v, rid = _claimed_meta(client, url="http://tw/v/cv")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "cvv", "title": "CV", "extractor_key": "twitchvod",
+                                "channel": {"native_id": "TW9", "title": "Streamer"},
+                                "info_json": {"id": "cvv"}}})
+    stubs = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(stubs) == 1 and stubs[0]["url"] is None and stubs[0]["native_id"] == "TW9"
+    stub_id = stubs[0]["id"]
+
+    # the real channel is added by URL and pulled -> it carries native_id TW9
+    curl = "http://tw/c/streamer"
+    cid, crid = _claimed_run(client, curl)
+    chan_pull = models.PullThing(
+        url=curl, native_id="TW9", title="Streamer", extractor_key="twitchvideos", playlist_count=1,
+        channel=models.UlChan(native_id="TW9", url=curl),
+        entries=[models.PullThing(native_id="cv2", url="http://tw/v/cv2", title="CV2",
+                                  extractor_key="twitchvod",
+                                  channel=models.UlChan(native_id="TW9", url=curl))],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{crid}/result", json={"playlist": chan_pull}).status_code == 200
+
+    # stub merged away: one channel row (the pulled channel), stub gone, first video re-pointed
+    chans = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(chans) == 1 and chans[0]["id"] == cid
+    assert client.get(f"/things/{stub_id}").status_code == 404
+    related = client.get(f"/things/{v}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [cid]
+
+
+def test_url_less_stub_cross_site_never_converges(client):
+    # Native ids are only unique per site: a channel pulled on a DIFFERENT site that happens to
+    # share the stub's id (numeric vk vs twitch ids) must neither absorb the stub nor be chosen
+    # by the id-join — the vk videos stay on the vk stub, not the twitch channel.
+    v, rid = _claimed_meta(client, url="http://vk.com/video1")
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "vkv1", "title": "VKV1", "extractor_key": "vk",
+                                "channel": {"native_id": "12345", "title": "VK User"},
+                                "info_json": {"id": "vkv1"}}})
+    stubs = client.get("/things/", params={"kind": "channel"}).json()
+    assert len(stubs) == 1 and stubs[0]["url"] is None
+    assert stubs[0]["attrs"]["source_host"] == "vk.com"   # the discovering video's site
+    stub_id = stubs[0]["id"]
+
+    # a twitch channel sharing the numeric id is pulled directly
+    curl = "http://twitch.tv/c/streamer"
+    cid, crid = _claimed_run(client, curl)
+    chan_pull = models.PullThing(
+        url=curl, native_id="12345", title="Streamer", extractor_key="twitchvideos",
+        playlist_count=1, channel=models.UlChan(native_id="12345", url=curl),
+        entries=[models.PullThing(native_id="tv1", url="http://twitch.tv/v/tv1", title="TV1",
+                                  extractor_key="twitchvod",
+                                  channel=models.UlChan(native_id="12345", url=curl))],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{crid}/result", json={"playlist": chan_pull}).status_code == 200
+
+    # the vk stub survives (no cross-site merge) and the vk video still points at it
+    assert client.get(f"/things/{stub_id}").status_code == 200
+    related = client.get(f"/things/{v}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [stub_id]
+
+    # a second vk video with the same uploader id joins the vk stub, not the twitch channel
+    v2, rid2 = _claimed_meta(client, url="http://vk.com/video2")
+    client.post(f"/jobs/{rid2}/result",
+                json={"success": True,
+                      "video": {"native_id": "vkv2", "title": "VKV2", "extractor_key": "vk",
+                                "channel": {"native_id": "12345", "title": "VK User"},
+                                "info_json": {"id": "vkv2"}}})
+    related2 = client.get(f"/things/{v2}/related").json()
+    assert [e["thing"]["id"] for e in related2 if e["channel"]] == [stub_id]
+    assert len(client.get("/things/", params={"kind": "channel"}).json()) == 2  # no third node
+
+
+def test_url_less_subcontainer_keeps_native_id_no_duplicates(client):
+    # A sub-container member with an id but NO url keeps its native_id — it is its only key, so
+    # demoting it to a channel_id hint would leave the row unfindable and mint a duplicate on
+    # every re-pull of the parent.
+    url = "http://example/pl/idonly"
+    tid, rid = _claimed_run(client, url)
+
+    def payload():
+        return models.PullThing(
+            url=url, native_id="plidonly", title="PL", extractor_key="youtube",
+            playlist_count=0, channel=models.UlChan(native_id="plidonly", url=url),
+            entries=[models.PullThing(native_id="subX", title="Sub X",
+                                      extractor_key="youtube", container=True)],
+        ).model_dump(mode="json")
+
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload()}).status_code == 200
+    # re-pull the parent (seed the run directly; the same-day claim gate would skip it)
+    with _session() as s:
+        run2 = models.Run(thing_id=uuid.UUID(tid), success=None,
+                          starttime=models.naive_utcnow())
+        s.add(run2)
+        s.commit()
+        rid2 = str(run2.id)
+    assert client.post(f"/jobs/{rid2}/result", json={"playlist": payload()}).status_code == 200
+
+    subs = client.get("/things/", params={"native_id": "subX"}).json()
+    assert len(subs) == 1                        # found again by its id (pre-fix: a row per pull)
+    assert subs[0]["url"] is None and subs[0]["container"] is True
+
+
 def test_channel_pull_videos_and_subplaylists(client):
     # A channel pull (parent IS its own uploader) emits a single channel=True edge per direct
     # video (no membership edge), no self-edge, and a container=True stub per sub-playlist.
@@ -1059,7 +1390,7 @@ def test_channel_pull_videos_and_subplaylists(client):
     payload = _chan_payload(url=url, native="chanc1", n_videos=2, n_playlists=2)
     run = client.post(f"/jobs/{rid}/result", json={"playlist": payload})
     assert run.status_code == 200
-    assert run.json()["playlist_count"] == 4    # videos + sub-containers (channel-aware count)
+    assert run.json()["playlist_count"] == 2    # leaf videos only; sub-containers excluded (#167)
 
     chan = client.get(f"/things/{tid}").json()
     assert chan["container"] is True
@@ -1153,8 +1484,9 @@ def test_curated_subcontainer_membership_and_owner(client):
 
 def test_inlined_subplaylist_ingested_as_completed_run(client):
     # yt-dlp sometimes hands back a sub-playlist already enumerated (inlined `entries`). Rather
-    # than drop them and re-pull, the endpoint ingests that sub-container as its own successful
-    # run (complete today + scheduled future try_on) and fans out its members. A normal flat
+    # than drop them and re-pull, the endpoint fans that sub-container out as part of the parent's
+    # single run (one yt-dlp call -> one run): it is marked complete today, gets a parent-fed
+    # safety-net try_on, and its members fan out — but it has NO run of its own. A normal flat
     # sub-playlist pointer (no entries) stays an unpulled stub pulled on its own schedule.
     p_url = "http://example/pl/nested"
     pid, rid = _claimed_run(client, p_url)
@@ -1186,15 +1518,18 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
 
     kids = [e["thing"] for e in client.get(f"/things/{pid}/related").json()
             if e["direction"] == "child"]
-    subA = next(t for t in kids if t["native_id"] == "subA")
-    subB = next(t for t in kids if t["native_id"] == "subB")
+    # Sub-containers are URL-keyed (native_id nulled, kept as a channel_id hint), so match by URL.
+    subA = next(t for t in kids if t["url"] == inlined_url)
+    subB = next(t for t in kids if t["url"] == flat_url)
 
-    # the inlined sub-playlist is recorded as a completed pull: complete today + future try_on
+    # the inlined sub-playlist is complete today + a parent-fed safety-net try_on, but rides the
+    # parent's single run (no run of its own); its date sits a margin past the parent's.
     assert subA["container"] is True
     assert subA["last_success_dt"] is not None
     assert datetime.date.fromisoformat(subA["last_success_dt"][:10]) == _TODAY
-    assert datetime.date.fromisoformat(subA["try_on"]) > _TODAY
-    assert any(run["success"] for run in client.get(f"/things/{subA['id']}/runs").json())
+    parent_try_on = datetime.date.fromisoformat(client.get(f"/things/{pid}").json()["try_on"])
+    assert datetime.date.fromisoformat(subA["try_on"]) == parent_try_on + api.SAFETY_MARGIN_DAYS
+    assert client.get(f"/things/{subA['id']}/runs").json() == []   # no per-sub run (one call, one run)
     # and it shed its load-info hint like any pulled container
     assert (subA["attrs"] or {}).get("info_json") is None
 
@@ -1207,6 +1542,144 @@ def test_inlined_subplaylist_ingested_as_completed_run(client):
     assert subB["last_success_dt"] is None
     assert subB["try_on"] == _TODAY.isoformat()
     assert client.get(f"/things/{subB['id']}/runs").json() == []
+
+
+def test_channel_tabs_one_run_distinct_things(client):
+    # A YouTube channel pull arrives with its Videos/Shorts/Live tabs inlined; every tab carries
+    # the SAME id (channel_id) but a distinct URL. The endpoint must (a) keep the tabs as four
+    # distinct things (sub-container members are URL-keyed), (b) record exactly ONE run on the channel
+    # covering the whole subtree, and (c) schedule the tabs parent-fed (try_on = channel + margin).
+    url = "http://yt/@geerling/featured"
+    cid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UC", title="Geerling", url="http://yt/@geerling")
+
+    def tab(name, vids):
+        return models.PullThing(
+            native_id="UC", extractor_key="youtubetab", container=True,
+            url=f"http://yt/@geerling/{name}", title=f"Geerling - {name}", channel=chan,
+            playlist_count=len(vids),
+            info_json={"id": "UC", "_type": "playlist", "entries": [{"id": v} for v in vids]},
+            entries=[models.PullThing(native_id=v, url=f"http://yt/v/{v}", title=v.upper(),
+                                      extractor_key="youtube", channel=chan) for v in vids])
+
+    payload = models.PullThing(
+        url=url, native_id="UC", extractor_key="youtubetab", title="Geerling", channel=chan,
+        container=True, playlist_count=3,
+        entries=[tab("videos", ["a", "b", "c"]), tab("shorts", ["d"]), tab("streams", ["e", "f"])],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": payload}).status_code == 200
+
+    # exactly ONE run, on the channel; nothing duplicated onto another thing at the same instant
+    chan_runs = client.get(f"/things/{cid}/runs").json()
+    assert len(chan_runs) == 1 and chan_runs[0]["success"] is True
+
+    # four distinct things: the channel (keeps id) + three URL-keyed tabs
+    tabs = [e["thing"] for e in client.get(f"/things/{cid}/related").json()
+            if e["direction"] == "child" and e["thing"]["container"] is True]
+    assert len(tabs) == 3
+    assert {t["url"] for t in tabs} == {f"http://yt/@geerling/{n}" for n in ("videos", "shorts", "streams")}
+    assert all(t["native_id"] is None for t in tabs)               # tabs URL-keyed, not collapsed
+    assert all((t["attrs"] or {}).get("channel_id") == "UC" for t in tabs)
+    assert client.get(f"/things/{cid}").json()["native_id"] == "UC"  # channel keeps the id
+
+    # tabs are parent-fed: complete today, no run of their own, try_on = channel + safety margin
+    chan_try_on = datetime.date.fromisoformat(client.get(f"/things/{cid}").json()["try_on"])
+    for t in tabs:
+        assert t["last_success_dt"] is not None
+        assert client.get(f"/things/{t['id']}/runs").json() == []
+        assert datetime.date.fromisoformat(t["try_on"]) == chan_try_on + api.SAFETY_MARGIN_DAYS
+        # tab -> channel is a channel=True edge; no self-edge anywhere
+        parents = client.get(f"/things/{t['id']}/related", params={"direction": "parent"}).json()
+        assert any(p["thing"]["id"] == cid and p["channel"] for p in parents)
+        assert all(p["thing"]["id"] != t["id"] for p in parents)
+
+    # grandchild videos from every tab exist as things, each linked to its tab
+    videos = {v["native_id"]: v for v in client.get("/things/", params={"container": False}).json()}
+    assert set(videos) == {"a", "b", "c", "d", "e", "f"}
+    a_parents = client.get(f"/things/{videos['a']['id']}/related", params={"direction": "parent"}).json()
+    videos_tab = next(t for t in tabs if t["url"].endswith("/videos"))
+    assert any(p["thing"]["id"] == videos_tab["id"] for p in a_parents)
+
+
+def test_channel_tab_self_pull_preserves_channel(client):
+    # REVIEW-DEFERRED-4 #1: a channel tab that falls silent past the safety margin can be claimed and
+    # self-pulled as a top-level container, carrying the shared channel id. Backfilling that id onto the
+    # tab would collide with the channel row; pre-guard, _merge_things deleted the channel. The channel
+    # guard leaves the channel (and its id, kept for ID-based video->channel linking) intact and drops
+    # the clashing native_id backfill, so the tab stays URL-keyed and the pull otherwise succeeds.
+    chan_id = _seed_thing(type="channel", url="http://yt/@chan", extractor_key="youtubetab",
+                          native_id="UC", try_on=None)             # channel keeps its id; not due -> not claimed
+    tab_url = "http://yt/@chan/videos"
+    tid, rid = _claimed_run(client, tab_url)                       # the tab self-pulls, top-level
+    chan = models.UlChan(native_id="UC", title="Chan", url="http://yt/@chan")
+    tab = models.PullThing(
+        url=tab_url, native_id="UC", extractor_key="youtubetab", title="Chan - videos",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="v1", url="http://yt/v/v1", title="V1",
+                                  extractor_key="youtube", channel=chan)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": tab}).status_code == 200
+
+    channel = client.get(f"/things/{chan_id}")
+    assert channel.status_code == 200                              # channel NOT merged/deleted
+    assert channel.json()["native_id"] == "UC"                    # channel keeps its id
+    tab_thing = client.get(f"/things/{tid}").json()
+    assert tab_thing["id"] != chan_id                             # tab stays a distinct thing
+    assert tab_thing["native_id"] is None                        # tab left URL-keyed (clash backfill dropped)
+
+
+def test_tab_permafail_ack_survives_parent_refeed(client):
+    # A user acks a parent-fed tab (PATCH try_on=null, §2.5). A later channel pull must keep
+    # feeding the tab's content but never reschedule it to self-pull — pre-fix the re-fan
+    # unconditionally wrote try_on = parent + margin, resurrecting the ack on every pull.
+    url = "http://yt/@ack/featured"
+    cid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UCACK", title="Ack", url="http://yt/@ack")
+
+    def payload(shorts_vids):
+        def tab(name, vids):
+            return models.PullThing(
+                native_id="UCACK", extractor_key="youtubetab", container=True,
+                url=f"http://yt/@ack/{name}", title=f"Ack - {name}", channel=chan,
+                entries=[models.PullThing(native_id=v, url=f"http://yt/v/{v}", title=v.upper(),
+                                          extractor_key="youtube", channel=chan)
+                         for v in vids])
+        return models.PullThing(
+            url=url, native_id="UCACK", extractor_key="youtubetab", title="Ack",
+            channel=chan, container=True, playlist_count=len(shorts_vids) + 1,
+            entries=[tab("videos", ["av1"]), tab("shorts", shorts_vids)],
+        ).model_dump(mode="json")
+
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": payload(["as1"])}).status_code == 200
+    tabs = {e["thing"]["url"]: e["thing"] for e in client.get(f"/things/{cid}/related").json()
+            if e["direction"] == "child"}
+    shorts_id = tabs["http://yt/@ack/shorts"]["id"]
+    assert client.patch(f"/things/{shorts_id}",
+                        json={"try_on": None}).json()["try_on"] is None   # user ack
+
+    # Re-pull the channel (seed the run directly; the same-day claim gate would skip it).
+    with _session() as s:
+        run2 = models.Run(thing_id=uuid.UUID(cid), success=None,
+                          starttime=models.naive_utcnow())
+        s.add(run2)
+        s.commit()
+        rid2 = str(run2.id)
+    assert client.post(f"/jobs/{rid2}/result",
+                       json={"playlist": payload(["as1", "as2"])}).status_code == 200
+
+    chan_try_on = datetime.date.fromisoformat(client.get(f"/things/{cid}").json()["try_on"])
+    shorts = client.get(f"/things/{shorts_id}").json()
+    assert shorts["try_on"] is None                       # ack survives the re-feed
+    videos = client.get(f"/things/{tabs['http://yt/@ack/videos']['id']}").json()
+    assert (datetime.date.fromisoformat(videos["try_on"])
+            == chan_try_on + api.SAFETY_MARGIN_DAYS)      # unacked sibling still parent-fed
+    # The acked tab's content is still re-fanned: the new grandchild exists and links to it.
+    new_vid = client.get("/things/", params={"native_id": "as2"}).json()
+    assert len(new_vid) == 1
+    vid_parents = client.get(f"/things/{new_vid[0]['id']}/related",
+                             params={"direction": "parent"}).json()
+    assert any(p["thing"]["id"] == shorts_id for p in vid_parents)
 
 
 def test_unknown_url_discovered_as_video(client):

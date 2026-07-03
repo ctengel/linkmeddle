@@ -39,6 +39,12 @@ _PLAYLIST_FLOOR = xform.BAND_FLOOR["C"]
 # and the lease lets the thing return on the next day — the same cadence a backed-off thing would.
 CLAIM_LEASE = datetime.timedelta(days=1)
 
+# Hybrid scheduling grace period (§4.x). A sub-container refreshed via its parent's pull
+# (parent-fed: inlined in the parent's single yt-dlp call, no run of its own) carries
+# `try_on = parent.try_on + SAFETY_MARGIN_DAYS`, so the parent normally re-pulls — and re-feeds —
+# it first (fewer yt-dlp calls); the child self-pulls only if the parent is this many days overdue.
+SAFETY_MARGIN_DAYS = datetime.timedelta(days=7)
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg:///lmdb")
 engine = create_engine(DATABASE_URL, echo=False)
 
@@ -384,13 +390,51 @@ def patch_thing(thing_id: uuid.UUID, item: ThingPatch,
 
 # --- Jobs / runs: Stage-1 ingest (Task 1.1) -------------------------------------------
 
+def _chan_site(thing: Thing) -> Optional[str]:
+    """A channel row's site for the #160 id-join: its own URL's domain, or (url-less stub)
+    the recorded `attrs.source_host` of the video that discovered it."""
+    return xform.url_domain(thing.url) or (thing.attrs or {}).get(xform.SOURCE_HOST_KEY)
+
+
+def _find_channel_by_id(session: Session, native_id: str,
+                        source_host: Optional[str]) -> Optional[Thing]:
+    """Locate an existing channel Thing by uploader/channel ID (#160).
+
+    The link some video extractors give us is an uploader/channel *ID* only (no URL) — vk,
+    twitchvod, etc. The design join is `video.uploader_id -> channel.native_id`, and it is
+    **extractor-agnostic**: the channel's own sub-extractor (e.g. `twitchvideos`) differs from
+    the video's (`twitchvod`) and is never carried in the video, so we match on the id — scoped
+    to `source_host` (the discovering video's site, `same_site`): native ids are only unique per
+    site, so a numeric vk id must never resolve to a twitch channel that happens to share it.
+
+    Matched on `native_id` (plus `attrs.kind='channel'`). This deliberately never hits a
+    channel *tab* (Videos/Shorts/Live): tabs are URL-keyed with `native_id=NULL` and only stash
+    the shared id in `attrs.channel_id`, so keying off `channel_id` could mis-link a video to a
+    tab. `native_id` matches the canonical channel (which keeps its id, e.g. twitchvideos/
+    vkuservideos) and a prior url-less stub, never a tab."""
+    candidates = session.exec(
+        select(Thing).where(Thing.native_id == native_id,
+                            Thing.attrs["kind"].astext == "channel")).all()
+    return next((c for c in candidates
+                 if xform.same_site(source_host, _chan_site(c))), None)
+
+
 def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     """Locate an existing thing matching `thing`'s identity: native key, then URL.
+
+    A url-less channel stub (an id-only uploader, #160) resolves by uploader/channel ID against
+    any existing channel (`_find_channel_by_id`, extractor-agnostic) so a video links to the
+    real channel container when it already exists, and repeated id-only references share one
+    node — rather than the extractor-scoped native key (which would never match the real
+    channel's own extractor).
 
     (`col == None` deliberately becomes SQL `IS NULL` here for stubs without an
     extractor_key — see the module docstring gotcha.)
     """
     if thing.native_id is not None:
+        if thing.url is None and xform.is_channel(thing):
+            return _find_channel_by_id(session, thing.native_id,
+                                       (thing.attrs or {}).get(xform.SOURCE_HOST_KEY))
         found = session.exec(
             select(Thing).where(Thing.backend == thing.backend,
                                 Thing.extractor_key == thing.extractor_key,
@@ -402,42 +446,150 @@ def _find_thing(session: Session, thing: Thing) -> Optional[Thing]:
     return None
 
 
-def _apply_backfill(session: Session, existing: Thing, incoming: Thing) -> None:
-    """Fill NULL fields on `existing` from `incoming` (#147), guarding the unique indexes.
+def _upsert_rel_edges(session: Session,
+                      edges: dict[tuple[uuid.UUID, uuid.UUID], bool]) -> None:
+    """Bulk-upsert (parent, child, channel) edges in one statement keyed on the (parent, child)
+    PK, *monotonically upgrading* channel on conflict (existing OR incoming): never downgrades,
+    idempotent on re-pull, and lets a later better-informed run raise a stale False->True.
+    """
+    if not edges:
+        return
+    stmt = pg_insert(Rel).values(
+        [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()])
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["parent", "child"],
+        set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
+    session.execute(stmt)
 
-    Both partial-unique indexes are guarded: if backfilling `native_id` (thing_native) or
-    `url` (thing_url) would collide with a different existing row, that one field is skipped.
-    A clash means two rows describe one video (one created url-first, one native-key-first);
-    true cross-row merge is out of 4.0 scope, so we converge later (Phase 2) and just avoid
-    the unique violation here.
+
+# Loser columns carried onto the survivor on a merge when the survivor still lacks them. The
+# identity fields (url/native_id/extractor_key/backend) are deliberately excluded: they arrive
+# from the fresh pull via the caller's null_backfill *after* the loser (which holds the clashing
+# unique value) is deleted, so that write can never collide. `bucket` is excluded too (immutable,
+# never NULL [A10]); `machine_rating` is excluded (computed on read, the column is unread).
+# `try_on` is excluded: it defaults to today at creation, so a NULL survivor try_on only ever
+# means *acquired* or *permafail-acked* (§2.5) — carrying the loser's date would resurrect both.
+_MERGE_CARRY_FIELDS = ("title", "channel", "thumbnail_url", "modified", "container",
+                       "human_rating", "best_oi", "last_success_dt", "last_failure_dt")
+
+
+def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
+    """Converge a duplicate `loser` row into `survivor` — two rows that turned out to be one
+    real thing (incremental key discovery: one created url-first, one native-key-first, now a
+    pull carries both keys). Re-points `loser`'s rel/run FKs onto `survivor`, carries over the
+    survivor's still-NULL state/display fields + attrs from `loser`, then deletes `loser`.
+
+    `survivor` is the row the pull already matched (`_find_thing`: native key preferred, else
+    URL), so external refs already point at it. Identity unique fields are NOT copied here — the
+    caller sets them from the pull after this deletes the loser holding the clashing value.
+    """
+    # Re-point loser's edges onto survivor: drop the old rows, then re-insert remapped, OR-ing
+    # `channel` on any edge survivor already has (the monotonic upsert _ingest_pull uses) and
+    # dropping a self-loop the rename would create. Delete-then-insert (not UPDATE) so an edge
+    # survivor already shares can't trip the (parent, child) PK.
+    rels = session.exec(
+        select(Rel).where((Rel.parent == loser.id) | (Rel.child == loser.id))).all()
+    edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
+    for rel in rels:
+        parent = survivor.id if rel.parent == loser.id else rel.parent
+        child = survivor.id if rel.child == loser.id else rel.child
+        session.delete(rel)
+        if parent != child:
+            key = (parent, child)
+            edges[key] = edges.get(key, False) or rel.channel
+    session.flush()   # remove the loser's edges before re-inserting the remapped ones
+    _upsert_rel_edges(session, edges)
+    # Runs have no unique key on thing_id, so a plain re-point is enough.
+    session.execute(sa.update(Run).where(Run.thing_id == loser.id)
+                    .values(thing_id=survivor.id))
+    # Capture what the survivor should inherit, then delete the loser *before* writing it so the
+    # unique values it held (and the FKs) are gone first (SQLAlchemy orders deletes after updates
+    # within a flush, which would otherwise reintroduce the collision).
+    carry = {f: getattr(loser, f) for f in _MERGE_CARRY_FIELDS
+             if getattr(survivor, f) is None and getattr(loser, f) is not None}
+    if survivor.last_success_dt is not None:
+        # last_failure_dt means "currently failing" ([C3-A], nulled on success) — don't stamp it
+        # onto a survivor whose own history says it last succeeded.
+        carry.pop("last_failure_dt", None)
+    loser_attrs = loser.attrs
+    session.delete(loser)
+    session.flush()
+    for field, value in carry.items():
+        setattr(survivor, field, value)
+    if "best_oi" in carry:
+        survivor.try_on = None   # acquired via the loser -> never re-fetch (§2.5)
+    if loser_attrs:   # union attrs, survivor's own keys win
+        survivor.attrs = {**loser_attrs, **(survivor.attrs or {})}
+
+
+def _apply_backfill(session: Session, existing: Thing,
+                    incoming: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Fill NULL fields on `existing` from `incoming` (#147), converging any duplicate row.
+
+    `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
+    `url` (thing_url) would collide with a *different* row, that row is a duplicate of the same
+    real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
+    apply it. Both partial-unique indexes flow through the one merge path — except a *channel*
+    clash, which is never converged away (see the guard below).
+
+    Returns the merges performed as `(loser_id, survivor_id)` pairs (normally empty), so a
+    caller holding ids to merged-away rows (`_fanout`'s remap) can re-resolve them.
     """
     fields = xform.null_backfill(existing, incoming)
+    clashes: dict[uuid.UUID, tuple[Thing, list[str]]] = {}
+
+    def _note(clash: Optional[Thing], field: str) -> None:
+        if clash is not None:
+            clashes.setdefault(clash.id, (clash, []))[1].append(field)
+
     if "native_id" in fields:
         ek = fields.get("extractor_key", existing.extractor_key)
-        clash = session.exec(
+        _note(session.exec(
             select(Thing).where(Thing.backend == existing.backend,
                                 Thing.extractor_key == ek,
                                 Thing.native_id == fields["native_id"],
-                                Thing.id != existing.id)).first()
-        if clash is not None:
-            fields.pop("native_id")
+                                Thing.id != existing.id)).first(), "native_id")
     if "url" in fields:
-        clash = session.exec(
+        _note(session.exec(
             select(Thing).where(Thing.url == fields["url"],
-                                Thing.id != existing.id)).first()
-        if clash is not None:
-            fields.pop("url")
+                                Thing.id != existing.id)).first(), "url")
+    merged: list[tuple[uuid.UUID, uuid.UUID]] = []
+    for clash, clash_fields in clashes.values():
+        # REVIEW-DEFERRED-4 #1: never converge a channel away. A sub-container that shares its
+        # channel's id (a self-pulling Videos/Shorts/Live tab, #46) would otherwise clash its id
+        # onto the channel and merge — deleting — it. Leave the channel (and its native_id, which
+        # ID-based video->channel linking relies on, #160) intact and drop the clashing identity
+        # backfill, so `existing` (the tab) stays URL-keyed. The pull otherwise succeeds.
+        #
+        # NB (#160): the earlier note here — "once ID-based linking lands, allow a channel->channel
+        # convergence: skip only when existing is not itself a channel" — turns out to be UNSAFE. A
+        # channel *tab* is itself tagged `kind='channel'` (it parents channel=True edges to its own
+        # videos), so `existing.kind == 'channel'` does NOT distinguish a canonical channel from a
+        # tab; keying off it would delete the real channel on a tab re-pull. So this guard stays
+        # blunt. The legitimate channel convergence — a url-less id-only stub meeting the real
+        # channel — is done elsewhere (`_converge_urlless_channel`), keyed on the URL-less shape a
+        # tab never has, so it can never delete a tab.
+        if xform.is_channel(clash):
+            for field in clash_fields:
+                fields.pop(field, None)
+            continue
+        _merge_things(session, existing, clash)
+        merged.append((clash.id, existing.id))
     for key, value in fields.items():
         setattr(existing, key, value)
+    return merged
 
 
 def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -> None:
     """Upsert the video's uploader container + a `channel=True` rel (the flat-pull omits it).
 
     Mirrors the Stage-1 channel fan-out, used when a `meta` job's full extract discovers the
-    uploader a flat playlist pull left out. No-op if the uploader has no URL.
+    uploader a flat playlist pull left out. No-op only if the uploader has neither URL nor id;
+    a url-less uploader (id only) still links via a native-id-keyed channel stub (#160), with
+    the video's extractor recorded as `source_extractor` provenance (never inherited as the
+    channel's extractor_key).
     """
-    stub = xform.thing_from_chan(chan)
+    stub = xform.thing_from_chan(chan, video.extractor_key, video.url)
     if stub is None:
         return
     existing = _find_thing(session, stub)
@@ -450,6 +602,39 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         chan_id = existing.id
     session.execute(pg_insert(Rel).values(
         parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
+
+
+def _converge_urlless_channel(session: Session,
+                              channel: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
+    """Absorb url-less id-only channel stubs into the real channel once it is pulled (#160).
+
+    A video whose uploader is exposed by ID only links to a native-id-keyed stub (`url=NULL`)
+    when the real channel isn't known yet. When the channel is later pulled directly it gains a
+    URL + native_id; this merges the earlier stubs into it (`_merge_things`), re-pointing each
+    stub's `channel=True` video edges onto the real channel and deleting the stub. Returns the
+    merges as `(loser_id, survivor_id)` pairs (for `_fanout`'s remap).
+
+    Only a stub from the *same site* is absorbed (`same_site` on its recorded source host vs the
+    channel URL's domain): native ids are only unique per site, so a same-id stub from another
+    site is a different channel and must stay. Safe by the URL-less discriminator: only a stub
+    with `url IS NULL` is ever the merge loser, so a channel *tab* (always URL-keyed, with a
+    URL) can never be selected and deleted. No-op unless `channel` is a real channel with both
+    a URL and a native_id.
+    """
+    if channel.native_id is None or channel.url is None:
+        return []
+    stubs = session.exec(
+        select(Thing).where(Thing.native_id == channel.native_id,
+                            Thing.url == None,  # noqa: E711  url-less stub only (never a tab)
+                            Thing.attrs["kind"].astext == "channel",
+                            Thing.id != channel.id)).all()
+    site = xform.url_domain(channel.url)
+    merged = []
+    for stub in stubs:
+        if xform.same_site(site, (stub.attrs or {}).get(xform.SOURCE_HOST_KEY)):
+            _merge_things(session, channel, stub)   # survivor = real channel, loser = stub
+            merged.append((stub.id, channel.id))
+    return merged
 
 
 def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing) -> None:
@@ -465,25 +650,65 @@ def _apply_video_metadata(session: Session, video: Thing, pull: models.PullThing
 
 def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
                  container: Thing, now: datetime.datetime) -> None:
-    """Ingest one Stage-1 container pull: record the run, fan out the thing/rel graph, and
-    classify+complete the container (the body of submit_result's Stage-1 path).
+    """Ingest one Stage-1 container pull: record the single run and fan out the (possibly
+    inlined) subtree (the body of submit_result's Stage-1 path).
 
-    `run`/`container` are the (already-fetched) in-progress run and its thing. Recurses into any
-    member that arrives with its own inlined `entries` — yt-dlp occasionally hands back a
-    sub-playlist already enumerated, and rather than dropping that and re-pulling it later, we
-    ingest it now as its own successful run with a scheduled future `try_on`, exactly as if it
-    had been pulled on its own (no extra yt-dlp extraction). Does not commit; the top-level
-    submit_result tail (`_finish`) does the single commit for the whole tree.
+    One yt-dlp call -> one `Run`: the `run`/`container` are the (already-fetched) in-progress run
+    and its thing. The run's `entries_hash` covers the *whole* inlined subtree (`subtree_hash`),
+    so a change anywhere below keeps the container's backoff hot. The fan-out (`_fanout`) recurses
+    into any member yt-dlp handed back already enumerated (inlined `entries`) to (re)establish its
+    grandchildren and re-schedule it as parent-fed — without creating further runs. Does not
+    commit; the submit_result tail (`_finish`) does the single commit for the whole tree.
+    """
+    run.entries_hash = xform.subtree_hash(pull)
+    run.playlist_count = xform.reconcile_count(pull)
+    _fanout(session, pull, container, now, parent_try_on=None)
+
+
+def _fanout(session: Session, pull: models.PullThing, container: Thing,
+            now: datetime.datetime,
+            parent_try_on: Optional[datetime.date]) -> dict[uuid.UUID, uuid.UUID]:
+    """Fan out one container pull into the thing/rel graph and (re)schedule the container.
+
+    `parent_try_on` is None for the claimed top-level container — normal Fibonacci backoff over
+    its run history — and the parent's scheduled date for an inlined sub-container (parent-fed:
+    no run of its own, `try_on = parent_try_on + SAFETY_MARGIN_DAYS` so the parent refreshes it
+    first). Recurses into inlined sub-containers, fanning out their grandchildren, but creates no
+    further runs (one yt-dlp call -> one run). Idempotent: re-fans an already-known sub-container
+    every time the parent inlines it. Does not commit.
+
+    Returns the loser->survivor id map of every duplicate-row merge performed in this subtree:
+    a backfill mid-loop can merge away a row an *earlier* member already resolved to, so ids
+    held across the loop (remap, nested, and the caller's own bookkeeping) must be re-resolved
+    through this map rather than used stale (a deleted id would FK-fail the rel insert).
     """
     # Stubs inherit the container's bucket (immutable, [A10]) and its propagated soft hints
     # (attrs.cookies/lpm_lib -> video/sub-container stubs, [A11]).
     graph = xform.pl_full2things(pull, bucket=container.bucket, parent_attrs=container.attrs)
 
-    run.entries_hash = xform.pl_hash(pull.entries)
-    run.playlist_count = xform.reconcile_count(pull)
+    merged: dict[uuid.UUID, uuid.UUID] = {}
+
+    def _resolve(thing_id: uuid.UUID) -> uuid.UUID:
+        while thing_id in merged:   # follow chains (a survivor can later lose a merge itself)
+            thing_id = merged[thing_id]
+        return thing_id
+
+    # An inlined sub-container (parent_try_on set) is URL-keyed, just like it was as a member of
+    # its parent (pl_full2things nulls every sub-container member's native_id). Its own pull node
+    # still carries the shared id, so null it on the container stub *after* the graph (and its
+    # edges, which used the id) are built — keeping the URL-keyed identity. Otherwise the id
+    # backfills onto the sub-container and, for a channel tab that shares the channel's id, the
+    # thing_native index (or the duplicate-row merge) collapses the tab back onto the channel. The
+    # id is kept as a soft channel_id hint. The top-level claimed container (parent_try_on None) is
+    # left alone — a directly-pulled channel/playlist keeps its own native_id — and so is a
+    # url-less sub (the id is its only key; demoting it would leave the row unfindable).
+    if (parent_try_on is not None and graph.playlist.native_id is not None
+            and graph.playlist.url is not None):
+        xform.merge_attr(container, "channel_id", graph.playlist.native_id)
+        graph.playlist.native_id = None
 
     # The recorded thing IS the container: backfill it, classify it, mark success.
-    _apply_backfill(session, container, graph.playlist)
+    merged.update(_apply_backfill(session, container, graph.playlist))
     container.container = True
     container.last_success_dt = now
     xform.clear_info_hint(container)   # "just a playlist": hint cleared after its own pull
@@ -491,6 +716,9 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
     # channel — tag the display hint (any channel=True edge it parents, idempotent).
     if any(r.parent == graph.playlist.id and r.channel for r in graph.rels):
         xform.merge_attr(container, "kind", "channel")
+        # Now that this channel has a URL + native_id, absorb any url-less id-only stub created
+        # for it before it was pulled (#160), re-pointing that stub's video edges onto it.
+        merged.update(_converge_urlless_channel(session, container))
 
     # graph.members is built one-per-entry in pull.entries order, so a member stub maps back to
     # its source node — used to spot a sub-container that came with inlined entries (below).
@@ -502,10 +730,10 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
         existing = _find_thing(session, stub)
         if existing is not None:
             thing = existing
-            _apply_backfill(session, existing, stub)
+            merged.update(_apply_backfill(session, existing, stub))
             xform.refresh_info_hint(existing, (stub.attrs or {}).get(xform.INFO_JSON_KEY))
             # Carry a freshly-discovered channel hint onto a pre-existing container.
-            if (stub.attrs or {}).get("kind") == "channel":
+            if xform.is_channel(stub):
                 xform.merge_attr(existing, "kind", "channel")
         else:
             thing = stub
@@ -516,51 +744,64 @@ def _ingest_pull(session: Session, run: Run, pull: models.PullThing,
         if (thing.container is False and thing.last_success_dt is None
                 and xform.enough_to_rate(thing)):
             thing.last_success_dt = now
-        # A sub-container yt-dlp handed back already enumerated (inlined `entries`): ingest it now
-        # as its own successful run (recursion below) instead of re-pulling it later. Only while
-        # it is still an unpulled stub (last_success_dt NULL), and never re-typing a known leaf
-        # (the container switch guard). A flat sub-playlist pointer (no entries, the normal case)
-        # falls through and is pulled on its own schedule.
+        # A sub-container yt-dlp handed back already enumerated (inlined `entries`): re-fan it out
+        # now as part of this single call (recursion below) so its grandchildren are (re)established
+        # and it is rescheduled parent-fed — every time the parent inlines it (idempotent). Never
+        # re-type a known leaf (the container-switch guard); the self-guard avoids recursing into a
+        # member that resolved to the container itself. A flat sub-playlist pointer (no entries, the
+        # normal case) falls through and self-schedules.
         node = node_by_stub.get(stub.id)
         if (node is not None and node.container is True and node.entries
-                and thing.last_success_dt is None
+                and thing.id != container.id
                 and not xform.container_switch(thing.container, True)):
             nested.append((thing, node))
         remap[stub.id] = thing.id
     session.flush()  # persist new stubs so the rel FKs resolve
 
-    # Bulk upsert the edges in one statement keyed on the (parent, child) PK. On conflict we
-    # *monotonically upgrade* channel (existing OR incoming): never downgrades, idempotent on
-    # re-pull, and lets a later better-informed run raise a stale False->True — e.g. a
-    # sub-container first seen as channel=False membership becomes channel=True once it is
-    # pulled itself and reveals the parent as its owner.
-    #
-    # graph.rels has fresh, distinct child ids, but remap can collapse distinct stubs onto the
-    # same thing id (e.g. a playlist listing the same video twice), producing duplicate
-    # (parent, child) pairs after remap. Postgres rejects a single ON CONFLICT statement that
-    # proposes the same conflict key twice (CardinalityViolation), so merge duplicates here,
-    # OR-ing channel (the same monotonic-upgrade rule as the on-conflict below).
+    # Build the edge set for the monotonic bulk upsert (`_upsert_rel_edges`). graph.rels has
+    # fresh, distinct child ids, but remap can collapse distinct stubs onto the same thing id
+    # (e.g. a playlist listing the same video twice), producing duplicate (parent, child) pairs
+    # after remap. Postgres rejects a single ON CONFLICT statement that proposes the same conflict
+    # key twice (CardinalityViolation), so merge duplicates here, OR-ing channel (the same
+    # monotonic-upgrade rule the upsert applies across pulls).
     edges: dict[tuple[uuid.UUID, uuid.UUID], bool] = {}
     for rel in graph.rels:
-        key = (remap[rel.parent], remap[rel.child])
+        # remap entries recorded before a mid-loop merge can point at a deleted loser row —
+        # resolve through the merge map so the insert never references a dead id.
+        key = (_resolve(remap[rel.parent]), _resolve(remap[rel.child]))
+        if key[0] == key[1]:   # never a self-edge (a member that resolved to the container)
+            continue
         edges[key] = edges.get(key, False) or rel.channel
-    rows = [{"parent": p, "child": c, "channel": ch} for (p, c), ch in edges.items()]
-    if rows:
-        stmt = pg_insert(Rel).values(rows)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["parent", "child"],
-            set_={"channel": Rel.__table__.c.channel.op("OR")(stmt.excluded.channel)})
-        session.execute(stmt)
+    _upsert_rel_edges(session, edges)
 
-    _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+    # Schedule: the claimed top-level container backs off normally (§4.4); an inlined,
+    # parent-fed sub-container gets a long safety-net date keyed off its parent so the parent
+    # re-feeds it first and it self-pulls only if the parent goes quiet (hybrid scheduling).
+    if parent_try_on is None:
+        _set_try_on(session, container)   # successful container run -> next backoff date (§4.4)
+        sched = container.try_on
+    else:
+        sched = parent_try_on + SAFETY_MARGIN_DAYS
+        # A user permafail ack (try_on=NULL, §2.5) sticks: the sub stays parent-fed (its content
+        # is still re-fanned below) but is never rescheduled to self-pull.
+        if container.try_on is not None:
+            container.try_on = sched
 
-    # Inlined sub-playlists: record each as its own successful run (entries verbatim in
-    # data_json) and recurse so its members fan out and it gets a scheduled future try_on.
+    # Inlined sub-playlists: re-fan out (no run — they ride the parent's single call), passing
+    # this container's scheduled date so each is parent-fed off it (`sched`, not `try_on`: an
+    # acked sub's NULL try_on must not flip its children into the top-level backoff branch).
+    # A sub merged away since it was queued (by a later member's backfill, or by a sibling's
+    # recursion) is re-resolved to its survivor — or skipped if it collapsed into the container
+    # or its survivor is a known leaf.
     for sub_thing, node in nested:
-        sub_run = Run(thing_id=sub_thing.id, worker=run.worker,
-                      starttime=now, endtime=now, success=True, data_json=node.info_json)
-        session.add(sub_run)
-        _ingest_pull(session, sub_run, node, sub_thing, now)
+        sub_id = _resolve(sub_thing.id)
+        if sub_id != sub_thing.id:
+            sub_thing = session.get(Thing, sub_id)
+            if (sub_thing is None or sub_id == container.id
+                    or xform.container_switch(sub_thing.container, True)):
+                continue
+        merged.update(_fanout(session, node, sub_thing, now, parent_try_on=sched))
+    return merged
 
 
 @app.post("/jobs/claim", response_model=JobClaim,
@@ -583,9 +824,17 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     rating = _effective_rating_expr(default=0.0)
     today = _today()
     # Stage-1 pull: a container or an unknown thing (`container` is True/NULL), grade >= C
-    # band, due, not already succeeded today.
+    # band, due, not already succeeded today, and *runnable* — it has a URL to pull OR a
+    # load-info hint (`attrs.info_json`) the worker can hand to yt-dlp. A url-less channel stub
+    # (an id-only uploader linked via #160) has neither, so it's a pure graph node that is never
+    # dispatched; a container that only carries a hint still is.
+    # `.astext` (`->>`) maps a json-null hint — what clear_info_hint leaves behind — and a
+    # missing key both to SQL NULL; bare `->` would count a cleared hint as still runnable.
+    runnable = or_(Thing.url.isnot(None),
+                   Thing.attrs[xform.INFO_JSON_KEY].astext.isnot(None))
     stage1_branch = sa.and_(
-        Thing.container.isnot(False), rating >= _PLAYLIST_FLOOR, Thing.try_on <= today,
+        Thing.container.isnot(False), runnable, rating >= _PLAYLIST_FLOOR,
+        Thing.try_on <= today,
         or_(Thing.last_success_dt == None,  # noqa: E711  (SQL IS NULL)
             func.date(Thing.last_success_dt) < today))
     # Stage-2 video download: a leaf (container False), grade >= B band, never acquired, due.

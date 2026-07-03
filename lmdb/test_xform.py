@@ -92,7 +92,69 @@ def test_pl_full2things_no_channel_url():
         vid.channel = models.UlChan()  # ...nor any entry
     g = xform.pl_full2things(pl, bucket="b")
     assert g.channels == []
-    assert not any(r.channel for r in g.rels)   # no uploader edges without a channel url
+    assert not any(r.channel for r in g.rels)   # no uploader edges without id or url
+
+
+def test_thing_from_chan_url_less():
+    # #160: an uploader with only an id (no URL) still yields a channel stub, keyed by native id,
+    # extractor_key left NULL, the discovering extractor recorded as provenance.
+    t = xform.thing_from_chan(models.UlChan(native_id="UCxyz", title="Chan X"),
+                              source_extractor="somesite")
+    assert t is not None
+    assert t.container is True
+    assert t.url is None and t.channel is None
+    assert t.native_id == "UCxyz"
+    assert t.extractor_key is None
+    assert t.attrs == {"kind": "channel", "channel_id": "UCxyz",
+                       "source_extractor": "somesite"}
+    # neither url nor id -> nothing to key on
+    assert xform.thing_from_chan(models.UlChan()) is None
+
+
+def test_thing_from_chan_url_keyed_unchanged():
+    # URL present -> keyed by URL, native_id nulled (kept as channel_id hint), no provenance.
+    t = xform.thing_from_chan(models.UlChan(url="http://e/c", native_id="UC1", title="C"),
+                              source_extractor="somesite", source_url="http://e/v/1")
+    assert t.url == "http://e/c" and t.native_id is None and t.channel == "http://e/c"
+    assert t.attrs == {"kind": "channel", "channel_id": "UC1"}
+
+
+def test_thing_from_chan_url_less_records_source_host():
+    # The url-less shape records the discovering video's site: native ids are only unique per
+    # site, so the id-join and the stub->channel merge are scoped to it (`same_site`).
+    t = xform.thing_from_chan(models.UlChan(native_id="12345", title="U"),
+                              source_extractor="vk", source_url="https://www.vk.com/video1")
+    assert t.attrs[xform.SOURCE_HOST_KEY] == "vk.com"
+    # unknowable source -> no host recorded (stays compatible with anything)
+    t = xform.thing_from_chan(models.UlChan(native_id="12345", title="U"), "vk")
+    assert xform.SOURCE_HOST_KEY not in t.attrs
+
+
+def test_url_domain_and_same_site():
+    assert xform.url_domain("https://www.twitch.tv/videos/1?t=1") == "twitch.tv"
+    assert xform.url_domain("http://m.youtube.com/watch") == "youtube.com"   # m. is not a site
+    assert xform.url_domain("http://vk.com:8080/v") == "vk.com"
+    assert xform.url_domain(None) is None and xform.url_domain("") is None
+    assert xform.same_site("twitch.tv", "twitch.tv")
+    assert not xform.same_site("vk.com", "twitch.tv")
+    # an unknown side is compatible (pre-domain behavior; old rows converge as re-touched)
+    assert xform.same_site(None, "twitch.tv") and xform.same_site("vk.com", None)
+
+
+def test_pl_full2things_url_less_uploader_links_orphans():
+    # #160: a curated playlist whose entries expose only an uploader id (no URL) still links each
+    # video to a channel thing (keyed by that id), one node per distinct id, via channel=True edges.
+    pl = _pl(2)
+    pl.channel = models.UlChan(native_id="pl1", url="http://example/pl/owner")  # playlist's own
+    for vid in pl.entries:
+        vid.channel = models.UlChan(native_id="UCorphan", title="Orphan")  # url-less, shared
+    g = xform.pl_full2things(pl, bucket="b")
+    assert len(g.channels) == 1                              # one node for the shared id
+    chan = g.channels[0]
+    assert chan.native_id == "UCorphan" and chan.url is None
+    assert chan.attrs["kind"] == "channel" and chan.attrs["source_extractor"] == "youtube"
+    chan_edges = [r for r in g.rels if r.parent == chan.id and r.channel]
+    assert len(chan_edges) == 2                              # both videos linked to the channel
 
 
 def test_pl_hash_order_independent():
@@ -115,6 +177,18 @@ def test_reconcile_count_mismatch_warns():
     with pytest.warns(UserWarning):
         count = xform.reconcile_count(pl)
     assert count == 5  # provided wins
+
+
+def test_reconcile_count_ignores_subcontainers(recwarn):
+    # #167: a channel pull mixing leaf videos + sub-container tabs; yt-dlp's playlist_count is
+    # the video count, so counting leaves alone matches and the tabs must not trigger a
+    # spurious "doesn't match" warning. Records the provided (video) count.
+    pl = _pl(3)                         # 3 leaf videos
+    pl.entries.append(_sub())           # + one sub-container tab
+    pl.playlist_count = 3               # yt-dlp's video count (excludes the tab)
+    count = xform.reconcile_count(pl)
+    assert count == 3
+    assert not recwarn.list           # no spurious mismatch warning
 
 
 def test_pl_full2things_does_not_set_last_success():
@@ -170,6 +244,40 @@ def test_pl_full2things_owned_subcontainer_is_channel():
     assert g.channels == []           # parent is its own owner -> no separate node
 
 
+def test_pl_full2things_channel_autopopulates_video_channel():
+    # #156: a channel pull (parent IS its own uploader) whose flat video entry omits the
+    # uploader -> inherit the channel's identity so the video links channel=True (to the
+    # container, no separate node) and is rate-able without a Stage-2 meta pull.
+    chan = models.UlChan(native_id="chan1", title="Chan", url="http://example/chan1")
+    pl = models.PullThing(url="http://example/chan1", native_id="chan1", title="Chan",
+                          extractor_key="youtube", channel=chan,
+                          entries=[models.PullThing(
+                              native_id="v1", url="http://example/v/v1", title="V1",
+                              extractor_key="youtube", channel=models.UlChan())])  # no uploader
+    g = xform.pl_full2things(pl, bucket="b")
+    vid = next(m for m in g.members if m.container is False)
+    assert vid.channel == "http://example/chan1"      # inherited the channel URL
+    assert xform.enough_to_rate(vid)                  # now rate-able -> no meta pull
+    vid_edges = [r for r in g.rels if r.child == vid.id]
+    assert len(vid_edges) == 1
+    assert vid_edges[0].parent == g.playlist.id and vid_edges[0].channel is True
+    assert g.channels == []                           # parent is the uploader -> no owner node
+
+
+def test_pl_full2things_curated_playlist_does_not_autopopulate():
+    # #156 must not fire for a curated playlist (parent node is NOT the owner): an entry with
+    # no uploader stays channel-less (a channel=False membership edge, no channel URL) and is
+    # resolved later by its own meta pull.
+    pl = _pl(0)                       # curated playlist owned by up1 (!= the pl1 node)
+    pl.entries = [models.PullThing(native_id="v1", url="http://example/v/v1", title="V1",
+                                   extractor_key="youtube", channel=models.UlChan())]
+    g = xform.pl_full2things(pl, bucket="b")
+    vid = next(m for m in g.members if m.container is False)
+    assert vid.channel is None
+    vid_edges = [r for r in g.rels if r.child == vid.id]
+    assert len(vid_edges) == 1 and vid_edges[0].channel is False
+
+
 def test_pl_full2things_unknown_owner_subcontainer_is_membership():
     # No-guess: a sub-container with no discernible owner -> channel=False membership (its
     # ownership edge is established later, when it is pulled itself), and no owner node.
@@ -182,6 +290,102 @@ def test_pl_full2things_unknown_owner_subcontainer_is_membership():
     assert len(sub_edges) == 1
     assert sub_edges[0].parent == g.playlist.id and sub_edges[0].channel is False
     assert all(c.channel != "http://example/pl/sub" for c in g.channels)  # no node for the sub
+
+
+def _chan_with_tabs(parent_native="UC", parent_ek="youtubetab",
+                    parent_url="http://yt/@chan/featured"):
+    """A channel pull whose members are its Videos/Shorts/Live tabs -- each carrying the same
+    `id` (channel_id) as the others (and the parent) but a distinct URL."""
+    chan = models.UlChan(native_id="UC", title="Chan", url="http://yt/@chan")
+    tab = lambda name: models.PullThing(
+        native_id="UC", extractor_key="youtubetab", container=True,
+        url=f"http://yt/@chan/{name}", title=f"Chan - {name}", channel=chan)
+    return models.PullThing(
+        url=parent_url, native_id=parent_native, extractor_key=parent_ek, title="Chan",
+        channel=chan, container=True,
+        entries=[tab("videos"), tab("shorts"), tab("streams")])
+
+
+def test_subcontainer_members_url_keyed():
+    # Every sub-container member is URL-keyed: its native_id is nulled (kept as a channel_id hint)
+    # so a channel's tabs -- which all share the channel id -- stay distinct things rather than
+    # collapsing onto the parent/each other, while the parent keeps its own id.
+    g = xform.pl_full2things(_chan_with_tabs(), bucket="b")
+    assert g.playlist.native_id == "UC"                       # parent keeps the channel id
+    assert all(m.native_id is None for m in g.members)        # tabs URL-keyed
+    assert all((m.attrs or {}).get("channel_id") == "UC" for m in g.members)
+    assert len({m.url for m in g.members}) == 3               # three distinct things
+    # the parent IS the tabs' uploader -> one channel=True edge each, no separate owner node
+    for m in g.members:
+        edges = [r for r in g.rels if r.child == m.id]
+        assert len(edges) == 1 and edges[0].parent == g.playlist.id and edges[0].channel is True
+    assert g.channels == []
+
+
+def test_subcontainer_members_url_keyed_when_parent_has_no_id():
+    # The rule is unconditional and needs no collision detection: even with no parent native_id,
+    # sub-container members are URL-keyed.
+    pl = _chan_with_tabs(parent_native=None, parent_ek=None, parent_url="http://yt/@chan")
+    g = xform.pl_full2things(pl, bucket="b")
+    assert all(m.native_id is None for m in g.members)
+    assert len({m.url for m in g.members}) == 3
+
+
+def test_url_less_subcontainer_keeps_native_id():
+    # A sub-container member with an id but no URL keeps its native_id: it is the row's only
+    # key, so demoting it to a channel_id hint would leave the stub unfindable (both unique
+    # keys NULL) and mint a duplicate row on every re-pull.
+    pl = _pl(0)
+    pl.entries = [_sub(native_id="subX", url=None)]
+    g = xform.pl_full2things(pl, bucket="b")
+    sub = next(m for m in g.members if m.container)
+    assert sub.native_id == "subX"
+    assert "channel_id" not in (sub.attrs or {})
+
+
+def test_distinct_subcontainers_also_url_keyed():
+    # Blanket rule: sub-containers with genuinely distinct ids are URL-keyed too (id kept as a
+    # channel_id hint). A cross-URL id match converges later via the dedup merge, not by id-collapse
+    # here -- consistent with keying containers by webpage_url.
+    pl = _pl(0)
+    pl.entries = [_sub(native_id="subA", url="http://example/pl/a"),
+                  _sub(native_id="subB", url="http://example/pl/b")]
+    g = xform.pl_full2things(pl, bucket="b")
+    subs = [m for m in g.members if m.container]
+    assert all(m.native_id is None for m in subs)
+    assert {(m.attrs or {}).get("channel_id") for m in subs} == {"subA", "subB"}
+
+
+def test_pl_hash_tabs_with_shared_id_are_distinct_keys():
+    # A channel's tabs all share the channel's native_id but have distinct URLs; the container
+    # hash key is URL-first (matching the URL-keyed sub-container convention), so each tab is
+    # its own membership entry and a tab appearing/vanishing — even an empty one — flips the
+    # hash. An id-first key collapsed every tab to one entry ("pl:UC").
+    def tab(name):
+        return models.PullThing(native_id="UC", url=f"http://yt/@c/{name}",
+                                extractor_key="youtubetab", container=True)
+    two = [tab("videos"), tab("shorts")]
+    assert xform.pl_hash(two) != xform.pl_hash([tab("videos")])
+    assert xform.pl_hash(two) != xform.pl_hash(two + [tab("streams")])
+
+
+def test_subtree_hash_equals_pl_hash_for_flat_pull():
+    pl = _pl(3)
+    assert xform.subtree_hash(pl) == xform.pl_hash(pl.entries)
+
+
+def test_subtree_hash_tracks_grandchildren():
+    # A parent that inlines a sub-container tracks changes below its direct members: adding a
+    # grandchild video flips subtree_hash even though the direct membership is unchanged.
+    sub = _sub(native_id="tabV", url="http://yt/@chan/videos")
+    sub.entries = [_vid(0), _vid(1)]
+    parent = models.PullThing(url="http://yt/@chan", native_id="UC", extractor_key="youtubetab",
+                              container=True, entries=[sub])
+    before = xform.subtree_hash(parent)
+    direct_before = xform.pl_hash(parent.entries)     # direct membership = [sub]
+    sub.entries.append(_vid(2))                       # a new grandchild video
+    assert xform.subtree_hash(parent) != before       # subtree change is detected
+    assert xform.pl_hash(parent.entries) == direct_before  # ...while direct membership is unchanged
 
 
 # --- try_on backoff (Task 1.4): pure math ----------------------------------------------

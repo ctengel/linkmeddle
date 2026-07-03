@@ -4,6 +4,7 @@ import statistics
 import datetime
 from typing import NamedTuple, Optional
 import hashlib
+import urllib.parse
 import warnings
 from . import models
 
@@ -28,11 +29,14 @@ def next_fib(existing: int | float | None, up: bool) -> int:
 def entry2text(entry: models.PullThing) -> str:
     """Change a pl member into a single unique string.
 
-    Sub-containers (container=True) get a 'pl:' prefix (keyed by native_id, else url) so a
-    video and a sub-playlist sharing an id can never collide; videos key by native_id.
+    Sub-containers (container=True) get a 'pl:' prefix so a video and a sub-playlist sharing an
+    id can never collide, and key by URL first — matching the URL-keyed sub-container convention:
+    a channel's tabs all share the channel's native_id, so an id-first key would collapse them to
+    one membership entry and a tab appearing/vanishing would not flip change-detection. Videos
+    key by native_id.
     """
     if entry.container is True:
-        return f"pl:{entry.native_id or entry.url or ''}"
+        return f"pl:{entry.url or entry.native_id or ''}"
     # A leaf/unknown member keys by native_id, falling back to url (then '') so a member with no
     # yt-dlp id never yields None — sorted()/join() in pl2txt require comparable, joinable strings.
     return entry.native_id or entry.url or ""
@@ -53,6 +57,22 @@ def pl_hash(entries: list[models.PullThing]) -> bytes:
     hash_object = hashlib.sha256()
     hash_object.update(pl2txt(entries).encode())
     return hash_object.digest()
+
+def _subtree_entries(entries: list[models.PullThing]):
+    """Flatten a pull's membership through inlined sub-containers (depth-first)."""
+    for entry in entries:
+        yield entry
+        if entry.entries:
+            yield from _subtree_entries(entry.entries)
+
+def subtree_hash(pull: models.PullThing) -> bytes:
+    """Hash the full inlined subtree (every descendant node), so a change anywhere below a
+    container — not just in its direct members — flips the change-detection signal (`_run_stats`
+    `different`). This keeps a parent that inlines its sub-playlists "hot" enough to track its
+    fastest-changing descendant (hybrid scheduling). Equals `pl_hash(pull.entries)` for a flat
+    pull (no inlined sub-containers), so leaf-only playlists are unaffected.
+    """
+    return pl_hash(list(_subtree_entries(pull.entries)))
 
 # --- V4 layer: DLP/LM-native -> thing/rel/run ------------------------------------------
 # These convert the (reused) DLP boundary models into the frozen thing/rel/run schema
@@ -78,31 +98,80 @@ def thing_from_node(node: models.PullThing) -> models.Thing:
                         modified=node.modified)
 
 
-def thing_from_chan(chan: models.UlChan) -> Optional[models.Thing]:
-    """Build a channel `thing` from an uploader/channel descriptor, or None if no URL.
+def thing_from_chan(chan: models.UlChan,
+                    source_extractor: Optional[str] = None,
+                    source_url: Optional[str] = None) -> Optional[models.Thing]:
+    """Build a channel `thing` from an uploader/channel descriptor, or None if it has neither
+    a URL nor a native id (nothing to key on).
 
     A channel is just a container (container=True); its channel-ness rides the soft
     `attrs.kind='channel'` display hint plus the `channel=True` rel edges pointing at it.
     extractor_key is left None — yt-dlp does not provide the channel's sub-extractor in a
     parent info dict; it is filled in only when a job runs directly on the channel URL.
+
+    Two shapes (#160):
+    - URL present -> the channel is keyed by its URL (native_id nulled, kept as an
+      `attrs.channel_id` hint), following the container-keyed-by-webpage_url convention.
+    - URL absent but native_id present -> a *url-less* channel keyed by its native id, so a
+      video whose extractor only exposes an uploader/channel ID (no URL) is still linked to a
+      channel Thing (the V3 regression this fixes). It is a pure graph node the worker can't run
+      (no URL to pull); the dispatch (`claim_job` stage1_branch) excludes url-less containers, so
+      it is never claimed. `source_extractor` (the discovering video's extractor) is recorded as
+      a provenance hint since extractor_key stays NULL — we never inherit the video's extractor
+      (usually a different sub-extractor). `source_url` (the discovering video's URL) supplies
+      the stub's site (`attrs.source_host`): native ids are only unique per site, so the
+      id-join and the stub->channel merge are scoped to it (`same_site`).
     """
-    if not chan.url:
+    if not chan.url and chan.native_id is None:
         return None
     attrs: dict = {'kind': 'channel'}
     if chan.native_id is not None:
-        attrs['channel_id'] = chan.native_id
-    return models.Thing(url=chan.url,
+        attrs['channel_id'] = chan.native_id   # kept as a soft hint in both shapes
+    if chan.url:
+        url, native_id, channel = chan.url, None, chan.url
+    else:
+        url, native_id, channel = None, chan.native_id, None
+        if source_extractor is not None:
+            attrs['source_extractor'] = source_extractor
+        if (host := url_domain(source_url)) is not None:
+            attrs[SOURCE_HOST_KEY] = host
+    return models.Thing(url=url,
                         extractor_key=None,
-                        native_id=None,
+                        native_id=native_id,
                         container=True,
                         title=chan.title,
-                        channel=chan.url,
+                        channel=channel,
                         attrs=attrs)
 
 
 def merge_attr(thing: models.Thing, key: str, value) -> None:
     """Set one key on a thing's `attrs` JSONB, preserving the rest (handles attrs=None)."""
     thing.attrs = {**(thing.attrs or {}), key: value}
+
+
+def is_channel(thing: models.Thing) -> bool:
+    """Whether a thing carries the soft `attrs.kind='channel'` display hint (handles attrs=None)."""
+    return (thing.attrs or {}).get("kind") == "channel"
+
+
+SOURCE_HOST_KEY = "source_host"   # attrs key: the site a url-less channel stub's id came from
+
+
+def url_domain(url: Optional[str]) -> Optional[str]:
+    """The site identity of a URL: its lowercased host, with a leading `www.`/`m.` label
+    stripped (the mobile/desktop split is not a site boundary). None when unknowable."""
+    host = (urllib.parse.urlsplit(url).hostname or "") if url else ""
+    for label in ("www.", "m."):
+        if host.startswith(label):
+            host = host[len(label):]
+    return host or None
+
+
+def same_site(a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two `url_domain` results are compatible for the #160 uploader-id join: native
+    ids are only unique per site, so a match requires the same domain — but an unknown side
+    stays compatible (the pre-domain behavior; old rows converge as they are re-touched)."""
+    return a is None or b is None or a == b
 
 
 # yt-dlp's two flat url-result `_type`s: a bare pointer (no media/formats). Any other shape
@@ -228,31 +297,57 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
     pl_thing.bucket = bucket
     members: list[models.Thing] = []
     rels: list[models.Rel] = []
-    # One channel node per uploader URL, shared across the container + its videos.
-    channels_by_url: dict[str, models.Thing] = {}
+    # One channel node per uploader, shared across the container + its videos. Keyed by URL
+    # when known, else by native id (a url-less uploader, #160) so the same id maps to one node.
+    channels_by_key: dict[str, models.Thing] = {}
 
-    def channel_for(chan: models.UlChan) -> Optional[models.Thing]:
-        if not chan.url:
+    def channel_for(chan: models.UlChan, source_extractor: Optional[str] = None,
+                    source_url: Optional[str] = None) -> Optional[models.Thing]:
+        key = chan.url or (f"id:{chan.native_id}" if chan.native_id else None)
+        if key is None:
             return None
-        existing = channels_by_url.get(chan.url)
+        existing = channels_by_key.get(key)
         if existing is None:
-            existing = thing_from_chan(chan)
+            existing = thing_from_chan(chan, source_extractor, source_url)
+            if existing is None:
+                return None
             existing.bucket = bucket
-            channels_by_url[chan.url] = existing
+            channels_by_key[key] = existing
         return existing
 
     # The container's own uploader -> a channel=True edge, but only for a *curated playlist*
     # owned by someone else; when the container IS its own uploader (a channel) skip the
-    # self-edge.
-    if pl.channel.url and not _same_identity(pl_thing, pl.channel):
-        pl_chan = channel_for(pl.channel)
+    # self-edge. A url-less owner (id only) still links (#160).
+    pull_is_channel = _same_identity(pl_thing, pl.channel)   # container IS its own uploader
+    if (pl.channel.url or pl.channel.native_id) and not pull_is_channel:
+        pl_chan = channel_for(pl.channel, pl.extractor_key, pl.url)
         if pl_chan is not None:
             rels.append(models.Rel(parent=pl_chan.id, child=pl_thing.id, channel=True))
 
     for vid in pl.entries:
         vid_thing = thing_from_node(vid)   # container carried from vid.container (True for subs)
         vid_thing.bucket = bucket
+        # #156: when pulling a channel, its flat video entries often omit the uploader. Inherit
+        # the channel's own identity onto such a leaf so it links channel=True (below) and is
+        # rate-able (enough_to_rate needs a channel URL) without a separate Stage-2 meta pull.
+        vid_owner = vid.channel
+        if (pull_is_channel and vid.container is False
+                and not vid.channel.url and not vid.channel.native_id):
+            vid_owner = pl.channel
+            vid_thing.channel = pl_thing.channel or pl_thing.url
+        # Every sub-container member is URL-keyed: null its native_id so `_find_thing` keys it by
+        # URL (a distinct thing, never collapsed onto the parent/a sibling). This matches the
+        # convention that containers are keyed by webpage_url — a channel's Videos/Shorts/Live
+        # tabs all share the channel's `id` but have distinct URLs, and a curated sub-playlist that
+        # recurs under two URLs converges later via the dedup merge, not by id-collapse here. The
+        # original id is kept as a soft `channel_id` hint. A url-less member keeps its native_id
+        # — its only key; demoting it would leave the stub unfindable, minting a duplicate row
+        # on every re-pull.
         attrs = dict(hints) if hints is not None else {}
+        if vid.container is True and vid.url is not None:
+            vid_thing.native_id = None
+            if vid.native_id is not None:
+                attrs["channel_id"] = vid.native_id
         if vid.info_json is not None:
             # Load-info hint (§2.1); the raw dict is kept verbatim — a sub-container's inlined
             # entries ride along but never land on a stub, since refresh_info_hint no-ops for
@@ -268,33 +363,37 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
         # uploader edge, above); the monotonic rel upsert upgrades a stale False->True then.
         # So curated nesting (a container listing someone else's sub-playlist) records a
         # channel=False membership edge here, exactly like a curated video.
-        if _same_identity(pl_thing, vid.channel):
+        if _same_identity(pl_thing, vid_owner):
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=True))
         else:
             rels.append(models.Rel(parent=pl_thing.id, child=vid_thing.id, channel=False))
-            vid_chan = channel_for(vid.channel)
+            vid_chan = channel_for(vid_owner, vid.extractor_key, vid.url)
             if vid_chan is not None:
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
     return ThingGraph(playlist=pl_thing, members=members,
-                      channels=list(channels_by_url.values()), rels=rels)
+                      channels=list(channels_by_key.values()), rels=rels)
 
 
 def reconcile_count(pl: models.PullThing) -> int:
-    """Reconcile a container's reported `playlist_count` against its actual members.
+    """Reconcile a container's reported `playlist_count` against its leaf membership.
 
-    Members = all `entries` (leaf videos + sub-containers, so a channel's count covers both).
-    Returns the count to record (provided count wins on mismatch), warning on disagreement.
-    Used by the Stage-1 ingest endpoint.
+    Counts only *leaf* members (`container is not True`), never sub-containers (a channel's
+    Videos/Shorts/Live tabs, nested playlists): yt-dlp's `playlist_count` for a channel is a
+    *video* count, so counting all `entries` understates membership and warns spuriously when
+    tabs are present (#167). Returns the count to record (provided count wins when present);
+    only reconciles/warns against the provided count when this level is pure leaves — with
+    sub-containers present the two aren't comparable (this level's tabs vs. the aggregate video
+    count). Used by the Stage-1 ingest endpoint.
     """
-    count = len(pl.entries)
+    leaves = sum(1 for e in pl.entries if e.container is not True)
     if pl.playlist_count is None:
-        warnings.warn(f'No provided playlist_count; leveraging length of {count}.')
-    elif count != pl.playlist_count:
+        warnings.warn(f'No provided playlist_count; leveraging length of {leaves}.')
+        return leaves
+    if leaves == len(pl.entries) and leaves != pl.playlist_count:  # pure leaves -> comparable
         warnings.warn(f"Provided playlist count {pl.playlist_count} doesn't match actual "
-                      f"length of {count}; will record provided.")
-        count = pl.playlist_count
-    return count
+                      f"length of {leaves}; will record provided.")
+    return pl.playlist_count
 
 
 # Fields backfilled onto an existing thing from a fresher pull when they are still NULL
