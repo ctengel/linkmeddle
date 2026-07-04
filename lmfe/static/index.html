@@ -538,6 +538,7 @@ function renderVideoHTML(page) {
 
 function renderThingInfoHTML(thing, isContainer) {
   const isFailing = isThingFailing(thing);
+  const acked = !thing.try_on;  // permafail acknowledged (same convention as loadNeedToFix)
   const statusLines = [];
   if (thing.try_on) statusLines.push(`Next run: ${thing.try_on}`);
   if (thing.last_success_dt) statusLines.push(`Last success: ${fmtDt(thing.last_success_dt)}`);
@@ -553,13 +554,15 @@ function renderThingInfoHTML(thing, isContainer) {
       ${thing.channel ? `Channel: ${escapeHtml(thing.channel)}<br/>` : ""}
       ${thing.url ? `URL: ${isHttpUrl(thing.url) ? `<a href="${escapeAttr(thing.url)}" target="_blank">${escapeHtml(thing.url)}</a>` : escapeHtml(thing.url)}<br/>` : ""}
       Library: ${thing.lpm_lib ? escapeHtml(thing.lpm_lib) : "—"}<br/>
+      Cookies: ${thing.cookies === true ? "Always" : "Auto"}<br/>
       ${statusLines.length ? statusLines.join("<br/>") : ""}
     </div>
     ${renderRatingWidget(thing)}
     <div style="margin-top:8px;">
-      ${thing.try_on ? `<button onclick="rescheduleToday('${thing.id}')">Run Today</button>` : ""}
+      <button onclick="rescheduleToday('${thing.id}')">${acked ? "Retry" : "Run Today"}</button>
       ${isFailing ? `<button onclick="permafailAck('${thing.id}')">Permafail Ack</button>` : ""}
       <button onclick="setLpmLib('${thing.id}')">Edit Library</button>
+      <button onclick="toggleCookies('${thing.id}', ${thing.cookies === true})">Cookies: ${thing.cookies === true ? "Always" : "Auto"}</button>
     </div>
   `;
 }
@@ -718,6 +721,17 @@ async function setLpmLib(id) {
     invalidateCache(id);
     router();
   } catch { alert("Failed to set library."); }
+}
+
+async function toggleCookies(id, currentlyAlways) {
+  // Two-state UI over a tri-value backend field: "Always" (attrs.cookies === true) vs.
+  // "Auto" (unset/false, which auto-escalates to cookies after a cookieless failure).
+  // Only ever write true or clear back to null; never write false explicitly.
+  try {
+    await apiPatch(`/things/${id}`, { cookies: currentlyAlways ? null : true });
+    invalidateCache(id);
+    router();
+  } catch { alert("Failed to update cookies setting."); }
 }
 
 /* === NAVIGATION === */
