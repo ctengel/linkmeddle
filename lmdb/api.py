@@ -861,9 +861,15 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
             .where(or_(stage1_branch, video_branch, meta_branch), Thing.id.notin_(active))
             .order_by(sa.desc(Thing.container.isnot(False)), rating.desc(), Thing.try_on.asc())
             .limit(1).with_for_update(skip_locked=True))
-    # Worker self-selection (§4.5): a worker may pin itself to one extractor's jobs.
+    # Worker self-selection (§4.5): a worker may pin itself to one extractor's jobs, or
+    # (mutually exclusive) claim only things no extractor has identified yet (#210).
+    if item.extractor is not None and item.no_extractor:
+        raise HTTPException(status_code=422,
+                            detail="extractor and no_extractor are mutually exclusive")
     if item.extractor is not None:
         stmt = stmt.where(Thing.extractor_key == item.extractor.lower())
+    elif item.no_extractor:
+        stmt = stmt.where(Thing.extractor_key == None)  # noqa: E711  (SQL IS NULL)
     thing = session.exec(stmt).first()
     if thing is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)

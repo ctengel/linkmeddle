@@ -46,13 +46,18 @@ def enough_free_space(path: str = ".") -> bool:
         return False
     return True
 
-def claim_job(api_base: str, worker: str, extractor: str | None = None) -> dict | None:
+def claim_job(api_base: str, worker: str, extractor: str | None = None,
+              no_extractor: bool = False) -> dict | None:
     """Claim the single highest-priority due job, or None when nothing is due (204).
 
-    `extractor` pins this worker to one extractor's jobs (worker self-selection, §4.5)."""
+    `extractor` pins this worker to one extractor's jobs (worker self-selection, §4.5).
+    `no_extractor` (mutually exclusive) pins it to things no extractor has identified yet
+    (`extractor_key IS NULL`, #210)."""
     body = {"worker": worker}
     if extractor:
         body["extractor"] = extractor
+    if no_extractor:
+        body["no_extractor"] = True
     resp = requests.post(f"{api_base.rstrip('/')}/jobs/claim",
                          json=body, timeout=CLAIM_TIMEOUT)
     resp.raise_for_status()
@@ -162,10 +167,16 @@ def main(argv: list[str] | None = None) -> int:
     """Pull-one-and-loop: claim -> run -> report, until nothing is due.
 
     `--extractor` pins this worker to one extractor's jobs (worker self-selection, §4.5);
-    run the process N times (each with its own filter) for parallel/heterogeneous workers."""
+    `--no-extractor` (mutually exclusive) pins it to things no extractor has identified yet
+    (#210). Run the process N times (each with its own filter) for parallel/heterogeneous
+    workers."""
     parser = argparse.ArgumentParser(description="LinkMeddle job runner")
-    parser.add_argument("-e", "--extractor", default=None,
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-e", "--extractor", default=None,
                         help="only claim jobs for this yt-dlp extractor (e.g. youtube)")
+    group.add_argument("-E", "--no-extractor", action="store_true",
+                        help="only claim jobs whose extractor is not yet known "
+                             "(extractor_key IS NULL)")
     args = parser.parse_args(argv)
     status = 0
     count = 0
@@ -177,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         if not enough_free_space():
             status = 1
             break
-        job = claim_job(LINKMEDDLE_PLAPI, WORKER, args.extractor)
+        job = claim_job(LINKMEDDLE_PLAPI, WORKER, args.extractor, args.no_extractor)
         if job is None:
             break
         count += 1

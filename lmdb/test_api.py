@@ -476,6 +476,18 @@ def test_claim_extractor_filter(client):
     assert client.post("/jobs/claim", json={"extractor": "dailymotion"}).status_code == 204
 
 
+def test_claim_no_extractor_filter(client):
+    # #210: a worker can pin itself to things no extractor has identified yet.
+    unk = _seed_thing(type="playlist", url="http://e/unk", human_rating=1.0, try_on=_TODAY)
+    _seed_thing(type="playlist", url="http://e/yt", human_rating=2.0, try_on=_TODAY,
+                extractor_key="youtube")   # higher-rated, but already identified
+    r = client.post("/jobs/claim", json={"no_extractor": True})
+    assert r.status_code == 200 and r.json()["thing"]["id"] == unk
+    # extractor + no_extractor together is a malformed request.
+    r = client.post("/jobs/claim", json={"extractor": "youtube", "no_extractor": True})
+    assert r.status_code == 422
+
+
 def test_claim_excludes_in_progress(client):
     # Concurrent-claim safety: a thing with a fresh in-progress run is not re-handed out, so two
     # workers partition the work instead of double-running the same thing (§4.5 risk #2).
