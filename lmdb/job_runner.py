@@ -148,7 +148,10 @@ def initiate_job(api_base: str, job: dict, worker: str) -> bool:
     run_id, thing, download = job["run_id"], job["thing"], job["download"]
     cookies = job.get("cookies", False)
     attrs = thing.get("attrs") or {}
-    info = run_bknd.init_download(
+    # cookies_used is the *actual* per-run decision: it drops to False when the cookies were
+    # requested but the Crustula fetch 404'd and we fell back to a cookieless run (#198), so the
+    # recorded input_json.cookies reflects what really happened (keeps §4.7 escalation accurate).
+    info, cookies_used = run_bknd.init_download(
         thing["url"], download=download,
         oibucket=thing["bucket"] if download else None,
         lpmlib=attrs.get("lpm_lib") if download else None,
@@ -158,7 +161,7 @@ def initiate_job(api_base: str, job: dict, worker: str) -> bool:
         flat=True,   # flat is a no-op on a single video, so a download still gets a full extract
         info_dict=attrs.get(xform.INFO_JSON_KEY))
     post_result(api_base, run_id, info, download=download,
-                use_cookies=cookies, worker=worker)
+                use_cookies=cookies_used, worker=worker)
     return bool(info)
 
 

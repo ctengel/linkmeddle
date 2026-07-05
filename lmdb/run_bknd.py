@@ -216,7 +216,7 @@ def init_download(url: str, *,
                   thing_id: str | None = None,
                   use_cookies: bool = False,
                   flat: bool = False,
-                  info_dict: dict | None = None) -> Optional[dict]:
+                  info_dict: dict | None = None) -> tuple[Optional[dict], bool]:
     """Run yt-dlp for the given URL — the worker's single yt-dlp code path.
 
     download=False -> Stage-1 metadata-only pull (no OI required); download=True -> Stage-2
@@ -225,8 +225,12 @@ def init_download(url: str, *,
     `watch?v=X&list=Y` URL resolves to the single leaf X and never the ambiguous video+playlist
     "both" shape (#164). flat -> flatten a playlist pull
     (`extract_flat`, minimal site calls); set only for a playlist `pull`, never for a
-    single-video `meta`/`download` (those need a full extract). Returns the sanitized info
-    dict on success, or None on a caught YoutubeDLError (callers treat None as a failed run).
+    single-video `meta`/`download` (those need a full extract). Returns
+    `(info, cookies_used)`: the sanitized info dict on success (None on a caught YoutubeDLError,
+    which callers treat as a failed run) and whether cookies were actually applied to this run.
+    `cookies_used` is False when not requested, True when requested and fetched OK, and False
+    when requested but the Crustula fetch 404'd (a cookieless fallback, #198) — the caller
+    reports the real value so §4.7 escalation stays accurate.
     No LinkMeddlePlaylistPP — the worker owns the metadata push (job_runner.post_result).
 
     URL: the URL to download
@@ -248,6 +252,7 @@ def init_download(url: str, *,
     # TODO consider extractor_id and id (of playlist) instead of URL
 
     cookies = None
+    cookies_used = False
 
     # check preconditions
     # Nothing to extract from: no URL to fetch and no pre-extracted info dict to load. Treat
@@ -258,15 +263,21 @@ def init_download(url: str, *,
     # its url backfilled (#147).
     if url is None and info_dict is None:
         warnings.warn("No URL and no info_dict to extract; failing run.")
-        return None
+        return None, cookies_used
     if lpmlib:
         assert oibucket, "oibucket must be set to use lpmlib"
     if use_cookies:
         assert os.getenv("CRUSTULA_URL"), "CRUSTULA_URL must be set to use cookies"
-        # TODO catch exceptions
-        cookiestr = get_cookies(url)
-        print("got cookies:", cookiestr)
-        cookies = io.StringIO(cookiestr)
+        try:
+            cookiestr = get_cookies(url)
+        except requests.exceptions.HTTPError as e:
+            # Crustula has no cookies for this url (404) etc. — cookies are a soft hint (#198),
+            # so fall back to a cookieless run rather than failing the whole job.
+            warnings.warn(f"cookie fetch failed for {url}: {e}; continuing without cookies")
+        else:
+            print("got cookies:", cookiestr)
+            cookies = io.StringIO(cookiestr)
+            cookies_used = True
 
     download_archive = None
     if download:
@@ -301,7 +312,7 @@ def init_download(url: str, *,
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
             time.sleep(128)
-            return None
+            return None, cookies_used
     if cookies:
         cookies.seek(0)
         print("Final cookies:", cookies.read())
@@ -311,7 +322,7 @@ def init_download(url: str, *,
     # TODO this sleep adds per-job latency to the worker loop; tune/remove now that the
     #      server owns try_on backoff
     time.sleep(64)
-    return ydl.sanitize_info(info)
+    return ydl.sanitize_info(info), cookies_used
 
 def cli():
     """Command-line interface to download a URL using yt-dlp programmatically."""

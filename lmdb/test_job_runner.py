@@ -18,7 +18,7 @@ def _capture_init_download(monkeypatch):
     def fake_init_download(url, **kwargs):
         calls['url'] = url
         calls.update(kwargs)
-        return {'fake': 'info'}
+        return {'fake': 'info'}, False
 
     monkeypatch.setattr(job_runner.run_bknd, "init_download", fake_init_download)
     monkeypatch.setattr(job_runner, "post_result", lambda *a, **k: {})
@@ -55,6 +55,21 @@ def test_initiate_job_always_flat(monkeypatch, download):
            "thing": {"id": "t1", "url": "https://example.com/x", "bucket": "b", "attrs": None}}
     job_runner.initiate_job("http://api/", job, "w")
     assert calls["flat"] is True
+
+
+def test_initiate_job_reports_actual_cookies_used(monkeypatch):
+    # The job suggested cookies, but init_download fell back to a cookieless run (returns
+    # cookies_used=False) — post_result must record the actual value, not the suggestion (#198),
+    # so §4.7 escalation can re-suggest cookies next time.
+    monkeypatch.setattr(job_runner.run_bknd, "init_download",
+                        lambda url, **kwargs: (None, False))
+    reported = {}
+    monkeypatch.setattr(job_runner, "post_result",
+                        lambda *a, **k: reported.update(k))
+    job = {"run_id": "r1", "download": False, "cookies": True,
+           "thing": {"id": "t1", "url": "https://example.com/v/c", "bucket": "b", "attrs": None}}
+    job_runner.initiate_job("http://api/", job, "w")
+    assert reported["use_cookies"] is False
 
 
 class _Resp:
@@ -210,11 +225,32 @@ def fake_ydl(monkeypatch):
 
 def test_init_download_uses_process_ie_result_when_info_dict(fake_ydl):
     payload = {"id": "abc", "webpage_url": "https://x/v/abc"}
-    info = run_bknd.init_download("https://x/v/abc", download=False, info_dict=payload)
+    info, _ = run_bknd.init_download("https://x/v/abc", download=False, info_dict=payload)
     names = [c[0] for c in fake_ydl.calls]
     assert "process_ie_result" in names
     assert "extract_info" not in names
     assert info == payload
+
+
+def test_init_download_cookie_404_falls_back(monkeypatch):
+    # A Crustula 404 (or any HTTPError) must NOT fail the job: fall back to a cookieless run
+    # and report cookies_used=False (#198).
+    monkeypatch.setenv("CRUSTULA_URL", "http://crustula/")
+
+    def raise_404(url):
+        raise run_bknd.requests.exceptions.HTTPError("404 Client Error: Not Found")
+    monkeypatch.setattr(run_bknd, "get_cookies", raise_404)
+
+    ydl = _FakeYDL()
+    captured = {}
+    monkeypatch.setattr(run_bknd, "_ydl", lambda **kw: captured.update(kw) or ydl)
+    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
+
+    info, cookies_used = run_bknd.init_download("https://x/v/abc", download=False,
+                                                use_cookies=True)
+    assert info == {"id": "from_url"}   # the download still ran (not a failed run)
+    assert cookies_used is False        # reported as cookieless
+    assert captured["cookies"] is None  # yt-dlp got no cookiefile
 
 
 # --- main(): a raising job is reported as a failure, not just logged --------------------
