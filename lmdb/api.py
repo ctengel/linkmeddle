@@ -522,15 +522,18 @@ def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
         survivor.attrs = {**loser_attrs, **(survivor.attrs or {})}
 
 
-def _apply_backfill(session: Session, existing: Thing,
-                    incoming: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
+def _apply_backfill(session: Session, existing: Thing, incoming: Thing,
+                    facet_native: bool = False) -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Fill NULL fields on `existing` from `incoming` (#147), converging any duplicate row.
 
     `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
     `url` (thing_url) would collide with a *different* row, that row is a duplicate of the same
     real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
     apply it. Both partial-unique indexes flow through the one merge path — except a *channel*
-    clash, which is never converged away (see the guard below).
+    clash, which is never converged away (see the guard below), and a `facet_native` clash:
+    the caller marks the proposed native_id as a channel's shared/facet id (the pull IS its
+    own uploader), where same id does NOT mean same thing — the holder may be a sibling tab —
+    so the claim is dropped and `existing` stays URL-keyed instead of merging.
 
     Returns the merges performed as `(loser_id, survivor_id)` pairs (normally empty), so a
     caller holding ids to merged-away rows (`_fanout`'s remap) can re-resolve them.
@@ -572,6 +575,14 @@ def _apply_backfill(session: Session, existing: Thing,
         if xform.is_channel(clash):
             for field in clash_fields:
                 fields.pop(field, None)
+            continue
+        # A facet native_id (the pull's own uploader id, shared by every tab of the channel) is
+        # never evidence the holder is a duplicate — it is usually a sibling tab or URL-variant,
+        # and merging would delete it and hand the id to `existing`, whose next sibling's pull
+        # then eats *it* (tab-eats-tab cascade). Drop the claim; `existing` stays URL-keyed. A
+        # same-row url clash still marks a true duplicate and converges as usual.
+        if facet_native and clash_fields == ["native_id"]:
+            fields.pop("native_id", None)
             continue
         _merge_things(session, existing, clash)
         merged.append((clash.id, existing.id))
@@ -707,8 +718,20 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         xform.merge_attr(container, "channel_id", graph.playlist.native_id)
         graph.playlist.native_id = None
 
+    # A top-level pull that IS its own uploader (a channel or one of its tabs) carries a *facet*
+    # id: every tab of the channel reports the same native_id. Claiming it when free is fine
+    # (that's how a directly-pulled channel gains the id #160 linking relies on), but when a
+    # sibling already holds it the clash must never converge (`facet_native` below) — the holder
+    # is a different tab/URL-variant of the same channel, and merging would delete it and let the
+    # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a soft
+    # channel_id hint either way.
+    facet_pull = pull.native_id is not None and pull.native_id == pull.channel.native_id
+    if facet_pull and graph.playlist.url is not None:
+        xform.merge_attr(container, "channel_id", pull.native_id)
+
     # The recorded thing IS the container: backfill it, classify it, mark success.
-    merged.update(_apply_backfill(session, container, graph.playlist))
+    merged.update(_apply_backfill(session, container, graph.playlist,
+                                  facet_native=facet_pull))
     container.container = True
     container.last_success_dt = now
     xform.clear_info_hint(container)   # "just a playlist": hint cleared after its own pull

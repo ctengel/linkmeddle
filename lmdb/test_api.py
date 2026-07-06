@@ -1640,6 +1640,60 @@ def test_channel_tab_self_pull_preserves_channel(client):
     assert tab_thing["native_id"] is None                        # tab left URL-keyed (clash backfill dropped)
 
 
+def test_tab_self_pull_never_eats_unguarded_facet_holder(client):
+    # Tab-eats-tab cascade: the channel's shared id is held by a row WITHOUT the kind='channel'
+    # guard hint (a migrated V3 channel-URL container, or a sibling tab that claimed the id on an
+    # earlier self-pull). A tab self-pull proposes that facet id via null_backfill; pre-fix the
+    # clash merge-deleted the holder into the tab, which then held the id unguarded itself — so
+    # the next sibling's pull ate *it*, serially collapsing distinct tabs and mixing their run
+    # history. The facet clash must drop the claim instead: nothing is merged, every tab stays
+    # URL-keyed with the id as a soft channel_id hint.
+    holder = _seed_thing(container=True, url="http://yt/@casc/streams", try_on=None,
+                         extractor_key="youtubetab", native_id="UC")   # no attrs.kind guard
+    chan = models.UlChan(native_id="UC", title="Casc", url="http://yt/@casc")
+
+    def self_pull(tab_url, vid):
+        tid, rid = _claimed_run(client, tab_url)
+        pull = models.PullThing(
+            url=tab_url, native_id="UC", extractor_key="youtubetab", title="Casc tab",
+            container=True, playlist_count=1, channel=chan,
+            entries=[models.PullThing(native_id=vid, url=f"http://yt/v/{vid}", title=vid,
+                                      extractor_key="youtube", channel=chan)],
+        ).model_dump(mode="json")
+        assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+        return client.get(f"/things/{tid}").json()
+
+    tab_a = self_pull("http://yt/@casc/videos", "v1")
+    assert client.get(f"/things/{holder}").status_code == 200     # holder NOT merged/deleted
+    assert client.get(f"/things/{holder}").json()["native_id"] == "UC"   # ... and keeps the id
+    assert tab_a["native_id"] is None                             # tab stays URL-keyed
+    assert (tab_a["attrs"] or {}).get("channel_id") == "UC"       # id kept as a soft hint
+
+    tab_b = self_pull("http://yt/@casc/shorts", "v2")             # next sibling: no cascade
+    assert client.get(f"/things/{holder}").status_code == 200
+    assert client.get(f"/things/{tab_a['id']}").status_code == 200
+    assert tab_b["native_id"] is None
+
+
+def test_channel_self_pull_claims_free_facet_id(client):
+    # The counterpart: when nobody holds the channel's shared id, a self-owned pull still claims
+    # it (that's how a directly-pulled channel gains the native_id that ID-based video->channel
+    # linking (#160) and the url-less-stub convergence rely on), plus the channel_id hint.
+    url = "http://yt/@fresh/videos"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UCfresh", title="Fresh", url="http://yt/@fresh")
+    pull = models.PullThing(
+        url=url, native_id="UCfresh", extractor_key="youtubetab", title="Fresh - videos",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="f1", url="http://yt/v/f1", title="F1",
+                                  extractor_key="youtube", channel=chan)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+    thing = client.get(f"/things/{tid}").json()
+    assert thing["native_id"] == "UCfresh"                        # free facet id claimed
+    assert (thing["attrs"] or {}).get("channel_id") == "UCfresh"  # hint stored alongside
+
+
 def test_tab_permafail_ack_survives_parent_refeed(client):
     # A user acks a parent-fed tab (PATCH try_on=null, §2.5). A later channel pull must keep
     # feeding the tab's content but never reschedule it to self-pull — pre-fix the re-fan
