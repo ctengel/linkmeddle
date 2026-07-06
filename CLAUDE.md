@@ -22,6 +22,10 @@ OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user LINKMEDDLE_PLAPI=http://localhost:
 # Download one URL directly through the yt-dlp pipeline
 OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user python -m lmdb.run_bknd --oibucket bucket --no-playlist "https://example.com/video"
 
+# OI scrubber (#111, 4.1): tombstone D/F media in OI + enforce A-band copy counts in SO
+# Dry-run by default; --apply to act; --delete-only / --replicate-only for one branch
+OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user OBJIDX_S3=http://127.0.0.1:29164/ python -m lmdb.scrub_oi
+
 # Tests
 pytest lmdb/test_api.py                       # all
 pytest lmdb/test_api.py::test_name            # single test
@@ -59,7 +63,7 @@ real file again — the V2-era `apiqueue/` copy is gone.)
 
 ## Environment variables
 
-`DATABASE_URL` (V4 defaults to `postgresql+psycopg:///lmdb`; PostgreSQL required), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`), `WORKER_MIN_FREE_BYTES` (job_runner free-space floor in bytes; default 32 GiB, `0` disables — the worker stops claiming when its cwd has less free space; shared with pervellam).
+`DATABASE_URL` (V4 defaults to `postgresql+psycopg:///lmdb`; PostgreSQL required), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_S3` (simpler-objects locator base URL; scrubber replication branch only — same convention as the `obj_idx` CLI's `scrub`), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`), `WORKER_MIN_FREE_BYTES` (job_runner free-space floor in bytes; default 32 GiB, `0` disables — the worker stops claiming when its cwd has less free space; shared with pervellam).
 
 ## V4 work
 
