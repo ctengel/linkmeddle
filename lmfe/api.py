@@ -11,9 +11,11 @@ download URL (`best_oi` -> presigned S3 URL), never streamed through here.
 import os
 import asyncio
 from typing import Optional
+from urllib.parse import urljoin
 import fastapi
 from fastapi import Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 from obj_idx import client as oi_client
@@ -22,10 +24,20 @@ from . import models as fe_models
 
 LINKMEDDLE_PLAPI = os.getenv("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 OI_BUCKET = os.getenv("OBJIDX_BUCKET_DEFAULT")
+OBJIDX_URL = os.getenv("OBJIDX_URL")
+PERVELLAM_URL = os.getenv("PERVELLAM_URL")
+# Cap on OI files a tag search maps back to things (each becomes a best_oi= query param).
+TAG_SEARCH_MAX = 100
 
 app = fastapi.FastAPI()
 
 app.mount("/static", StaticFiles(directory="lmfe/static"), name="static")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Serve the SPA at the root (design §3.3 GET /)."""
+    return RedirectResponse("/static/index.html")
 
 
 def _plapi(path: str) -> str:
@@ -48,12 +60,17 @@ def _checked(resp: httpx.Response) -> httpx.Response:
     return resp
 
 
-def _resolve_media(best_oi) -> tuple[Optional[str], Optional[str]]:
-    """Resolve an OI file UUID to (download_url, object_url). Sync OI calls."""
+def _resolve_media(best_oi) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+    """Resolve an OI file UUID to (download_url, object_url, file info dict). Sync OI calls —
+    one GET file/{uuid} (get_file) + one presign (get_s3_url); the info dict rides along free.
+    The object URL is absolutized against OBJIDX_URL (the client may return a bare path)."""
     if not best_oi:
-        return None, None
+        return None, None, None
     oi_file = oi_client.get_obj_idx_env().get_file(str(best_oi))
-    return oi_file.get_s3_url(), oi_file.get_object_url()
+    object_url = oi_file.get_object_url()
+    if object_url and OBJIDX_URL:
+        object_url = urljoin(OBJIDX_URL, object_url)
+    return oi_file.get_s3_url(), object_url, oi_file.info
 
 
 @app.post("/things/", response_model=fe_models.ThingSummary)
@@ -98,14 +115,15 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
                       due: bool = False, needs_rating: bool = False, new: bool = False,
                       failing: bool = False, watch_soon: bool = False,
                       limit: Optional[int] = None, url: Optional[str] = None,
-                      extractor: Optional[str] = None, native_id: Optional[str] = None):
-    """List/search things; passes every LMDB filter through. Backs all list views
-    and (with `new`/`failing`/`watch_soon`) the status-dashboard + Watch Soon panels.
-    No OI round-trips."""
+                      extractor: Optional[str] = None, native_id: Optional[str] = None,
+                      q: Optional[str] = None):
+    """List/search things; passes every LMDB filter through (incl. the `q` title search).
+    Backs all list views and (with `new`/`failing`/`watch_soon`) the status-dashboard +
+    Watch Soon panels. No OI round-trips."""
     params = {}
     for name, val in (("container", container), ("kind", kind), ("rating", rating),
                       ("min_rating", min_rating), ("limit", limit), ("url", url),
-                      ("extractor", extractor), ("native_id", native_id)):
+                      ("extractor", extractor), ("native_id", native_id), ("q", q)):
         if val is not None:
             params[name] = val
     for name, flag in (("due", due), ("needs_rating", needs_rating),
@@ -119,6 +137,15 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
     if failing:
         things.sort(key=_failing_sort_key)
     return things
+
+
+@app.get("/things/facets", response_model=list[pl_models.Facet])
+async def thing_facets():
+    """Extractor facets for browse-by-extractor (thin proxy of LMDB). Registered before
+    GET /things/{thing_id} so the literal path wins."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/things/facets")))
+    return resp.json()
 
 
 @app.get("/things/{thing_id}", response_model=fe_models.ThingPage)
@@ -163,7 +190,8 @@ async def get_thing(thing_id: str):
     # container page must not presign every child's OI URL; the SPA prefetches those it needs
     # via the dedicated /things/{id}/playback endpoint.
     if thing.best_oi:
-        page.download_url, _ = await run_in_threadpool(_resolve_media, thing.best_oi)
+        page.download_url, _, oi_info = await run_in_threadpool(_resolve_media, thing.best_oi)
+        page.oi_info = fe_models.OIFileInfo.from_oi_info(oi_info)
     return page
 
 
@@ -176,9 +204,10 @@ async def get_playback(thing_id: str):
     best_oi = pl_models.ThingRead.model_validate(resp.json()).best_oi
     if not best_oi:
         raise fastapi.HTTPException(status_code=404, detail="No media acquired for this thing")
-    download_url, object_url = await run_in_threadpool(_resolve_media, best_oi)
+    download_url, object_url, oi_info = await run_in_threadpool(_resolve_media, best_oi)
     return fe_models.PlaybackInfo(best_oi=best_oi, download_url=download_url,
-                                  object_url=object_url)
+                                  object_url=object_url,
+                                  oi_info=fe_models.OIFileInfo.from_oi_info(oi_info))
 
 
 @app.get("/things/{thing_id}/runs", response_model=list[fe_models.RunSummary])
@@ -213,6 +242,51 @@ async def list_runs(limit: int = 50, success: Optional[bool] = None,
         resp = _checked(await client.get(_plapi("/runs/"), params=params))
     return [fe_models.RunSummary(**pl_models.RunActivity.model_validate(r).model_dump())
             for r in resp.json()]
+
+
+@app.get("/jobs/upcoming", response_model=list[fe_models.UpcomingJob])
+async def upcoming_jobs(limit: int = 20):
+    """Dashboard "Upcoming Jobs" panel (#193): LMDB's read-only dispatch-order preview."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/jobs/upcoming"), params={"limit": limit}))
+    return [fe_models.UpcomingJob(
+                kind=j["kind"], download=j["download"],
+                thing=fe_models.ThingSummary.from_thing_read(
+                    pl_models.ThingRead.model_validate(j["thing"])))
+            for j in resp.json()]
+
+
+@app.get("/search/tags", response_model=fe_models.TagSearchResult)
+async def search_tags(key: str, value: str):
+    """OI tag search (objectindex gui.py parity): files tagged key=value, mapped back to
+    things via the LMDB best_oi filter. OI files LM has no thing for come back as `unmatched`
+    link-out rows. Capped at TAG_SEARCH_MAX OI hits (each becomes a query param)."""
+    def _oi_search():
+        return oi_client.get_obj_idx_env().search_files({"extra": f"{key}={value}"})
+    files = (await run_in_threadpool(_oi_search))[:TAG_SEARCH_MAX]
+    if not files:
+        return fe_models.TagSearchResult()
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(
+            _plapi("/things/"), params=[("best_oi", str(f.uuid)) for f in files]))
+    things = [fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(t))
+              for t in resp.json()]
+    matched = {str(t.best_oi) for t in things}
+    unmatched = [fe_models.TagHit(file_uuid=f.uuid, source_url=(f.info or {}).get("url"))
+                 for f in files if str(f.uuid) not in matched]
+    return fe_models.TagSearchResult(things=things, unmatched=unmatched)
+
+
+@app.get("/pervellam/jobs", response_model=list[fe_models.PervellamJob])
+async def pervellam_jobs(filt: str = "active"):
+    """Read-only Pervellam (live-stream tool) job feed for the dashboard panel. 404 when
+    PERVELLAM_URL is unset — the SPA takes that as "hide the panel"."""
+    if not PERVELLAM_URL:
+        raise fastapi.HTTPException(status_code=404, detail="Pervellam not configured")
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(f"{PERVELLAM_URL.rstrip('/')}/jobs/",
+                                         params={"filt": filt}))
+    return [fe_models.PervellamJob.model_validate(j) for j in resp.json()]
 
 
 @app.get("/url", response_model=fe_models.ThingSummary)

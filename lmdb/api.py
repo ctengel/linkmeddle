@@ -19,13 +19,13 @@ import sqlalchemy as sa
 from sqlalchemy import func, or_, case
 from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from fastapi import FastAPI, Depends, HTTPException, Response, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
 from . import models, xform
 from .models import (Thing, Rel, Run, ThingRead, RelatedThing,
                      RunRead, RunActivity, ThingAdd, ThingPatch, ClaimRequest, JobClaim,
-                     RunResultIn)
+                     JobPreview, RunResultIn)
 
 # Effective-rating floor for fetching a video's *media* (Stage-2 download); below it (C band)
 # a video only gets a metadata-only `meta` job. The §2.4 band boundaries live in xform.
@@ -258,6 +258,8 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
                 failing: bool = False, watch_soon: bool = False,
                 limit: Optional[int] = None, url: Optional[str] = None,
                 extractor: Optional[str] = None, native_id: Optional[str] = None,
+                q: Optional[str] = None,
+                best_oi: Optional[list[uuid.UUID]] = Query(default=None),
                 session: Session = Depends(get_session)):
     """List/search things. Backs every list view + the status dashboard.
 
@@ -272,6 +274,10 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     band-A, and newly-added independently doubles a thing's selection weight (`2^k`, k=0..3),
     then Efraimidis–Spirakis sampling (`random() ^ (1/weight)`) turns the weights into a random
     permutation. `limit` caps the returned count (applies to any list; default unlimited).
+
+    `q` is a case-insensitive title substring search (#134); `%`/`_` are matched literally.
+    `best_oi` (repeatable) selects things by acquired OI file UUID — the OI→LM reverse mapping
+    that lets an OI tag/URL search resolve back to things.
     """
     stmt = select(Thing, _machine_rating_expr().label("machine_rating"))
     if container is not None:
@@ -284,6 +290,11 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
         stmt = stmt.where(Thing.extractor_key == extractor.lower())
     if native_id is not None:
         stmt = stmt.where(Thing.native_id == native_id)
+    if q is not None:
+        escaped = q.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+        stmt = stmt.where(Thing.title.ilike(f"%{escaped}%", escape="\\"))
+    if best_oi:
+        stmt = stmt.where(Thing.best_oi.in_(best_oi))
     if rating is not None:
         stmt = stmt.where(Thing.human_rating == rating)
     if min_rating is not None:
@@ -322,6 +333,19 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     if limit is not None:
         stmt = stmt.limit(limit)
     return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
+
+
+@app.get("/things/facets", response_model=list[models.Facet])
+def thing_facets(session: Session = Depends(get_session)):
+    """Distinct `extractor_key` with thing counts, most-populous first (browse-by-extractor).
+
+    Registered before GET /things/{thing_id} so the literal path wins over the UUID param.
+    """
+    rows = session.exec(
+        select(Thing.extractor_key, func.count().label("count"))
+        .group_by(Thing.extractor_key)
+        .order_by(func.count().desc())).all()
+    return [models.Facet(extractor_key=key, count=count) for key, count in rows]
 
 
 @app.get("/things/{thing_id}", response_model=ThingRead)
@@ -829,20 +853,16 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     return merged
 
 
-@app.post("/jobs/claim", response_model=JobClaim,
-          responses={204: {"description": "Nothing due"}})
-def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
-    """Prioritized dispatch: claim the single highest-priority due job (§4.2/§4.5).
+def _dispatch_stmt():
+    """The one dispatch eligibility predicate + priority ordering (§4.2/§4.5), shared by
+    POST /jobs/claim (which locks + claims the top row) and GET /jobs/upcoming (which just
+    previews the order, #193). Selects `(Thing, kind)` rows, highest-priority first, where
+    `kind` names the matched branch: 'pull' | 'download' | 'meta'.
 
-    The API owns ordering (the runner never queries `thing`): one ordering spans both job
-    types — container/unknown-before-video, then rating DESC, then `try_on` ASC. The row is
-    claimed with `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent workers never get the same
-    thing (correct the day a 2nd worker appears; single worker in 4.0). On a hit the run is
-    created here (`success=NULL` in-progress marker, `worker` set) and its id returned; 204 if
-    nothing is due.
-
-    The machine rating is computed on read (Task 2.2, §2.4): an unrated video under a B+
-    container assesses as B and reaches `video_branch`; an under-rated container drops out.
+    One ordering spans both job types — container/unknown-before-video, then rating DESC,
+    then `try_on` ASC. The machine rating is computed on read (Task 2.2, §2.4): an unrated
+    video under a B+ container assesses as B and reaches `video_branch`; an under-rated
+    container drops out.
     """
     # Effective rating, defaulting an unrated thing to 0.0 (C) — mirrors _effective_rating_value,
     # so an unrated video clears the C-band `meta_branch` (NULL would fail every comparison).
@@ -882,10 +902,40 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
     active = select(Run.thing_id).where(
         Run.success == None,  # noqa: E711  (SQL IS NULL)
         Run.starttime > models.naive_utcnow() - CLAIM_LEASE)
-    stmt = (select(Thing)
+    kind = case((stage1_branch, "pull"), (video_branch, "download"),
+                else_="meta").label("kind")
+    return (select(Thing, kind)
             .where(or_(stage1_branch, video_branch, meta_branch), Thing.id.notin_(active))
-            .order_by(sa.desc(Thing.container.isnot(False)), rating.desc(), Thing.try_on.asc())
-            .limit(1).with_for_update(skip_locked=True))
+            .order_by(sa.desc(Thing.container.isnot(False)), rating.desc(), Thing.try_on.asc()))
+
+
+@app.get("/jobs/upcoming", response_model=list[JobPreview])
+def upcoming_jobs(limit: int = 20, session: Session = Depends(get_session)):
+    """Read-only preview of the dispatch queue (#193): the next `limit` jobs in exactly the
+    order POST /jobs/claim would hand them out, with nothing locked or claimed — no run is
+    created, so the view is safe to poll from the GUI. The snapshot is advisory: a concurrent
+    claim or rating change reorders it at any time."""
+    limit = max(1, min(limit, 100))
+    rows = session.exec(_dispatch_stmt().limit(limit)).all()
+    # `kind` is derived from the same branch predicates claim uses, so `download` here is
+    # definitionally what claim's _wants_download would decide for the row.
+    return [JobPreview(thing=_read_thing(session, thing),
+                       download=kind == "download", kind=kind)
+            for thing, kind in rows]
+
+
+@app.post("/jobs/claim", response_model=JobClaim,
+          responses={204: {"description": "Nothing due"}})
+def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
+    """Prioritized dispatch: claim the single highest-priority due job (§4.2/§4.5).
+
+    The API owns ordering (the runner never queries `thing`; the predicate + ordering live in
+    `_dispatch_stmt`). The row is claimed with `SELECT ... FOR UPDATE SKIP LOCKED` so concurrent
+    workers never get the same thing (correct the day a 2nd worker appears; single worker in
+    4.0). On a hit the run is created here (`success=NULL` in-progress marker, `worker` set)
+    and its id returned; 204 if nothing is due.
+    """
+    stmt = _dispatch_stmt().limit(1).with_for_update(skip_locked=True, of=Thing)
     # Worker self-selection (§4.5): a worker may pin itself to one extractor's jobs, or
     # (mutually exclusive) claim only things no extractor has identified yet (#210).
     if item.extractor is not None and item.no_extractor:
@@ -895,9 +945,10 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
         stmt = stmt.where(Thing.extractor_key == item.extractor.lower())
     elif item.no_extractor:
         stmt = stmt.where(Thing.extractor_key == None)  # noqa: E711  (SQL IS NULL)
-    thing = session.exec(stmt).first()
-    if thing is None:
+    row = session.exec(stmt).first()
+    if row is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+    thing = row[0]
     run = Run(thing_id=thing.id, worker=item.worker,
               starttime=models.naive_utcnow(), success=None)
     session.add(run)

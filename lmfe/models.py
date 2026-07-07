@@ -119,6 +119,28 @@ class IndirectChild(pydantic.BaseModel):
     thing: ThingSummary
 
 
+class OIFileInfo(pydantic.BaseModel):
+    """Details of a thing's acquired OI file (flattened from OI's `FileRead`): the file card
+    the SPA renders. `mime` picks the preview element (video/audio/img); `extra` is the OI
+    tag dict (e.g. ytdl-id/ytdl-extractor) rendered as clickable search chips."""
+    mime: Optional[str] = None
+    size: Optional[int] = None       # object obj_size, bytes
+    checksum: Optional[str] = None   # object checksum, hex
+    source_url: Optional[str] = None  # the URL OI recorded as the file's source
+    object_uuid: Optional[uuid.UUID] = None
+    extra: Optional[dict] = None
+
+    @classmethod
+    def from_oi_info(cls, info: Optional[dict]) -> Optional["OIFileInfo"]:
+        """Flatten a GET file/{uuid} info dict; None in (no file fetched) -> None out."""
+        if not info:
+            return None
+        obj = info.get("file_object") or {}
+        return cls(mime=obj.get("mime"), size=obj.get("obj_size"),
+                   checksum=obj.get("checksum"), source_url=info.get("url"),
+                   object_uuid=obj.get("uuid"), extra=info.get("extra"))
+
+
 class ThingPage(ThingSummary):
     """One-call page view-model: a thing, its neighbors, and (for an acquired
     video) a resolved OI playback URL handed straight to the consumer — the data
@@ -126,6 +148,7 @@ class ThingPage(ThingSummary):
     related: list[RelatedSummary] = []
     indirect_children: list[IndirectChild] = []
     download_url: Optional[str] = None
+    oi_info: Optional[OIFileInfo] = None
 
 
 class PlaybackInfo(pydantic.BaseModel):
@@ -133,6 +156,43 @@ class PlaybackInfo(pydantic.BaseModel):
     best_oi: Optional[uuid.UUID] = None
     download_url: Optional[str] = None
     object_url: Optional[str] = None
+    oi_info: Optional[OIFileInfo] = None
+
+
+class TagHit(pydantic.BaseModel):
+    """An OI file matching a tag search that no LM thing claims (best_oi miss) — the SPA can
+    only link out to it."""
+    file_uuid: uuid.UUID
+    source_url: Optional[str] = None
+
+
+class TagSearchResult(pydantic.BaseModel):
+    """GET /search/tags result: OI files tagged key=value, mapped back to things where LM
+    knows them (via best_oi), plus the leftover OI-only hits."""
+    things: list[ThingSummary] = []
+    unmatched: list[TagHit] = []
+
+
+class UpcomingJob(pydantic.BaseModel):
+    """One dashboard "Upcoming Jobs" row (#193), from LMDB's `JobPreview`: the dispatch-order
+    preview. `kind` is 'pull' | 'download' | 'meta'."""
+    kind: str
+    download: bool = False
+    thing: ThingSummary
+
+
+class PervellamJob(pydantic.BaseModel):
+    """One Pervellam (live-stream tool) job for the read-only dashboard panel. `fname` is an
+    OI URL once the upload finished (filt=finished guarantees it); before that it's a bare
+    local filename."""
+    id: Optional[int] = None
+    url: Optional[str] = None
+    dler: Optional[str] = None
+    fname: Optional[str] = None
+    status: Optional[str] = None
+    size: Optional[int] = None
+    started: Optional[datetime.datetime] = None
+    updated: Optional[datetime.datetime] = None
 
 
 class ThingCreate(pydantic.BaseModel):

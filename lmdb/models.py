@@ -268,6 +268,15 @@ class ThingPatch(BaseModel):
     container: Optional[bool] = None
 
 
+class Facet(BaseModel):
+    """One GET /things/facets row: an extractor and how many things carry it.
+
+    View-model only (not a table). `extractor_key` is None for things no extractor has
+    identified yet (never pulled, or added by bare URL)."""
+    extractor_key: Optional[str] = None
+    count: int
+
+
 class ClaimRequest(BaseModel):
     """Body for POST /jobs/claim. `worker` records which runner claimed the job; `extractor`/
     `no_extractor` are worker self-selection (§4.5) — either pin this worker to one extractor's
@@ -292,6 +301,18 @@ class JobClaim(BaseModel):
     thing: ThingRead
     download: bool = False  # acquire media (>= B video); else metadata-only pull/enrich
     cookies: bool = False  # per-job cookies suggestion the worker acts on (hint-only in 4.0) [A11]
+
+
+class JobPreview(BaseModel):
+    """One row of GET /jobs/upcoming (#193): what dispatch *would* hand out, in order.
+
+    A read-only view-model (not a table): the same eligibility predicate and ordering as
+    POST /jobs/claim, but nothing is locked or claimed — no run is created. `kind` names the
+    §4.2 branch the thing matched: 'pull' (Stage-1 container/unknown), 'download' (>= B video
+    acquire), or 'meta' (C-band video metadata-only enrich)."""
+    thing: ThingRead
+    download: bool = False  # same knob claim would send (True only for kind='download')
+    kind: str  # 'pull' | 'download' | 'meta'
 
 
 class RunResultIn(BaseModel):
