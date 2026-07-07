@@ -54,6 +54,7 @@
 
 <header>
   <h1 onclick="goHome()">LinkMeddle</h1>
+  <a href="#/watch-soon" style="color:#8cf; margin-left:20px; font-size:14px;">🎲 Watch Soon</a>
 </header>
 
 <div id="app" class="container"></div>
@@ -83,6 +84,11 @@ function router() {
 
   if (hash.startsWith("#/prefill/")) {
     renderHome(decodeURIComponent(hash.replace("#/prefill/", "")));
+    return;
+  }
+
+  if (hash.startsWith("#/watch-soon")) {
+    renderWatchSoon();
     return;
   }
 
@@ -275,6 +281,12 @@ async function renderHome(prefillUrl = "") {
       </div>
       <br/>
       <button onclick="handleSearch()">Go</button>
+    </div>
+
+    <div class="card">
+      <h2>🎲 Watch Soon</h2>
+      <p class="muted">A weighted-random walk through your downloaded videos — unrated, top-rated, and newly-added surface first.</p>
+      <button onclick="location.hash='#/watch-soon'">Start watching</button>
     </div>
 
     <div class="card">
@@ -484,8 +496,10 @@ async function renderThingPage(thingId, ctxId) {
   activeContainerId = ctxId || null;
 
   if (ctxId) {
-    activeContainerData = await getThingCached(ctxId);
-    activePlaylistVideos = childVideoIds(activeContainerData);
+    // A missing/failed context (e.g. the client-only Watch Soon container after a reload, or a
+    // sub-container that won't load) degrades to a plain single-video view rather than 500ing.
+    activeContainerData = await getThingCached(ctxId).catch(() => null);
+    activePlaylistVideos = activeContainerData ? childVideoIds(activeContainerData) : [];
   } else {
     activeContainerData = null;
     activePlaylistVideos = [];
@@ -527,6 +541,39 @@ function childVideoIds(containerPage) {
   return (containerPage.related || [])
     .filter(r => r.direction === "child" && r.thing.container === false)
     .map(r => r.thing.id);
+}
+
+/* === WATCH SOON === */
+// Sentinel id for the client-only "Watch Soon" queue. It masquerades as a container so the
+// standard player (sidebar + arrow/autoplay navigation, all keyed on ctx) drives the walk;
+// it lives only in thingCache for the session, so a reload degrades to a plain video (#129).
+const WATCH_SOON_CTX = "watch-soon";
+
+async function renderWatchSoon() {
+  const app = document.getElementById("app");
+  app.innerHTML = `<div class="card"><h2>🎲 Watch Soon</h2><div class="muted">Loading…</div></div>`;
+  let items;
+  try {
+    // The backend returns only acquired videos, already in weighted-random order (#129):
+    // unrated / band-A / newly-added each double a thing's chance of floating to the top.
+    items = await apiGet("/things/?watch_soon=true&limit=30");
+  } catch {
+    app.innerHTML = `<div class="card"><h2>🎲 Watch Soon</h2><div class="muted">Error loading</div></div>`;
+    return;
+  }
+  if (!items.length) {
+    app.innerHTML = `<div class="card"><h2>🎲 Watch Soon</h2>
+      <div class="muted">No downloaded videos to watch yet.</div></div>`;
+    return;
+  }
+  // Seed a synthetic container so renderThingPage's ctx machinery treats the queue as a playlist.
+  thingCache[WATCH_SOON_CTX] = {
+    id: WATCH_SOON_CTX,
+    title: "Watch Soon",
+    container: true,
+    related: items.map(t => ({ direction: "child", channel: false, thing: t })),
+  };
+  location.hash = `#/thing/${items[0].id}?ctx=${WATCH_SOON_CTX}`;
 }
 
 function renderVideoHTML(page) {

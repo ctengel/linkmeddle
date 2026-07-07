@@ -91,6 +91,11 @@ def _machine_rating_expr():
                 else_=None)
 
 
+def _indicator(cond):
+    """SQL 0/1 indicator for a boolean condition (for building weighted-random weights)."""
+    return case((cond, 1), else_=0)
+
+
 def _effective_rating_expr(default=None):
     """SQL effective rating = COALESCE(human, machine[, default]) (§2.4)."""
     args = [Thing.human_rating, _machine_rating_expr()]
@@ -250,7 +255,8 @@ def add_thing(item: ThingAdd, response: Response, session: Session = Depends(get
 def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
                 rating: Optional[float] = None, min_rating: Optional[float] = None,
                 due: bool = False, needs_rating: bool = False, new: bool = False,
-                failing: bool = False, url: Optional[str] = None,
+                failing: bool = False, watch_soon: bool = False,
+                limit: Optional[int] = None, url: Optional[str] = None,
                 extractor: Optional[str] = None, native_id: Optional[str] = None,
                 session: Session = Depends(get_session)):
     """List/search things. Backs every list view + the status dashboard.
@@ -260,6 +266,12 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     replacement for V3 GET /videos/{ex}/{id} (#102). `rating` filters the exact *human* rating;
     `min_rating` filters the *effective* rating (human else computed machine, §2.4) at or above
     a numeric threshold — e.g. `min_rating=1.0` returns everything effectively B-or-better.
+
+    `watch_soon` (#129) is the consumption walk: only *acquired* videos (a leaf with `best_oi`
+    set), in weighted-random order so the most surface-worthy float up — each of unrated,
+    band-A, and newly-added independently doubles a thing's selection weight (`2^k`, k=0..3),
+    then Efraimidis–Spirakis sampling (`random() ^ (1/weight)`) turns the weights into a random
+    permutation. `limit` caps the returned count (applies to any list; default unlimited).
     """
     stmt = select(Thing, _machine_rating_expr().label("machine_rating"))
     if container is not None:
@@ -284,10 +296,21 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
         stmt = stmt.where(  # noqa: E711
             Thing.last_failure_dt != None,
             (Thing.last_success_dt == None) | (Thing.last_failure_dt > Thing.last_success_dt))
+    new_cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
     if new:
-        cutoff = models.naive_utcnow() - datetime.timedelta(days=7)
-        stmt = stmt.where(Thing.created_dt >= cutoff)
-    if needs_rating:
+        stmt = stmt.where(Thing.created_dt >= new_cutoff)
+    if watch_soon:
+        # Acquired watchable videos only: a leaf (container False) whose media has landed.
+        stmt = stmt.where(Thing.container == False, Thing.best_oi != None)  # noqa: E711,E712
+    if watch_soon:
+        # Weighted-random walk (#129): weight doubles per favorable axis, then
+        # `random() ^ (1/weight)` sorts into a weighted-random permutation (Efraimidis–Spirakis).
+        weight = func.power(2.0,
+                            _indicator(Thing.human_rating == None)  # noqa: E711  unrated
+                            + _indicator(_effective_rating_expr(default=0.0) >= xform.BAND_FLOOR["A"])
+                            + _indicator(Thing.created_dt >= new_cutoff))  # newly added
+        stmt = stmt.order_by(func.power(func.random(), 1.0 / weight).desc())
+    elif needs_rating:
         # Container/unknown (container IS NOT False) before videos, then most-neutral
         # machine rating first (NULL treated as neutral 0.0), newest as final tiebreak.
         stmt = stmt.order_by(
@@ -296,6 +319,8 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
             Thing.created_dt.desc())
     else:
         stmt = stmt.order_by(Thing.created_dt.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return [_read_with_ratings(thing, machine) for thing, machine in session.exec(stmt).all()]
 
 

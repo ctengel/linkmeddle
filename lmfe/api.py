@@ -96,18 +96,20 @@ def _failing_sort_key(t: fe_models.ThingSummary):
 async def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
                       rating: Optional[float] = None, min_rating: Optional[float] = None,
                       due: bool = False, needs_rating: bool = False, new: bool = False,
-                      failing: bool = False, url: Optional[str] = None,
+                      failing: bool = False, watch_soon: bool = False,
+                      limit: Optional[int] = None, url: Optional[str] = None,
                       extractor: Optional[str] = None, native_id: Optional[str] = None):
     """List/search things; passes every LMDB filter through. Backs all list views
-    and (with `new`/`failing`) the status-dashboard panels. No OI round-trips."""
+    and (with `new`/`failing`/`watch_soon`) the status-dashboard + Watch Soon panels.
+    No OI round-trips."""
     params = {}
     for name, val in (("container", container), ("kind", kind), ("rating", rating),
-                      ("min_rating", min_rating), ("url", url), ("extractor", extractor),
-                      ("native_id", native_id)):
+                      ("min_rating", min_rating), ("limit", limit), ("url", url),
+                      ("extractor", extractor), ("native_id", native_id)):
         if val is not None:
             params[name] = val
     for name, flag in (("due", due), ("needs_rating", needs_rating),
-                       ("new", new), ("failing", failing)):
+                       ("new", new), ("failing", failing), ("watch_soon", watch_soon)):
         if flag:
             params[name] = True
     async with httpx.AsyncClient(timeout=5) as client:

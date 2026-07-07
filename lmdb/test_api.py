@@ -145,6 +145,22 @@ def test_list_filters(client):
     assert len(client.get("/things/", params={"due": True}).json()) == 3
 
 
+def test_list_things_watch_soon(client):
+    # Watch Soon (#129) returns only *acquired* videos (a leaf with best_oi set), excluding
+    # containers and un-acquired stubs; `limit` caps the count.
+    _seed_thing(container=True, url="http://ws/container")            # container: excluded
+    _seed_thing(container=False, url="http://ws/pending")             # no best_oi: excluded
+    acquired = {
+        _seed_thing(container=False, url=f"http://ws/vid{i}", best_oi=uuid.uuid4())
+        for i in range(3)
+    }
+    got = client.get("/things/", params={"watch_soon": True}).json()
+    assert {t["id"] for t in got} == acquired
+    assert all(t["container"] is False and t["best_oi"] for t in got)
+    # limit caps the returned count (general-purpose param)
+    assert len(client.get("/things/", params={"watch_soon": True, "limit": 2}).json()) == 2
+
+
 def test_extractor_native_lookup(client):
     # the V4 replacement for GET /videos/{extractor}/{id}; extractor/native are set by
     # the worker (Phase 1), so seed directly here.
