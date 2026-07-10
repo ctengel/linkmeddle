@@ -725,7 +725,10 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # is a different tab/URL-variant of the same channel, and merging would delete it and let the
     # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a soft
     # channel_id hint either way.
-    facet_pull = pull.native_id is not None and pull.native_id == pull.channel.native_id
+    # Matched against both uploader ids (xform.owns_native_id): a tab's own id equals the raw
+    # channel_id while UlChan.native_id prefers the @handle-form uploader_id (#217), so the
+    # single-field compare left this guard dead on real youtube tab pulls.
+    facet_pull = xform.owns_native_id(pull.native_id, pull.channel)
     if facet_pull and graph.playlist.url is not None:
         xform.merge_attr(container, "channel_id", pull.native_id)
 
@@ -866,9 +869,11 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
         Thing.best_oi == None, Thing.try_on <= today)  # noqa: E711
     # Stage-2 video meta-only: C-band leaf the flat pull under-described (no human-decision
     # metadata yet, last_success_dt NULL). Fetches metadata only — no media, no best_oi.
+    # A meta exists to make the thing rateable, so an already-human-rated leaf never needs
+    # one (#217): skip it even while its stored metadata stays formally incomplete.
     meta_branch = sa.and_(
         Thing.container == False, rating >= _PLAYLIST_FLOOR,  # noqa: E712
-        rating < _VIDEO_DOWNLOAD_FLOOR,
+        rating < _VIDEO_DOWNLOAD_FLOOR, Thing.human_rating == None,  # noqa: E711
         Thing.last_success_dt == None, Thing.best_oi == None,  # noqa: E711
         Thing.try_on <= today)
     # Exclude things with a fresh in-progress run (success IS NULL, claimed within the lease):
