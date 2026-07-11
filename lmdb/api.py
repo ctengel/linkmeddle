@@ -729,13 +729,16 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
     # sibling already holds it the clash must never converge (`facet_native` below) — the holder
     # is a different tab/URL-variant of the same channel, and merging would delete it and let the
     # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a soft
-    # channel_id hint either way.
+    # channel_id hint either way — in the raw channel_id namespace when known, so this write
+    # agrees with the parent-fed one above (merge_attr overwrites; a pull.native_id in the
+    # @handle form would otherwise flip the stored hint between namespaces across pulls).
     # Matched against both uploader ids (xform.owns_native_id): a tab's own id equals the raw
     # channel_id while UlChan.native_id prefers the @handle-form uploader_id (#217), so the
     # single-field compare left this guard dead on real youtube tab pulls.
     facet_pull = xform.owns_native_id(pull.native_id, pull.channel)
     if facet_pull and graph.playlist.url is not None:
-        xform.merge_attr(container, "channel_id", pull.native_id)
+        xform.merge_attr(container, "channel_id",
+                         pull.channel.channel_id or pull.native_id)
 
     # The recorded thing IS the container: backfill it, classify it, mark success.
     merged.update(_apply_backfill(session, container, graph.playlist,
