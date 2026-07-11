@@ -27,6 +27,10 @@ class UlChan(BaseModel):
     """Minimal uploader/channel identity for channel fan-out (worker pre-resolves)."""
     url: Optional[str] = None         # best uploader/channel URL (uploader_url or channel_url)
     native_id: Optional[str] = None   # uploader_id or channel_id
+    # Raw channel_id, carried alongside because yt-dlp's uploader_id and channel_id are
+    # different namespaces (youtube: @handle vs UC…) and a container's own id can match either
+    # (both shapes seen live) — self-ownership tests (xform.owns_native_id) must check both.
+    channel_id: Optional[str] = None
     title: Optional[str] = None       # uploader
 
 class PullThing(BaseModel):

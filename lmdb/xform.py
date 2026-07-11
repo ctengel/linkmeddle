@@ -237,6 +237,19 @@ class ThingGraph(NamedTuple):
     members: list[models.Thing]  # member stubs: leaf videos (False/None) + sub-containers (True)
     channels: list[models.Thing]  # per-video uploader containers (kind='channel')
     rels: list[models.Rel]
+    pull_is_channel: bool       # the container IS its own uploader (`_same_identity`)
+
+
+def owns_native_id(native_id: Optional[str], chan: models.UlChan) -> bool:
+    """Is `native_id` one of the uploader's ids (uploader_id OR channel_id)?
+
+    yt-dlp's uploader_id and channel_id are different namespaces (youtube: @handle vs UC…)
+    and a self-owned container's own id can match either — live pulls show both shapes — so
+    a single-field comparison silently misses one of them (#217; it also left the #196
+    facet guard dead on real pulls). The one self-ownership id test, used by
+    `_same_identity` (whose result api._fanout consumes as `ThingGraph.pull_is_channel`).
+    """
+    return native_id is not None and native_id in (chan.native_id, chan.channel_id)
 
 
 def _same_identity(parent: models.Thing, chan: models.UlChan) -> bool:
@@ -244,11 +257,12 @@ def _same_identity(parent: models.Thing, chan: models.UlChan) -> bool:
 
     The channel case: the parent IS the uploader, so the parent->child edge is the
     channel/uploader edge (`rel.channel=True`) and no separate uploader node is needed.
-    Matched by `native_id`; URL only when a native_id is absent
-    (channel landing-vs-/videos URLs differ — #46 — so native_id is the reliable signal).
+    Matched by id (`owns_native_id`); URL only when no id is present on either side
+    (channel landing-vs-/videos URLs differ — #46 — so ids are the reliable signal).
     """
-    if parent.native_id is not None and chan.native_id is not None:
-        return parent.native_id == chan.native_id
+    if parent.native_id is not None and (chan.native_id is not None
+                                         or chan.channel_id is not None):
+        return owns_native_id(parent.native_id, chan)
     if chan.url is not None:
         return parent.url == chan.url
     return False
@@ -332,7 +346,8 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
         # rate-able (enough_to_rate needs a channel URL) without a separate Stage-2 meta pull.
         vid_owner = vid.channel
         if (pull_is_channel and vid.container is False
-                and not vid.channel.url and not vid.channel.native_id):
+                and not vid.channel.url and not vid.channel.native_id
+                and not vid.channel.channel_id):
             vid_owner = pl.channel
             vid_thing.channel = pl_thing.channel or pl_thing.url
         # Every sub-container member is URL-keyed: null its native_id so `_find_thing` keys it by
@@ -372,7 +387,8 @@ def pl_full2things(pl: models.PullThing, *, bucket: str,
                 rels.append(models.Rel(parent=vid_chan.id, child=vid_thing.id, channel=True))
 
     return ThingGraph(playlist=pl_thing, members=members,
-                      channels=list(channels_by_key.values()), rels=rels)
+                      channels=list(channels_by_key.values()), rels=rels,
+                      pull_is_channel=pull_is_channel)
 
 
 def reconcile_count(pl: models.PullThing) -> int:

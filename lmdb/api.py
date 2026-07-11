@@ -547,15 +547,18 @@ def _merge_things(session: Session, survivor: Thing, loser: Thing) -> None:
         survivor.attrs = {**loser_attrs, **(survivor.attrs or {})}
 
 
-def _apply_backfill(session: Session, existing: Thing,
-                    incoming: Thing) -> list[tuple[uuid.UUID, uuid.UUID]]:
+def _apply_backfill(session: Session, existing: Thing, incoming: Thing,
+                    facet_native: bool = False) -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Fill NULL fields on `existing` from `incoming` (#147), converging any duplicate row.
 
     `null_backfill` proposes the still-NULL fields. If proposing `native_id` (thing_native) or
     `url` (thing_url) would collide with a *different* row, that row is a duplicate of the same
     real thing: merge it into `existing` (`_merge_things`) so the proposed value is free, then
     apply it. Both partial-unique indexes flow through the one merge path — except a *channel*
-    clash, which is never converged away (see the guard below).
+    clash, which is never converged away (see the guard below), and a `facet_native` clash:
+    the caller marks the proposed native_id as a channel's shared/facet id (the pull IS its
+    own uploader), where same id does NOT mean same thing — the holder may be a sibling tab —
+    so the claim is dropped and `existing` stays URL-keyed instead of merging.
 
     Returns the merges performed as `(loser_id, survivor_id)` pairs (normally empty), so a
     caller holding ids to merged-away rows (`_fanout`'s remap) can re-resolve them.
@@ -598,6 +601,14 @@ def _apply_backfill(session: Session, existing: Thing,
             for field in clash_fields:
                 fields.pop(field, None)
             continue
+        # A facet native_id (the pull's own uploader id, shared by every tab of the channel) is
+        # never evidence the holder is a duplicate — it is usually a sibling tab or URL-variant,
+        # and merging would delete it and hand the id to `existing`, whose next sibling's pull
+        # then eats *it* (tab-eats-tab cascade). Drop the claim; `existing` stays URL-keyed. A
+        # same-row url clash still marks a true duplicate and converges as usual.
+        if facet_native and "url" not in clash_fields:
+            fields.pop("native_id", None)
+            continue
         _merge_things(session, existing, clash)
         merged.append((clash.id, existing.id))
     for key, value in fields.items():
@@ -618,6 +629,11 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
     if stub is None:
         return
     existing = _find_thing(session, stub)
+    if existing is not None and existing.id == video.id:
+        # An extractor whose uploader_url equals the video's own webpage_url resolves the
+        # uploader to the video itself — never insert the (v, v, channel=True) self-loop,
+        # which would also satisfy 160_backfill's orphan anti-join and hide the video from it.
+        return
     if existing is None:
         stub.bucket = video.bucket
         session.add(stub)
@@ -625,8 +641,13 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         chan_id = stub.id
     else:
         chan_id = existing.id
+    # The full extract proves this parent IS the video's uploader, so an existing plain
+    # membership edge for the pair (V3-migrated data, or a channel first pulled as an anonymous
+    # playlist) upgrades to channel=True — `_upsert_rels`' monotonic OR, which for an
+    # always-True incoming edge is a plain set (never downgrades; Stage-1 can't demote it back).
     session.execute(pg_insert(Rel).values(
-        parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
+        parent=chan_id, child=video.id, channel=True).on_conflict_do_update(
+            index_elements=["parent", "child"], set_={"channel": True}))
 
 
 def _converge_urlless_channel(session: Session,
@@ -732,8 +753,24 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         xform.merge_attr(container, "channel_id", graph.playlist.native_id)
         graph.playlist.native_id = None
 
+    # A top-level pull that IS its own uploader (a channel or one of its tabs,
+    # `pl_full2things`' `_same_identity` verdict) carries a *facet* id: every tab of the
+    # channel reports the same native_id. Claiming it when free is fine (that's how a
+    # directly-pulled channel gains the id #160 linking relies on), but when a sibling already
+    # holds it the clash must never converge (`facet_native` below) — the holder is a
+    # different tab/URL-variant of the same channel, and merging would delete it and let the
+    # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a
+    # soft channel_id hint either way — in the raw channel_id namespace when known, so this
+    # write agrees with the parent-fed one above (merge_attr overwrites; a pull.native_id in
+    # the @handle form would otherwise flip the stored hint between namespaces across pulls).
+    facet_pull = graph.pull_is_channel
+    if facet_pull and graph.playlist.url is not None:
+        if (hint := pull.channel.channel_id or pull.native_id) is not None:
+            xform.merge_attr(container, "channel_id", hint)
+
     # The recorded thing IS the container: backfill it, classify it, mark success.
-    merged.update(_apply_backfill(session, container, graph.playlist))
+    merged.update(_apply_backfill(session, container, graph.playlist,
+                                  facet_native=facet_pull))
     container.container = True
     container.last_success_dt = now
     xform.clear_info_hint(container)   # "just a playlist": hint cleared after its own pull
@@ -868,9 +905,11 @@ def claim_job(item: ClaimRequest, session: Session = Depends(get_session)):
         Thing.best_oi == None, Thing.try_on <= today)  # noqa: E711
     # Stage-2 video meta-only: C-band leaf the flat pull under-described (no human-decision
     # metadata yet, last_success_dt NULL). Fetches metadata only — no media, no best_oi.
+    # A meta exists to make the thing rateable, so an already-human-rated leaf never needs
+    # one (#217): skip it even while its stored metadata stays formally incomplete.
     meta_branch = sa.and_(
         Thing.container == False, rating >= _PLAYLIST_FLOOR,  # noqa: E712
-        rating < _VIDEO_DOWNLOAD_FLOOR,
+        rating < _VIDEO_DOWNLOAD_FLOOR, Thing.human_rating == None,  # noqa: E711
         Thing.last_success_dt == None, Thing.best_oi == None,  # noqa: E711
         Thing.try_on <= today)
     # Exclude things with a fresh in-progress run (success IS NULL, claimed within the lease):

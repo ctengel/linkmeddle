@@ -441,6 +441,14 @@ def test_claim_meta_for_underdescribed_c(client):
     assert job and job["thing"]["id"] == v and job["download"] is False
 
 
+def test_claim_no_meta_for_already_rated(client):
+    # #217: a meta job exists to make a thing rateable, so a human-rated C leaf never needs
+    # one — skip it even while its stored metadata stays formally incomplete (last_success_dt
+    # NULL, e.g. a twitch VOD whose extractor never exposes a channel URL).
+    _seed_thing(type="video", url="http://e/vrated", human_rating=0.0, try_on=_TODAY)
+    assert _claim(client) is None
+
+
 def test_claim_download_outranks_meta(client):
     # A B video (download) outranks a C video (metadata-only) in a single ordering.
     b = _seed_thing(type="video", url="http://e/vb", human_rating=1.0, try_on=_TODAY)
@@ -1015,6 +1023,53 @@ def test_ingest_channel_autopopulates_video_channel(client):
     assert [e["thing"]["id"] for e in related if e["channel"]] == [tid]   # channel edge to chan
 
 
+def test_ingest_channel_autopopulates_via_channel_id(client):
+    # #217: the real youtube tab shape — the pull's own id is the raw channel_id (UC…) while
+    # UlChan.native_id carries the @handle-form uploader_id (different namespaces). Self-
+    # ownership must match on either id (xform.owns_native_id); the single-field compare left
+    # the #156 inheritance (and the #196 facet guard) silently dead on these pulls, so every
+    # tab-discovered video was born channel-less and earned a pointless Stage-2 meta job.
+    url = "http://yt/@real/videos"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="@real", channel_id="UCreal", title="Real",
+                         url="http://yt/@real")
+    pl = models.PullThing(
+        url=url, native_id="UCreal", title="Real - Videos", extractor_key="youtubetab",
+        playlist_count=1, channel=chan,                 # own uploader, matched via channel_id
+        entries=[models.PullThing(native_id="rv", title="R Vid", url="http://yt/v/rv",
+                                  extractor_key="youtube", channel=models.UlChan())])
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": pl.model_dump(mode="json")}).status_code == 200
+    vid = {v["native_id"]: v for v in
+           client.get("/things/", params={"container": False}).json()}["rv"]
+    assert vid["channel"] == "http://yt/@real"            # inherited the uploader URL
+    assert vid["last_success_dt"]                         # metadata-complete -> no meta job
+    related = client.get(f"/things/{vid['id']}/related").json()
+    assert [e["thing"]["id"] for e in related if e["channel"]] == [tid]   # channel edge to tab
+    tab = client.get(f"/things/{tid}").json()
+    assert tab["attrs"]["kind"] == "channel"              # self-owned pull tagged as channel
+
+
+def test_ingest_channel_autopopulates_uploader_id_with_other_channel_id(client):
+    # The other live shape: the pull's id equals uploader_id while a *different* channel_id is
+    # present. Both shapes coexist in recorded pulls, so the self-ownership test must accept a
+    # match on either id — a "prefer channel_id" flip would break this one.
+    url = "http://yt/@old/videos"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="@old", channel_id="UCother", title="Old",
+                         url="http://yt/@old")
+    pl = models.PullThing(
+        url=url, native_id="@old", title="Old - Videos", extractor_key="youtubetab",
+        playlist_count=1, channel=chan,                  # own uploader, matched via native_id
+        entries=[models.PullThing(native_id="ov", title="O Vid", url="http://yt/v/ov",
+                                  extractor_key="youtube", channel=models.UlChan())])
+    assert client.post(f"/jobs/{rid}/result",
+                       json={"playlist": pl.model_dump(mode="json")}).status_code == 200
+    vid = {v["native_id"]: v for v in
+           client.get("/things/", params={"container": False}).json()}["ov"]
+    assert vid["channel"] == "http://yt/@old" and vid["last_success_dt"]
+
+
 def test_meta_result_fans_out_channel(client):
     # A full meta extract reveals the uploader a flat pull omitted -> channel thing + rel.
     v, rid = _claimed_meta(client, url="http://e/mc")
@@ -1028,6 +1083,25 @@ def test_meta_result_fans_out_channel(client):
     assert len(chan) == 1 and chan[0]["thing"]["container"] is True
     assert chan[0]["thing"]["attrs"]["kind"] == "channel"
     assert chan[0]["thing"]["url"] == "http://e/chan9"
+
+
+def test_meta_result_self_uploader_url_no_self_loop(client):
+    # An extractor whose uploader_url equals the video's own webpage_url resolves the uploader
+    # stub to the video itself — the fan-out must skip it, not insert a (v, v, channel=True)
+    # self-loop, which would also satisfy 160_backfill's orphan anti-join and hide the video
+    # from that heal.
+    v, rid = _claimed_meta(client, url="http://e/selfchan")
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "scv", "title": "Self",
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/selfchan"},
+                                    "info_json": {"id": "scv"}}})
+    assert r.status_code == 200
+    related = client.get(f"/things/{v}/related").json()
+    assert [e for e in related if e["channel"]] == []     # no self channel edge
+    t = client.get(f"/things/{v}").json()
+    assert t["container"] is False and t["last_success_dt"]   # enrichment itself unaffected
 
 
 def test_meta_result_fans_out_url_less_channel(client):
@@ -1046,6 +1120,23 @@ def test_meta_result_fans_out_url_less_channel(client):
     assert chan[0]["thing"]["native_id"] == "UCidonly"
     assert chan[0]["thing"]["extractor_key"] is None
     assert chan[0]["thing"]["attrs"]["source_extractor"] == "somesite"
+
+
+def test_meta_result_upgrades_plain_edge_to_channel(client):
+    # A full extract proves the parent is the video's uploader, so an existing plain membership
+    # edge for the pair (V3-migrated data, or a channel first pulled as an anonymous playlist)
+    # upgrades to channel=True — pre-fix the edge-PK conflict silently left it False.
+    chan = _seed_thing(type="channel", url="http://e/chanup", try_on=None)
+    v, rid = _claimed_meta(client, url="http://e/vup")
+    _seed_rel(chan, v)                     # pre-existing plain membership edge (channel=False)
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "vup", "title": "VUP", "extractor_key": "somesite",
+                                "channel": {"native_id": "UCup", "url": "http://e/chanup"},
+                                "info_json": {"id": "vup"}}})
+    related = client.get(f"/things/{v}/related").json()
+    edges = [e for e in related if e["thing"]["id"] == chan]
+    assert len(edges) == 1 and edges[0]["channel"] is True
 
 
 def test_ingest_propagates_hints(client):
@@ -1654,6 +1745,108 @@ def test_channel_tab_self_pull_preserves_channel(client):
     tab_thing = client.get(f"/things/{tid}").json()
     assert tab_thing["id"] != chan_id                             # tab stays a distinct thing
     assert tab_thing["native_id"] is None                        # tab left URL-keyed (clash backfill dropped)
+
+
+def test_tab_self_pull_never_eats_unguarded_facet_holder(client):
+    # Tab-eats-tab cascade: the channel's shared id is held by a row WITHOUT the kind='channel'
+    # guard hint (a migrated V3 channel-URL container, or a sibling tab that claimed the id on an
+    # earlier self-pull). A tab self-pull proposes that facet id via null_backfill; pre-fix the
+    # clash merge-deleted the holder into the tab, which then held the id unguarded itself — so
+    # the next sibling's pull ate *it*, serially collapsing distinct tabs and mixing their run
+    # history. The facet clash must drop the claim instead: nothing is merged, every tab stays
+    # URL-keyed with the id as a soft channel_id hint.
+    holder = _seed_thing(container=True, url="http://yt/@casc/streams", try_on=None,
+                         extractor_key="youtubetab", native_id="UC")   # no attrs.kind guard
+    chan = models.UlChan(native_id="UC", title="Casc", url="http://yt/@casc")
+
+    def self_pull(tab_url, vid):
+        tid, rid = _claimed_run(client, tab_url)
+        pull = models.PullThing(
+            url=tab_url, native_id="UC", extractor_key="youtubetab", title="Casc tab",
+            container=True, playlist_count=1, channel=chan,
+            entries=[models.PullThing(native_id=vid, url=f"http://yt/v/{vid}", title=vid,
+                                      extractor_key="youtube", channel=chan)],
+        ).model_dump(mode="json")
+        assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+        return client.get(f"/things/{tid}").json()
+
+    tab_a = self_pull("http://yt/@casc/videos", "v1")
+    assert client.get(f"/things/{holder}").status_code == 200     # holder NOT merged/deleted
+    assert client.get(f"/things/{holder}").json()["native_id"] == "UC"   # ... and keeps the id
+    assert tab_a["native_id"] is None                             # tab stays URL-keyed
+    assert (tab_a["attrs"] or {}).get("channel_id") == "UC"       # id kept as a soft hint
+
+    tab_b = self_pull("http://yt/@casc/shorts", "v2")             # next sibling: no cascade
+    assert client.get(f"/things/{holder}").status_code == 200
+    assert client.get(f"/things/{tab_a['id']}").status_code == 200
+    assert tab_b["native_id"] is None
+
+
+def test_channel_self_pull_claims_free_facet_id(client):
+    # The counterpart: when nobody holds the channel's shared id, a self-owned pull still claims
+    # it (that's how a directly-pulled channel gains the native_id that ID-based video->channel
+    # linking (#160) and the url-less-stub convergence rely on), plus the channel_id hint.
+    url = "http://yt/@fresh/videos"
+    tid, rid = _claimed_run(client, url)
+    chan = models.UlChan(native_id="UCfresh", title="Fresh", url="http://yt/@fresh")
+    pull = models.PullThing(
+        url=url, native_id="UCfresh", extractor_key="youtubetab", title="Fresh - videos",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="f1", url="http://yt/v/f1", title="F1",
+                                  extractor_key="youtube", channel=chan)],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+    thing = client.get(f"/things/{tid}").json()
+    assert thing["native_id"] == "UCfresh"                        # free facet id claimed
+    assert (thing["attrs"] or {}).get("channel_id") == "UCfresh"  # hint stored alongside
+
+
+def test_tab_self_pull_facet_guard_fires_on_real_id_shape(client):
+    # #217: the cascade tests above use UlChan.native_id == the pull id, but on a real youtube
+    # tab pull UlChan.native_id is the @handle-form uploader_id while the pull's own id is the
+    # raw channel_id — the live cascade pulls (#196) have exactly this shape. The facet
+    # detection must match on channel_id too, or the guard is dead code and the holder is
+    # merge-deleted just like pre-#213.
+    holder = _seed_thing(container=True, url="http://yt/@shape/streams", try_on=None,
+                         extractor_key="youtubetab", native_id="UCshape")  # no kind guard
+    chan = models.UlChan(native_id="@shape", channel_id="UCshape", title="Shape",
+                         url="http://yt/@shape")
+    tid, rid = _claimed_run(client, "http://yt/@shape/videos")
+    pull = models.PullThing(
+        url="http://yt/@shape/videos", native_id="UCshape", extractor_key="youtubetab",
+        title="Shape tab", container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="sv", url="http://yt/v/sv", title="SV",
+                                  extractor_key="youtube", channel=models.UlChan())],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+    assert client.get(f"/things/{holder}").status_code == 200     # holder NOT merged/deleted
+    assert client.get(f"/things/{holder}").json()["native_id"] == "UCshape"
+    tab = client.get(f"/things/{tid}").json()
+    assert tab["native_id"] is None                               # tab stays URL-keyed
+    assert (tab["attrs"] or {}).get("channel_id") == "UCshape"    # id kept as a soft hint
+
+
+def test_channel_self_pull_url_fallback_facet_guard(client):
+    # The uploader can come with no ids at all — only a URL equal to the pull's own (a channel
+    # landing page). Self-ownership then rests on _same_identity's URL fallback, which the facet
+    # detection must share (it consumes ThingGraph.pull_is_channel): an id-only facet test
+    # misses this shape and merge-deletes the sibling holder exactly as pre-#213.
+    holder = _seed_thing(container=True, url="http://yt/@ufb/streams", try_on=None,
+                         extractor_key="youtubetab", native_id="UCufb")  # no kind guard
+    tid, rid = _claimed_run(client, "http://yt/@ufb")
+    chan = models.UlChan(url="http://yt/@ufb", title="UFB")      # no uploader/channel id
+    pull = models.PullThing(
+        url="http://yt/@ufb", native_id="UCufb", extractor_key="youtubetab", title="UFB",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="uv", url="http://yt/v/uv", title="UV",
+                                  extractor_key="youtube", channel=models.UlChan())],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+    assert client.get(f"/things/{holder}").status_code == 200     # holder NOT merged/deleted
+    assert client.get(f"/things/{holder}").json()["native_id"] == "UCufb"
+    thing = client.get(f"/things/{tid}").json()
+    assert thing["native_id"] is None                             # facet claim dropped
+    assert (thing["attrs"] or {}).get("channel_id") == "UCufb"    # id kept as a soft hint
 
 
 def test_tab_permafail_ack_survives_parent_refeed(client):

@@ -87,9 +87,14 @@ def _norm_extractor(info: dict) -> Optional[str]:
 
 
 def _pull_chan(info: dict) -> models.UlChan:
-    """Resolve the best uploader/channel identity from a playlist or entry dict."""
+    """Resolve the best uploader/channel identity from a playlist or entry dict.
+
+    `channel_id` rides alongside the collapsed `native_id`: yt-dlp's uploader_id and
+    channel_id are different namespaces (youtube: @handle vs UC…), and a channel tab's own
+    playlist id matches channel_id, not uploader_id — self-ownership tests need both."""
     return models.UlChan(url=info.get("uploader_url") or info.get("channel_url"),
                            native_id=info.get("uploader_id") or info.get("channel_id"),
+                           channel_id=info.get("channel_id"),
                            title=info.get("uploader"))
 
 
