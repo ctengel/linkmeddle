@@ -581,7 +581,7 @@ def _apply_backfill(session: Session, existing: Thing, incoming: Thing,
         # and merging would delete it and hand the id to `existing`, whose next sibling's pull
         # then eats *it* (tab-eats-tab cascade). Drop the claim; `existing` stays URL-keyed. A
         # same-row url clash still marks a true duplicate and converges as usual.
-        if facet_native and clash_fields == ["native_id"]:
+        if facet_native and "url" not in clash_fields:
             fields.pop("native_id", None)
             continue
         _merge_things(session, existing, clash)
@@ -604,6 +604,11 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
     if stub is None:
         return
     existing = _find_thing(session, stub)
+    if existing is not None and existing.id == video.id:
+        # An extractor whose uploader_url equals the video's own webpage_url resolves the
+        # uploader to the video itself — never insert the (v, v, channel=True) self-loop,
+        # which would also satisfy 160_backfill's orphan anti-join and hide the video from it.
+        return
     if existing is None:
         stub.bucket = video.bucket
         session.add(stub)
@@ -723,22 +728,20 @@ def _fanout(session: Session, pull: models.PullThing, container: Thing,
         xform.merge_attr(container, "channel_id", graph.playlist.native_id)
         graph.playlist.native_id = None
 
-    # A top-level pull that IS its own uploader (a channel or one of its tabs) carries a *facet*
-    # id: every tab of the channel reports the same native_id. Claiming it when free is fine
-    # (that's how a directly-pulled channel gains the id #160 linking relies on), but when a
-    # sibling already holds it the clash must never converge (`facet_native` below) — the holder
-    # is a different tab/URL-variant of the same channel, and merging would delete it and let the
-    # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a soft
-    # channel_id hint either way — in the raw channel_id namespace when known, so this write
-    # agrees with the parent-fed one above (merge_attr overwrites; a pull.native_id in the
-    # @handle form would otherwise flip the stored hint between namespaces across pulls).
-    # Matched against both uploader ids (xform.owns_native_id): a tab's own id equals the raw
-    # channel_id while UlChan.native_id prefers the @handle-form uploader_id (#217), so the
-    # single-field compare left this guard dead on real youtube tab pulls.
-    facet_pull = xform.owns_native_id(pull.native_id, pull.channel)
+    # A top-level pull that IS its own uploader (a channel or one of its tabs,
+    # `pl_full2things`' `_same_identity` verdict) carries a *facet* id: every tab of the
+    # channel reports the same native_id. Claiming it when free is fine (that's how a
+    # directly-pulled channel gains the id #160 linking relies on), but when a sibling already
+    # holds it the clash must never converge (`facet_native` below) — the holder is a
+    # different tab/URL-variant of the same channel, and merging would delete it and let the
+    # next sibling pull eat the new holder in turn (tab-eats-tab cascade). Keep the id as a
+    # soft channel_id hint either way — in the raw channel_id namespace when known, so this
+    # write agrees with the parent-fed one above (merge_attr overwrites; a pull.native_id in
+    # the @handle form would otherwise flip the stored hint between namespaces across pulls).
+    facet_pull = graph.pull_is_channel
     if facet_pull and graph.playlist.url is not None:
-        xform.merge_attr(container, "channel_id",
-                         pull.channel.channel_id or pull.native_id)
+        if (hint := pull.channel.channel_id or pull.native_id) is not None:
+            xform.merge_attr(container, "channel_id", hint)
 
     # The recorded thing IS the container: backfill it, classify it, mark success.
     merged.update(_apply_backfill(session, container, graph.playlist,

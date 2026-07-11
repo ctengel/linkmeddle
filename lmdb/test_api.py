@@ -1069,6 +1069,25 @@ def test_meta_result_fans_out_channel(client):
     assert chan[0]["thing"]["url"] == "http://e/chan9"
 
 
+def test_meta_result_self_uploader_url_no_self_loop(client):
+    # An extractor whose uploader_url equals the video's own webpage_url resolves the uploader
+    # stub to the video itself — the fan-out must skip it, not insert a (v, v, channel=True)
+    # self-loop, which would also satisfy 160_backfill's orphan anti-join and hide the video
+    # from that heal.
+    v, rid = _claimed_meta(client, url="http://e/selfchan")
+    r = client.post(f"/jobs/{rid}/result",
+                    json={"success": True,
+                          "video": {"native_id": "scv", "title": "Self",
+                                    "extractor_key": "youtube",
+                                    "channel": {"url": "http://e/selfchan"},
+                                    "info_json": {"id": "scv"}}})
+    assert r.status_code == 200
+    related = client.get(f"/things/{v}/related").json()
+    assert [e for e in related if e["channel"]] == []     # no self channel edge
+    t = client.get(f"/things/{v}").json()
+    assert t["container"] is False and t["last_success_dt"]   # enrichment itself unaffected
+
+
 def test_meta_result_fans_out_url_less_channel(client):
     # #160: a meta extract whose uploader has only an id (no URL) still links the video to a
     # native-id-keyed channel thing, with the video's extractor recorded as provenance.
@@ -1789,6 +1808,29 @@ def test_tab_self_pull_facet_guard_fires_on_real_id_shape(client):
     tab = client.get(f"/things/{tid}").json()
     assert tab["native_id"] is None                               # tab stays URL-keyed
     assert (tab["attrs"] or {}).get("channel_id") == "UCshape"    # id kept as a soft hint
+
+
+def test_channel_self_pull_url_fallback_facet_guard(client):
+    # The uploader can come with no ids at all — only a URL equal to the pull's own (a channel
+    # landing page). Self-ownership then rests on _same_identity's URL fallback, which the facet
+    # detection must share (it consumes ThingGraph.pull_is_channel): an id-only facet test
+    # misses this shape and merge-deletes the sibling holder exactly as pre-#213.
+    holder = _seed_thing(container=True, url="http://yt/@ufb/streams", try_on=None,
+                         extractor_key="youtubetab", native_id="UCufb")  # no kind guard
+    tid, rid = _claimed_run(client, "http://yt/@ufb")
+    chan = models.UlChan(url="http://yt/@ufb", title="UFB")      # no uploader/channel id
+    pull = models.PullThing(
+        url="http://yt/@ufb", native_id="UCufb", extractor_key="youtubetab", title="UFB",
+        container=True, playlist_count=1, channel=chan,
+        entries=[models.PullThing(native_id="uv", url="http://yt/v/uv", title="UV",
+                                  extractor_key="youtube", channel=models.UlChan())],
+    ).model_dump(mode="json")
+    assert client.post(f"/jobs/{rid}/result", json={"playlist": pull}).status_code == 200
+    assert client.get(f"/things/{holder}").status_code == 200     # holder NOT merged/deleted
+    assert client.get(f"/things/{holder}").json()["native_id"] == "UCufb"
+    thing = client.get(f"/things/{tid}").json()
+    assert thing["native_id"] is None                             # facet claim dropped
+    assert (thing["attrs"] or {}).get("channel_id") == "UCufb"    # id kept as a soft hint
 
 
 def test_tab_permafail_ack_survives_parent_refeed(client):
