@@ -1087,6 +1087,23 @@ def test_meta_result_fans_out_url_less_channel(client):
     assert chan[0]["thing"]["attrs"]["source_extractor"] == "somesite"
 
 
+def test_meta_result_upgrades_plain_edge_to_channel(client):
+    # A full extract proves the parent is the video's uploader, so an existing plain membership
+    # edge for the pair (V3-migrated data, or a channel first pulled as an anonymous playlist)
+    # upgrades to channel=True — pre-fix the edge-PK conflict silently left it False.
+    chan = _seed_thing(type="channel", url="http://e/chanup", try_on=None)
+    v, rid = _claimed_meta(client, url="http://e/vup")
+    _seed_rel(chan, v)                     # pre-existing plain membership edge (channel=False)
+    client.post(f"/jobs/{rid}/result",
+                json={"success": True,
+                      "video": {"native_id": "vup", "title": "VUP", "extractor_key": "somesite",
+                                "channel": {"native_id": "UCup", "url": "http://e/chanup"},
+                                "info_json": {"id": "vup"}}})
+    related = client.get(f"/things/{v}/related").json()
+    edges = [e for e in related if e["thing"]["id"] == chan]
+    assert len(edges) == 1 and edges[0]["channel"] is True
+
+
 def test_ingest_propagates_hints(client):
     # 1.3b: a playlist's cookies/lpm_lib hints propagate onto its video stubs (attrs);
     # channels do not carry the hints (bucket only).

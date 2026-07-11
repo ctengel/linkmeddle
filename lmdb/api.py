@@ -611,8 +611,13 @@ def _fanout_video_channel(session: Session, video: Thing, chan: models.UlChan) -
         chan_id = stub.id
     else:
         chan_id = existing.id
+    # The full extract proves this parent IS the video's uploader, so an existing plain
+    # membership edge for the pair (V3-migrated data, or a channel first pulled as an anonymous
+    # playlist) upgrades to channel=True — `_upsert_rels`' monotonic OR, which for an
+    # always-True incoming edge is a plain set (never downgrades; Stage-1 can't demote it back).
     session.execute(pg_insert(Rel).values(
-        parent=chan_id, child=video.id, channel=True).on_conflict_do_nothing())
+        parent=chan_id, child=video.id, channel=True).on_conflict_do_update(
+            index_elements=["parent", "child"], set_={"channel": True}))
 
 
 def _converge_urlless_channel(session: Session,
