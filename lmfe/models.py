@@ -184,7 +184,8 @@ class UpcomingJob(pydantic.BaseModel):
 class PervellamJob(pydantic.BaseModel):
     """One Pervellam (live-stream tool) job for the read-only dashboard panel. `fname` is an
     OI URL once the upload finished (filt=finished guarantees it); before that it's a bare
-    local filename."""
+    local filename. `oi_file` is the OI file UUID parsed off that URL's tail (Pervellam's
+    worker writes `{oi_url}file/{uuid}`) — the SPA's route into the OI player page."""
     id: Optional[int] = None
     url: Optional[str] = None
     dler: Optional[str] = None
@@ -193,6 +194,16 @@ class PervellamJob(pydantic.BaseModel):
     size: Optional[int] = None
     started: Optional[datetime.datetime] = None
     updated: Optional[datetime.datetime] = None
+    oi_file: Optional[uuid.UUID] = None
+
+    @pydantic.model_validator(mode="after")
+    def _oi_file_from_fname(self):
+        if self.oi_file is None and self.fname and self.fname.startswith("http"):
+            try:
+                self.oi_file = uuid.UUID(self.fname.rstrip("/").rsplit("/", 1)[-1])
+            except ValueError:
+                pass  # not an OI link after all — leave un-navigable
+        return self
 
 
 class ThingCreate(pydantic.BaseModel):

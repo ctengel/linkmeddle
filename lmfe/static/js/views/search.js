@@ -54,13 +54,12 @@ export async function renderTagSearch(params) {
     const things = result.things.map((t) => thingRow(t, {
       extras: extractorChip(t.extractor_key) + urlCell(t.url),
     })).join("");
-    // OI files LinkMeddle has no thing for: link straight out to their source.
+    // OI files LinkMeddle has no thing for: play them on the bare OI page (#/oi/…),
+    // which keeps the outbound source link.
     const orphans = result.unmatched.map((f) => `
       <div class="item-row">
         <span class="chip">OI only</span>
-        <span class="title">${f.source_url
-          ? `<a href="${escapeAttr(f.source_url)}" target="_blank">${escapeHtml(f.source_url)}</a>`
-          : `<span class="data">${escapeHtml(f.file_uuid)}</span>`}</span>
+        <span class="title"><a href="#/oi/${escapeAttr(f.file_uuid)}">${escapeHtml(f.source_url || f.file_uuid)}</a></span>
       </div>`).join("");
     el.innerHTML = (things + (orphans
       ? `<h3 style="margin-top:14px;">In the object store only</h3>${orphans}` : ""))

@@ -10,6 +10,7 @@ download URL (`best_oi` -> presigned S3 URL), never streamed through here.
 """
 import os
 import asyncio
+import uuid
 from typing import Optional
 from urllib.parse import urljoin
 import fastapi
@@ -18,6 +19,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
+import requests
 from obj_idx import client as oi_client
 from lmdb import models as pl_models
 from . import models as fe_models
@@ -206,6 +208,21 @@ async def get_playback(thing_id: str):
         raise fastapi.HTTPException(status_code=404, detail="No media acquired for this thing")
     download_url, object_url, oi_info = await run_in_threadpool(_resolve_media, best_oi)
     return fe_models.PlaybackInfo(best_oi=best_oi, download_url=download_url,
+                                  object_url=object_url,
+                                  oi_info=fe_models.OIFileInfo.from_oi_info(oi_info))
+
+
+@app.get("/oi/{file_uuid}/playback", response_model=fe_models.PlaybackInfo)
+async def get_oi_playback(file_uuid: uuid.UUID):
+    """Resolve a bare OI file (no LM thing behind it — e.g. a finished Pervellam capture or
+    a tag-search orphan) to consumer-usable URLs, for the SPA's #/oi/{uuid} player page.
+    The UUID is caller-supplied, so an OI error is mirrored rather than surfacing as a 500."""
+    try:
+        download_url, object_url, oi_info = await run_in_threadpool(_resolve_media, file_uuid)
+    except requests.HTTPError as exc:
+        raise fastapi.HTTPException(status_code=exc.response.status_code,
+                                    detail="OI file not found") from exc
+    return fe_models.PlaybackInfo(best_oi=file_uuid, download_url=download_url,
                                   object_url=object_url,
                                   oi_info=fe_models.OIFileInfo.from_oi_info(oi_info))
 

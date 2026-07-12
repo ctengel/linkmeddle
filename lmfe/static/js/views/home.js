@@ -220,12 +220,16 @@ async function loadPervellam() {
     return;
   }
   card.hidden = false;
+  // A finished capture with a parsed OI file UUID plays in-app (#/oi/…); without one,
+  // fall back to the raw OI link the fname holds.
   const pvRow = (j, done) => `
     <div class="item-row">
       <span class="chip ${done ? "chip-ok" : "chip-run"}">${escapeHtml(j.status || "?")}</span>
-      <span class="title">${done && j.fname
-        ? `<a href="${escapeAttr(j.fname)}" target="_blank">${escapeHtml(j.url || j.fname)}</a>`
-        : escapeHtml(j.url || "")}</span>
+      <span class="title">${done && j.oi_file
+        ? `<a href="#/oi/${escapeAttr(j.oi_file)}">${escapeHtml(j.url || j.fname)}</a>`
+        : done && j.fname
+          ? `<a href="${escapeAttr(j.fname)}" target="_blank">${escapeHtml(j.url || j.fname)}</a>`
+          : escapeHtml(j.url || "")}</span>
       ${j.dler ? `<span class="chip">${escapeHtml(j.dler)}</span>` : ""}
       <span class="muted">${j.updated ? fmtDt(j.updated) : ""}</span>
     </div>`;

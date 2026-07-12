@@ -47,6 +47,47 @@ export async function renderWatchSoon() {
   location.hash = `#/thing/${items[0].id}?ctx=${WATCH_SOON_CTX}`;
 }
 
+/* === Bare OI file page (#/oi/{file_uuid}) ===
+   A stripped-down player for OI files with no LM thing behind them — finished Pervellam
+   captures and tag-search orphans. Same MIME-aware media area + Stored file card as a
+   thing page (shared tag chips cross-navigate to LM videos); no ratings, no queue. */
+export async function renderOiFilePage(fileUuid) {
+  clearQueue();
+  queue.currentVideoId = null;
+  document.getElementById("app").innerHTML = `
+    <div class="row">
+      <div class="main">
+        <div class="card" style="padding:0; border:none; background:none;">
+          <div class="video-area" id="videoArea"></div>
+          <div class="player-bar" id="playerBar"></div>
+        </div>
+        <div class="card" id="currentThingInfo"><div class="spin">Loading</div></div>
+      </div>
+    </div>
+  `;
+  let playback;
+  try {
+    playback = await apiGet(`/oi/${fileUuid}/playback`);
+  } catch {
+    document.getElementById("currentThingInfo").innerHTML =
+      `<div class="error-box">Couldn't load this stored file — is Object Index reachable?</div>`;
+    return;
+  }
+  const src = playback.oi_info?.source_url;
+  document.getElementById("currentThingInfo").innerHTML = `
+    <h1 class="thing-title">${src && isHttpUrl(src)
+      ? `<a href="${escapeAttr(src)}" target="_blank">${escapeHtml(src)}</a>`
+      : escapeHtml(src || fileUuid)}</h1>
+    <div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-bottom:6px;">
+      <span class="chip">OI only</span>
+    </div>
+    ${playback.object_url ? `<div class="kv">OI record: <a class="data"
+        href="${escapeAttr(playback.object_url)}" target="_blank">${escapeHtml(fileUuid)}</a></div>` : ""}
+    ${oiFileHTML(playback.oi_info)}
+  `;
+  renderMediaArea(playback.download_url, playback.oi_info);
+}
+
 /* === Thing page === */
 
 export async function renderThingPage(thingId, ctxId) {

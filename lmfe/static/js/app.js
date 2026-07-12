@@ -5,7 +5,7 @@ import { initActionDelegation } from "./util.js";
 import { getVideoElement, navigatePlaylist, togglePiP, autoPlayEnabled,
          setAutoPlay } from "./player.js";
 import { renderHome, openOrAddUrl } from "./views/home.js";
-import { renderThingPage, renderWatchSoon } from "./views/thing.js";
+import { renderThingPage, renderWatchSoon, renderOiFilePage } from "./views/thing.js";
 import { renderBrowse } from "./views/browse.js";
 import { renderAdmin } from "./views/admin.js";
 import { renderSearch, renderTagSearch } from "./views/search.js";
@@ -22,6 +22,7 @@ function dispatch() {
   }
   if (parts[0] === "watch-soon") { renderWatchSoon(); return; }
   if (parts[0] === "thing" && parts[1]) { renderThingPage(parts[1], params.get("ctx")); return; }
+  if (parts[0] === "oi" && parts[1]) { renderOiFilePage(parts[1]); return; }
   if (parts[0] === "browse") { renderBrowse(parts[1], params); return; }
   if (parts[0] === "admin") { renderAdmin(params); return; }
   if (parts[0] === "search") { renderSearch(params); return; }
