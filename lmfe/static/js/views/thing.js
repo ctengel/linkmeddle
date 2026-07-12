@@ -1,9 +1,10 @@
 /* Thing page: player + info + graph neighbors, and the Watch Soon queue.
 
    Playlist navigation inside one container takes the *in-place* path: the persistent
-   <video> element gets a src swap and only the info card / sidebar highlight re-render.
-   That keeps playback position on rating (#182) AND keeps Picture-in-Picture alive as
-   autoplay advances (the player module owns the element). */
+   <video> element gets a src swap and only the info card, sidebar highlight, and
+   "In Playlists" panel (#133) re-render. That keeps playback position on rating (#182)
+   AND keeps Picture-in-Picture alive as autoplay advances (the player module owns the
+   element). */
 
 import { apiGet, apiPatch, getThingCached, getPlaybackInfoCached, invalidateCache,
          thingCache, applyRatingUpdate } from "../api.js";
@@ -24,8 +25,9 @@ export async function renderWatchSoon() {
   app.innerHTML = `<div class="card"><h2>&#9654; Watch Soon</h2><div class="spin">Loading</div></div>`;
   let items;
   try {
-    // The backend returns only acquired videos, already in weighted-random order (#129):
-    // unrated / band-A / newly-added each double a thing's chance of floating to the top.
+    // The backend returns only acquired, effectively B-or-better videos (#218), already in
+    // weighted-random order (#129): unrated / band-A / newly-added each double a thing's
+    // chance of floating to the top.
     items = await apiGet("/things/?watch_soon=true&limit=30");
   } catch {
     app.innerHTML = `<div class="card"><h2>&#9654; Watch Soon</h2><div class="error-box">Couldn't load</div></div>`;
@@ -33,7 +35,7 @@ export async function renderWatchSoon() {
   }
   if (!items.length) {
     app.innerHTML = `<div class="card"><h2>&#9654; Watch Soon</h2>
-      <div class="muted">No downloaded videos to watch yet.</div></div>`;
+      <div class="muted">No B-or-better downloaded videos to watch yet.</div></div>`;
     return;
   }
   thingCache[WATCH_SOON_CTX] = {
@@ -84,11 +86,11 @@ export async function renderThingPage(thingId, ctxId) {
         <div class="card" id="currentThingInfo"></div>
         ${isContainer ? childrenCard(children, page.id) : ""}
         ${isContainer && indirect.length ? indirectChildrenCard(indirect) : ""}
-        ${isVideo && parents.length ? parentsCard(parents) : ""}
+        ${isVideo ? `<div id="parentsArea">${parentsCard(parents)}</div>` : ""}
         <div class="card"><details id="runHistory"><summary class="muted" style="cursor:pointer;">Run history</summary>
           <div id="runHistoryBody"></div></details></div>
       </div>
-      ${sidebarHTML(thingId)}
+      <div id="sidebarArea" style="display:contents;">${sidebarHTML(thingId)}</div>
     </div>
   `;
 
@@ -255,9 +257,18 @@ function indirectChildrenCard(items) {
   return `<div class="card"><h3>Videos <span class="count">${items.length}</span></h3>${rows}</div>`;
 }
 
+/* "In Playlists" (#133): a row click switches the right-hand queue to that playlist
+   (stays on the video); the explicit Open button goes to the full playlist page.
+   (Open is a data-action button, not an anchor: the delegation resolves the closest
+   [data-action], so a plain anchor inside the action row would fire the row instead.) */
 function parentsCard(parents) {
+  if (!parents.length) return "";
   const rows = parents.map((r) => thingRow(r.thing, {
+    action: "switch-queue",
+    active: r.thing.id === queue.containerId,
     extras: r.channel ? `<span class="chip chip-ch">channel</span>` : "",
+    actions: `<button data-action="open-thing" data-id="${r.thing.id}"
+                      title="Open the full playlist page">Open</button>`,
   })).join("");
   return `<div class="card"><h3>In Playlists</h3>${rows}</div>`;
 }
@@ -284,9 +295,13 @@ export function sidebarRowsHTML(activeId) {
 
 function sidebarHTML(activeId) {
   if (!queue.containerData || !sidebarVideoChildren().length) return "";
+  // The title links to the full playlist page (#133) — except the client-only
+  // Watch Soon sentinel, which has no real thing page behind it.
+  const title = escapeHtml(queue.containerData.title || "Playlist");
   return `
     <div class="card sidebar">
-      <h3>${escapeHtml(queue.containerData.title || "Playlist")}</h3>
+      <h3>${queue.containerId === WATCH_SOON_CTX ? title
+        : `<a href="#/thing/${queue.containerId}" title="Open the full playlist page">${title}</a>`}</h3>
       <div id="playlistSidebar">${sidebarRowsHTML(activeId)}</div>
     </div>`;
 }
@@ -317,6 +332,19 @@ async function updateVideoInPlace(newVideoId) {
   // In-place transitions are deliberate navigations (autoplay-next via onended, or a sidebar
   // click) — start playback. Best-effort: a browser may block play() without a user gesture.
   document.querySelector("#videoArea video")?.play().catch(() => {});
+
+  refreshParentsPanel(newVideoId);
+}
+
+// Rebuild "In Playlists" for the video now showing (#133): the container summary we render
+// from has no `related`, so fetch the video's own page (cached across revisits). Fired
+// without await — media/info render first; the panel catches up when the fetch lands.
+async function refreshParentsPanel(videoId) {
+  const area = document.getElementById("parentsArea");
+  if (!area) return;
+  const full = await getThingCached(videoId).catch(() => null);
+  if (!full || queue.currentVideoId !== videoId) return;  // superseded by a later navigation
+  area.innerHTML = parentsCard((full.related || []).filter((r) => r.direction === "parent"));
 }
 
 async function loadRunHistory(thingId) {
@@ -402,6 +430,23 @@ registerAction("cookies-toggle", async (d) => {
 });
 
 registerAction("pip", () => togglePiP());
+
+registerAction("open-thing", (d) => { location.hash = `#/thing/${d.id}`; });
+
+// "In Playlists" row click (#133): stay on the video, re-point the right-hand queue
+// (sidebar + arrows/autoplay) at the chosen playlist.
+registerAction("switch-queue", async (d) => {
+  const containerData = await getThingCached(d.id).catch(() => null);
+  if (!containerData || !queue.currentVideoId) return;
+  setQueue(d.id, containerData);
+  const area = document.getElementById("sidebarArea");
+  if (area) area.innerHTML = sidebarHTML(queue.currentVideoId);
+  prefetchUpcomingPlayback(queue.currentVideoId);
+  refreshParentsPanel(queue.currentVideoId);  // move the active-playlist highlight
+  // Update the URL without a router dispatch: replaceState doesn't fire hashchange,
+  // so the persistent <video> (and PiP) keeps playing (#182).
+  history.replaceState(null, "", `#/thing/${queue.currentVideoId}?ctx=${d.id}`);
+});
 
 registerAction("tag-search", (d) => {
   location.hash = `#/tags?k=${encodeURIComponent(d.k)}&v=${encodeURIComponent(d.v)}`;

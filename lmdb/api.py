@@ -270,7 +270,9 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     a numeric threshold — e.g. `min_rating=1.0` returns everything effectively B-or-better.
 
     `watch_soon` (#129) is the consumption walk: only *acquired* videos (a leaf with `best_oi`
-    set), in weighted-random order so the most surface-worthy float up — each of unrated,
+    set) that are effectively B-or-better (#218 — human else machine rating clears the B floor;
+    unrated no-signal videos default to C and stay out, surfacing via `needs_rating` instead),
+    in weighted-random order so the most surface-worthy float up — each of unrated,
     band-A, and newly-added independently doubles a thing's selection weight (`2^k`, k=0..3),
     then Efraimidis–Spirakis sampling (`random() ^ (1/weight)`) turns the weights into a random
     permutation. `limit` caps the returned count (applies to any list; default unlimited).
@@ -311,8 +313,10 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     if new:
         stmt = stmt.where(Thing.created_dt >= new_cutoff)
     if watch_soon:
-        # Acquired watchable videos only: a leaf (container False) whose media has landed.
-        stmt = stmt.where(Thing.container == False, Thing.best_oi != None)  # noqa: E711,E712
+        # Acquired watchable videos only, and strictly B-or-better (#218): the effective
+        # rating (human, else machine, else the 0.0 C default) must clear the B floor.
+        stmt = stmt.where(Thing.container == False, Thing.best_oi != None,  # noqa: E711,E712
+                          _effective_rating_expr(default=0.0) >= xform.BAND_FLOOR["B"])
     if watch_soon:
         # Weighted-random walk (#129): weight doubles per favorable axis, then
         # `random() ^ (1/weight)` sorts into a weighted-random permutation (Efraimidis–Spirakis).

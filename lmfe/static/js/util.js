@@ -84,12 +84,16 @@ export function railClass(thing) {
 }
 
 /* One standard clickable thing row. `opts.extras` = trailing HTML chips/cells,
-   `opts.actions` = HTML for right-aligned buttons, `opts.ctx` = playlist context id. */
+   `opts.actions` = HTML for right-aligned buttons, `opts.ctx` = playlist context id.
+   `opts.action` makes the row fire that registered action (with data-id) instead of
+   navigating (data-action wins over data-nav in the delegation); `opts.active`
+   highlights the row. */
 export function thingRow(t, opts = {}) {
   const ctx = opts.ctx ? `?ctx=${opts.ctx}` : "";
+  const action = opts.action ? ` data-action="${opts.action}" data-id="${t.id}"` : "";
   return `
-    <div class="item-row${railClass(t)}${opts.dim ? " dim" : ""}" tabindex="0"
-         data-nav="#/thing/${t.id}${ctx}">
+    <div class="item-row${railClass(t)}${opts.dim ? " dim" : ""}${opts.active ? " active" : ""}"
+         tabindex="0" data-nav="#/thing/${t.id}${ctx}"${action}>
       ${typeChip(t.container, t.kind)}
       <span class="title">${escapeHtml(t.title || "Untitled")}</span>
       ${gradeChip(t)}
@@ -126,10 +130,19 @@ export function initActionDelegation() {
       location.hash = navEl.dataset.nav;
     }
   });
-  // Enter on a focused row follows it (rows are tabbable for keyboard use, #134)
+  // Enter on a focused row follows it (rows are tabbable for keyboard use, #134);
+  // action rows fire their action, same precedence as click (native controls excluded —
+  // they already handle Enter themselves).
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter") return;
+    if (e.key !== "Enter" || e.target.closest?.("a,button,input,select")) return;
+    const actionEl = e.target.closest?.("[data-action]");
+    const fn = actionEl && actionHandlers[actionEl.dataset.action];
+    if (fn) {
+      e.preventDefault();
+      fn(actionEl.dataset, actionEl);
+      return;
+    }
     const navEl = e.target.closest?.("[data-nav]");
-    if (navEl && !e.target.closest("a,button,input,select")) location.hash = navEl.dataset.nav;
+    if (navEl) location.hash = navEl.dataset.nav;
   });
 }

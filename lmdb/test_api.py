@@ -149,9 +149,10 @@ def test_list_things_watch_soon(client):
     # Watch Soon (#129) returns only *acquired* videos (a leaf with best_oi set), excluding
     # containers and un-acquired stubs; `limit` caps the count.
     _seed_thing(container=True, url="http://ws/container")            # container: excluded
-    _seed_thing(container=False, url="http://ws/pending")             # no best_oi: excluded
+    _seed_thing(container=False, url="http://ws/pending", human_rating=1.0)  # no best_oi: excluded
     acquired = {
-        _seed_thing(container=False, url=f"http://ws/vid{i}", best_oi=uuid.uuid4())
+        _seed_thing(container=False, url=f"http://ws/vid{i}", best_oi=uuid.uuid4(),
+                    human_rating=1.0)
         for i in range(3)
     }
     got = client.get("/things/", params={"watch_soon": True}).json()
@@ -159,6 +160,21 @@ def test_list_things_watch_soon(client):
     assert all(t["container"] is False and t["best_oi"] for t in got)
     # limit caps the returned count (general-purpose param)
     assert len(client.get("/things/", params={"watch_soon": True, "limit": 2}).json()) == 2
+
+
+def test_watch_soon_rating_floor(client):
+    # Watch Soon is strictly B-or-better (#218): the *effective* rating (human, else
+    # machine-from-parents, else the 0.0 C default) must clear the B floor.
+    _seed_thing(container=False, url="http://wsf/c", best_oi=uuid.uuid4(), human_rating=0.0)
+    _seed_thing(container=False, url="http://wsf/d", best_oi=uuid.uuid4(), human_rating=-1.0)
+    _seed_thing(container=False, url="http://wsf/nosignal", best_oi=uuid.uuid4())  # default C
+    human_b = _seed_thing(container=False, url="http://wsf/b", best_oi=uuid.uuid4(),
+                          human_rating=1.0)
+    machine_a = _seed_thing(container=False, url="http://wsf/machine-a", best_oi=uuid.uuid4())
+    apl = _seed_thing(type="playlist", url="http://wsf/apl", human_rating=2.0)
+    _seed_rel(apl, machine_a)   # unrated video under an A playlist -> machine A -> in
+    got = client.get("/things/", params={"watch_soon": True}).json()
+    assert {t["id"] for t in got} == {human_b, machine_a}
 
 
 def test_extractor_native_lookup(client):
