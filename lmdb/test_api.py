@@ -174,6 +174,48 @@ def test_extractor_native_lookup(client):
     assert r.json()[0]["native_id"] == "abc123"
 
 
+def test_list_things_title_search(client):
+    # q= is a case-insensitive substring search on title (#134 "ctrl+f")
+    _seed_thing(container=False, url="http://q/1", title="Great Blue Heron")
+    _seed_thing(container=True, url="http://q/2", title="great expectations")
+    _seed_thing(container=False, url="http://q/3", title="Something else")
+    _seed_thing(container=False, url="http://q/4", title="100% great_stuff")
+    got = client.get("/things/", params={"q": "great"}).json()
+    assert {t["url"] for t in got} == {"http://q/1", "http://q/2", "http://q/4"}
+    # combinable with the structural filters
+    got = client.get("/things/", params={"q": "great", "container": True}).json()
+    assert [t["url"] for t in got] == ["http://q/2"]
+    # ILIKE metacharacters in q match literally, not as wildcards
+    assert [t["url"] for t in client.get("/things/", params={"q": "0% grea"}).json()] \
+        == ["http://q/4"]
+    assert [t["url"] for t in client.get("/things/", params={"q": "great_s"}).json()] \
+        == ["http://q/4"]
+    assert client.get("/things/", params={"q": "t_l"}).json() == []  # _ is not any-char
+
+
+def test_list_things_best_oi_lookup(client):
+    # best_oi= (repeatable) is the OI->LM reverse mapping for the tag-search flow
+    oi1, oi2 = uuid.uuid4(), uuid.uuid4()
+    t1 = _seed_thing(container=False, url="http://boi/1", best_oi=oi1)
+    t2 = _seed_thing(container=False, url="http://boi/2", best_oi=oi2)
+    _seed_thing(container=False, url="http://boi/3", best_oi=uuid.uuid4())  # not asked for
+    got = client.get("/things/", params={"best_oi": [str(oi1), str(oi2)]}).json()
+    assert {t["id"] for t in got} == {t1, t2}
+    assert client.get("/things/", params={"best_oi": str(uuid.uuid4())}).json() == []
+
+
+def test_thing_facets(client):
+    _seed_thing(url="http://fx/1", extractor_key="youtube")
+    _seed_thing(url="http://fx/2", extractor_key="youtube")
+    _seed_thing(url="http://fx/3", extractor_key="vimeo")
+    _seed_thing(url="http://fx/4")  # unidentified -> NULL facet
+    r = client.get("/things/facets")
+    assert r.status_code == 200
+    assert {f["extractor_key"]: f["count"] for f in r.json()} \
+        == {"youtube": 2, "vimeo": 1, None: 1}
+    assert r.json()[0] == {"extractor_key": "youtube", "count": 2}  # most-populous first
+
+
 # --- get / related / runs --------------------------------------------------------------
 
 def test_get_thing_404(client):
@@ -465,6 +507,32 @@ def test_claim_unknown_container_never_downloads(client):
     v = _seed_thing(url="http://e/unknown-b", human_rating=2.0, try_on=_TODAY)  # container NULL
     job = _claim(client)
     assert job and job["thing"]["id"] == v and job["download"] is False
+
+
+def test_upcoming_jobs_order_and_kinds(client):
+    # GET /jobs/upcoming (#193) previews the exact claim ordering with branch kinds
+    pl = _seed_thing(type="playlist", url="http://u/pl", human_rating=0.0, try_on=_TODAY)
+    vb = _seed_thing(type="video", url="http://u/vb", human_rating=1.0, try_on=_TODAY)
+    vc = _seed_thing(type="video", url="http://u/vc", try_on=_TODAY)  # unrated C -> meta
+    _seed_thing(type="video", url="http://u/fut", human_rating=2.0, try_on=_FUTURE)  # not due
+    got = client.get("/jobs/upcoming").json()
+    assert [(j["thing"]["id"], j["kind"], j["download"]) for j in got] \
+        == [(pl, "pull", False), (vb, "download", True), (vc, "meta", False)]
+    # the preview claims nothing — no run rows created
+    assert client.get("/runs/").json() == []
+    # and the top preview row is exactly what claim then hands out
+    assert _claim(client)["thing"]["id"] == pl
+
+
+def test_upcoming_jobs_limit_and_excludes_claimed(client):
+    pl = _seed_thing(type="playlist", url="http://u2/pl", try_on=_TODAY)
+    v = _seed_thing(type="video", url="http://u2/v", human_rating=1.0, try_on=_TODAY)
+    only = client.get("/jobs/upcoming", params={"limit": 1}).json()
+    assert [j["thing"]["id"] for j in only] == [pl]
+    job = _claim(client)  # claims the playlist, leaving an in-progress run
+    assert job["thing"]["id"] == pl
+    got = client.get("/jobs/upcoming").json()
+    assert [j["thing"]["id"] for j in got] == [v]  # claimed thing hidden by its active run
 
 
 def test_claim_skips_ineligible_playlists(client):
