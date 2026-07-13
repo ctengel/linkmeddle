@@ -6,6 +6,11 @@ import { apiGet, apiPost } from "../api.js";
 import { escapeHtml, escapeAttr, thingRow, typeChip, gradeChip, extractorChip,
          urlCell, fmtDt, railClass } from "../util.js";
 
+// Cap the (otherwise unbounded) Need to Fix list so the dashboard stays short — the
+// BFF already sorts most-urgent first, so the tail is the least important. 10 matches
+// the Need to See / Needs Rating panels.
+const FAILED_CAP = 10;
+
 export async function renderHome(prefillUrl = "") {
   const app = document.getElementById("app");
   app.innerHTML = `
@@ -141,7 +146,7 @@ async function loadNeedToFix() {
     // BFF sorts: actionable (try_on set) before acked permafails, rating-desc then
     // most-recent-failure first. ?failing already excludes failures with a later success.
     const data = await apiGet("/things/?failing=true");
-    fill(el, data.map((t) => {
+    const rows = data.slice(0, FAILED_CAP).map((t) => {
       const acked = !t.try_on; // permafail acknowledged: keep visible but dim + labeled
       const actions = acked
         ? `<button data-action="run-today" data-id="${t.id}">Retry</button>`
@@ -153,7 +158,12 @@ async function loadNeedToFix() {
                  <span class="muted">${t.last_failure_dt ? fmtDt(t.last_failure_dt) : ""}</span>`,
         actions,
       });
-    }).join(""), "Nothing broken \u{1F389}");
+    }).join("");
+    // Honest cap: name the hidden remainder rather than silently dropping broken things.
+    const more = data.length > FAILED_CAP
+      ? `<div class="muted">…and ${data.length - FAILED_CAP} more (see Browse)</div>`
+      : "";
+    fill(el, rows + more, "Nothing broken \u{1F389}");
   } catch { fillError(el); }
 }
 
