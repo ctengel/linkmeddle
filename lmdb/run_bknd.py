@@ -9,7 +9,6 @@ import os
 import io
 import json
 import argparse
-import time
 import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.extractor import get_info_extractor
@@ -316,7 +315,6 @@ def init_download(url: str, *,
         except YoutubeDLError as e:
             # TODO callback failure to API?
             warnings.warn(f"Error downloading {url}: {str(e)}")
-            time.sleep(128)
             return None, cookies_used
     if cookies:
         cookies.seek(0)
@@ -324,9 +322,6 @@ def init_download(url: str, *,
         # TODO callback success to Crustula
     print("Download completed for URL:", url)
     _print_download_result(info)
-    # TODO this sleep adds per-job latency to the worker loop; tune/remove now that the
-    #      server owns try_on backoff
-    time.sleep(64)
     return ydl.sanitize_info(info), cookies_used
 
 def cli():

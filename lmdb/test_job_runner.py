@@ -219,7 +219,6 @@ class _FakeYDL:
 def fake_ydl(monkeypatch):
     ydl = _FakeYDL()
     monkeypatch.setattr(run_bknd, "_ydl", lambda **kwargs: ydl)
-    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
     return ydl
 
 
@@ -244,7 +243,6 @@ def test_init_download_cookie_404_falls_back(monkeypatch):
     ydl = _FakeYDL()
     captured = {}
     monkeypatch.setattr(run_bknd, "_ydl", lambda **kw: captured.update(kw) or ydl)
-    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
 
     info, cookies_used = run_bknd.init_download("https://x/v/abc", download=False,
                                                 use_cookies=True)
@@ -265,6 +263,7 @@ def test_main_reports_failure_on_raising_job(monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("kaboom")
     monkeypatch.setattr(job_runner, "initiate_job", boom)
+    monkeypatch.setattr(job_runner.time, "sleep", lambda *_: None)  # #174 between-jobs pause
 
     reported = {}
     monkeypatch.setattr(job_runner, "post_result",
@@ -282,12 +281,38 @@ def test_main_logs_each_failure(monkeypatch, capsys):
                  for i in range(3)])
     monkeypatch.setattr(job_runner, "claim_job", lambda *a, **k: next(jobs, None))
     monkeypatch.setattr(job_runner, "initiate_job", lambda *a, **k: False)
+    monkeypatch.setattr(job_runner.time, "sleep", lambda *_: None)  # #174 between-jobs pause
     rc = job_runner.main()
     out = capsys.readouterr().out
     assert rc == 1
     assert out.count("FAIL run=") == 3
     assert "r0" in out and "r1" in out and "r2" in out
     assert "Stopping after 3 fails" in out
+
+
+def test_main_pauses_after_reporting(monkeypatch):
+    # #174: the between-jobs pause must fire AFTER the job's result is reported (not before,
+    # as it used to when the sleep lived inside init_download), and be longer for a failed run.
+    jobs = iter([{"run_id": "ok", "download": False, "cookies": False,
+                  "thing": {"id": "t0", "url": "u", "attrs": None}},
+                 {"run_id": "bad", "download": False, "cookies": False,
+                  "thing": {"id": "t1", "url": "u", "attrs": None}}])
+    monkeypatch.setattr(job_runner, "claim_job", lambda *a, **k: next(jobs, None))
+
+    events: list = []
+
+    def fake_initiate(api, job, worker):
+        # initiate_job reports the result before returning; model that ordering here.
+        events.append(("report", job["run_id"]))
+        return job["run_id"] == "ok"
+    monkeypatch.setattr(job_runner, "initiate_job", fake_initiate)
+    monkeypatch.setattr(job_runner.time, "sleep", lambda secs: events.append(("sleep", secs)))
+
+    job_runner.main([])
+    assert events == [
+        ("report", "ok"), ("sleep", job_runner.SUCCESS_PAUSE_SECONDS),
+        ("report", "bad"), ("sleep", job_runner.FAILURE_PAUSE_SECONDS),
+    ]
 
 
 def test_init_download_uses_extract_info_without_info_dict(fake_ydl):
@@ -301,7 +326,6 @@ def test_init_download_threads_flat_into_ydl(monkeypatch):
     captured = {}
     monkeypatch.setattr(run_bknd, "_ydl",
                         lambda **kw: captured.update(kw) or _FakeYDL())
-    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
     run_bknd.init_download("https://x/pl", download=False, flat=True)
     assert captured["extract_flat"] is True
     captured.clear()
@@ -326,7 +350,6 @@ def test_init_download_threads_noplaylist_on_download(monkeypatch):
     captured = {}
     monkeypatch.setattr(run_bknd, "_ydl",
                         lambda **kw: captured.update(kw) or _FakeYDL())
-    monkeypatch.setattr(run_bknd.time, "sleep", lambda *_: None)
     monkeypatch.setenv("OBJIDX_URL", "http://oi/")
     monkeypatch.setenv("OBJIDX_AUTH", "user")
     monkeypatch.setattr(run_bknd.ytdl_arch_oi, "ObjIdxDlArch", lambda **kw: None)

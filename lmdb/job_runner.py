@@ -10,6 +10,7 @@ Single worker in 4.0; the claim endpoint's SKIP LOCKED makes it safe once a 2nd 
 # TODO use models from lmdb.models where appropriate
 
 import os
+import time
 import shutil
 import socket
 import argparse
@@ -27,6 +28,11 @@ RESULT_TIMEOUT = 64  # large playlists make a big POST body (mirrors the old plu
 # pervellam (pervellam 6cffa41, #43) so the two tools share one knob.
 DEFAULT_MIN_FREE_BYTES = 32 * 1024**3  # 32 GiB
 MIN_FREE_ENV = "WORKER_MIN_FREE_BYTES"
+# Politeness pause between jobs (#174). Applied *after* the prior job's result is posted, so
+# reporting is never delayed by the sleep. Longer after a failed run (the download-side
+# back-off; the server still owns try_on scheduling).
+SUCCESS_PAUSE_SECONDS = 64
+FAILURE_PAUSE_SECONDS = 128
 
 # TODO prepare for bearer auth
 
@@ -224,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         if fails >= 3:
             print(f"Stopping after {fails} fails, and {count} jobs; worker={WORKER}.")
             return status
+        # #174: the job's result is already reported above (initiate_job/report_failure) —
+        # pause between jobs now, so reporting is never delayed by the politeness sleep.
+        time.sleep(FAILURE_PAUSE_SECONDS if not succ else SUCCESS_PAUSE_SECONDS)
     print(f"Ran {count} job(s); worker={WORKER}.")
     return status
 
