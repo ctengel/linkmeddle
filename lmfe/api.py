@@ -10,13 +10,15 @@ download URL (`best_oi` -> presigned S3 URL), never streamed through here.
 """
 import os
 import asyncio
+import glob
+import tempfile
 import uuid
 from typing import Optional
 from urllib.parse import urljoin
 import fastapi
 from fastapi import Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 import requests
@@ -28,8 +30,14 @@ LINKMEDDLE_PLAPI = os.getenv("LINKMEDDLE_PLAPI", "http://localhost:29072/")
 OI_BUCKET = os.getenv("OBJIDX_BUCKET_DEFAULT")
 OBJIDX_URL = os.getenv("OBJIDX_URL")
 PERVELLAM_URL = os.getenv("PERVELLAM_URL")
+THUMB_DIR = os.getenv("LMFE_THUMB_DIR", "thumb_cache")
 # Cap on OI files a tag search maps back to things (each becomes a best_oi= query param).
 TAG_SEARCH_MAX = 100
+# Thumbnails are cached only in these types (ext keyed by upstream Content-Type); anything
+# else — HTML error pages, exotic formats — is treated as no-thumbnail rather than cached.
+THUMB_TYPES = {"image/jpeg": ".jpg", "image/png": ".png",
+               "image/webp": ".webp", "image/gif": ".gif"}
+THUMB_MAX_BYTES = 20 * 1024 * 1024
 
 app = fastapi.FastAPI()
 
@@ -230,6 +238,57 @@ async def get_oi_playback(file_uuid: uuid.UUID):
     return fe_models.PlaybackInfo(best_oi=file_uuid, download_url=download_url,
                                   object_url=object_url,
                                   oi_info=fe_models.OIFileInfo.from_oi_info(oi_info))
+
+
+def _thumb_response(path: str) -> FileResponse:
+    """Serve a cached thumbnail with a modest browser-cache TTL (not immutable — the
+    OI-screencap source may later take over the same URL)."""
+    ext = os.path.splitext(path)[1]
+    mime = next(m for m, e in THUMB_TYPES.items() if e == ext)
+    return FileResponse(path, media_type=mime,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+async def _fetch_thumb(url: str) -> tuple[bytes, str]:
+    """Fetch a thumbnail from its source URL -> (body, content-type). This is the seam a
+    future version replaces with OI-object screencap generation. 404s on anything
+    unusable — fetch error, non-2xx, unknown/non-image type, oversized body — so the
+    consumer sees one no-thumb signal and nothing bogus is ever cached."""
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(url)
+    except httpx.HTTPError as exc:
+        raise fastapi.HTTPException(status_code=404, detail="Thumbnail fetch failed") from exc
+    ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+    if resp.is_error or ctype not in THUMB_TYPES or len(resp.content) > THUMB_MAX_BYTES:
+        raise fastapi.HTTPException(status_code=404, detail="Thumbnail fetch failed")
+    return resp.content, ctype
+
+
+@app.get("/things/{thing_id}/thumb", response_class=FileResponse)
+async def get_thumb(thing_id: uuid.UUID):
+    """Serve a thing's thumbnail from the local cache (LMFE_THUMB_DIR), fetching it from
+    the thing's thumbnail_url on first request. A cache hit is served straight off disk
+    with no backend calls; once cached it is kept until the file is deleted. Every miss —
+    unknown thing, null thumbnail_url, failed fetch — is a 404 (the SPA/mobile treat any
+    non-200 as no-thumb); failures are not cached, so the next request retries. thing_id
+    is typed as a UUID (unlike the str elsewhere) because it becomes a cache filename."""
+    hits = glob.glob(os.path.join(THUMB_DIR, f"{thing_id}.*"))
+    if hits:
+        return _thumb_response(hits[0])
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi(f"/things/{thing_id}")))
+    thumb_url = pl_models.ThingRead.model_validate(resp.json()).thumbnail_url
+    if not thumb_url:
+        raise fastapi.HTTPException(status_code=404, detail="No thumbnail for this thing")
+    body, ctype = await _fetch_thumb(thumb_url)
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=THUMB_DIR)
+    with os.fdopen(fd, "wb") as fobj:
+        fobj.write(body)
+    path = os.path.join(THUMB_DIR, f"{thing_id}{THUMB_TYPES[ctype]}")
+    os.replace(tmp, path)
+    return _thumb_response(path)
 
 
 @app.get("/things/{thing_id}/runs", response_model=list[fe_models.RunSummary])
