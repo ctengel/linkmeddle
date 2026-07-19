@@ -1,9 +1,9 @@
 """Tests for lmdb.scrub_oi (the V4 OI scrubber, #111).
 
 Selection tests are DB-backed (throwaway PostgreSQL via pytest-postgresql, as in
-test_api.py) because the A-band set rides the compute-on-read machine-rating SQL.
+test_api.py) because the band cohorts ride the compute-on-read machine-rating SQL.
 Action tests are pure logic (no DB, no network): a fake OI client plus monkeypatched
-locator/replication functions, in the test_job_runner.py style.
+locator/replication/deletion functions, in the test_job_runner.py style.
 """
 
 import uuid
@@ -85,33 +85,34 @@ def test_replication_human_rating_overrides_machine(session):
     assert scrub_oi.replication_candidates(session) == []
 
 
+def test_reduction_candidates_below_b_not_human_df(session):
+    human_c = _thing(session, rating=0.0, best_oi=True)
+    unrated = _thing(session, rating=None, best_oi=True)   # effective defaults to 0 = C
+    parent = _thing(session, rating=-1.0, container=True)
+    machine_d = _thing(session, rating=None, best_oi=True)  # machine-D reduces, not deletes
+    session.add(Rel(parent=parent.id, child=machine_d.id))
+    session.commit()
+    _thing(session, rating=1.0, best_oi=True)    # B: untouched either way
+    _thing(session, rating=2.0, best_oi=True)    # A: the replication branch's cohort
+    _thing(session, rating=-1.0, best_oi=True)   # human D: the deletion branch's cohort
+    _thing(session, rating=0.0, best_oi=False)   # C but never acquired
+    got = {t.id for t in scrub_oi.reduction_candidates(session)}
+    assert got == {human_c.id, unrated.id, machine_d.id}
+
+
 # --- fakes for the action tests ----------------------------------------------------------
 
 class FakeOI:
-    """obj_idx client stand-in: file UUID -> object dict; records PUTs.
+    """obj_idx client stand-in: file UUID -> object dict."""
 
-    `honor_delete` mimics a future OI that really tombstones (objectindex#23); False
-    mimics today's silent refusal for completed objects (the PUT returns it unchanged).
-    """
-
-    def __init__(self, objects: dict, honor_delete: bool = False):
+    def __init__(self, objects: dict):
         self.objects = objects
-        self.honor_delete = honor_delete
-        self.puts = []
 
     def get_file(self, fil_uuid):
         obj = self.objects.get(fil_uuid)
         if obj == "missing":
             raise requests.HTTPError("404 File not found")
         return SimpleNamespace(object=obj)
-
-    def put_object(self, obj_uuid, info):
-        self.puts.append((obj_uuid, info))
-        obj = next(o for o in self.objects.values()
-                   if o not in (None, "missing") and o["uuid"] == obj_uuid)
-        if self.honor_delete:
-            obj = {**obj, "deleted": True}
-        return obj
 
 
 def _mem_thing(rating=None) -> Thing:
@@ -125,42 +126,84 @@ def _obj(completed=True, deleted=False, bucket="b", key="k", size=100):
 
 # --- deletion actions ---------------------------------------------------------------------
 
-def test_delete_applied_and_honored():
+def _patch_delete(monkeypatch, result=True):
+    """Fake oic.delete_object_data (raising=False: the installed obj_idx may predate
+    0.3.8, where the function first appears); an Exception result is raised."""
+    calls = []
+
+    def fake(objidx, objid, locator):
+        calls.append((objid, locator))
+        if isinstance(result, Exception):
+            raise result
+        return result
+    monkeypatch.setattr(scrub_oi.oic, "delete_object_data", fake, raising=False)
+    return calls
+
+
+def test_delete_applied_and_confirmed(monkeypatch):
     thing = _mem_thing(rating=-1.0)
-    oi = FakeOI({thing.best_oi: _obj()}, honor_delete=True)
-    tally = scrub_oi.scrub_deletions([thing], oi, apply=True)
-    assert [p[1] for p in oi.puts] == [{"deleted": True}]
+    obj = _obj()
+    calls = _patch_delete(monkeypatch, result=True)
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: obj}),
+                                     "http://loc/", apply=True)
+    assert calls == [(obj["uuid"], "http://loc/")]
     assert (tally.acted, tally.pending, tally.anomalies) == (1, 0, 0)
 
 
-def test_delete_refused_is_pending_not_anomaly():
-    # Today's OI: PUT deleted=True on a completed object comes back unchanged.
+def test_delete_unconfirmed_is_pending_not_anomaly(monkeypatch):
+    # delete_object_data ran out of retries (a store server busy/unreachable): the
+    # record is left unmarked and a future scrub converges.
     thing = _mem_thing(rating=-2.0)
-    oi = FakeOI({thing.best_oi: _obj()}, honor_delete=False)
-    tally = scrub_oi.scrub_deletions([thing], oi, apply=True)
-    assert len(oi.puts) == 1
+    calls = _patch_delete(monkeypatch, result=False)
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: _obj()}),
+                                     "http://loc/", apply=True)
+    assert len(calls) == 1
     assert (tally.acted, tally.pending, tally.anomalies) == (0, 1, 0)
 
 
-def test_delete_already_tombstoned_is_noop():
+def test_delete_never_completed_is_anomaly(monkeypatch):
+    # best_oi behind an incomplete upload: delete_object_data refuses (ValueError,
+    # scrub --clear territory) rather than tombstoning the key mid-upload.
     thing = _mem_thing(rating=-1.0)
-    oi = FakeOI({thing.best_oi: _obj(deleted=True)})
-    tally = scrub_oi.scrub_deletions([thing], oi, apply=True)
-    assert oi.puts == []
+    _patch_delete(monkeypatch, result=ValueError("upload not completed"))
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: _obj()}),
+                                     "http://loc/", apply=True)
+    assert (tally.anomalies, tally.acted, tally.pending) == (1, 0, 0)
+
+
+def test_delete_http_error_is_anomaly(monkeypatch):
+    # e.g. the locator identity lacks the `delete` RBAC permission (401/403).
+    thing = _mem_thing(rating=-1.0)
+    _patch_delete(monkeypatch, result=requests.HTTPError("403 Forbidden"))
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: _obj()}),
+                                     "http://loc/", apply=True)
+    assert (tally.anomalies, tally.acted, tally.pending) == (1, 0, 0)
+
+
+def test_delete_already_tombstoned_is_noop(monkeypatch):
+    thing = _mem_thing(rating=-1.0)
+    calls = _patch_delete(monkeypatch)
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: _obj(deleted=True)}),
+                                     "http://loc/", apply=True)
+    assert calls == []
     assert (tally.ok, tally.acted, tally.anomalies) == (1, 0, 0)
 
 
-def test_delete_dry_run_touches_nothing():
+def test_delete_dry_run_touches_nothing(monkeypatch):
     thing = _mem_thing(rating=-1.0)
-    oi = FakeOI({thing.best_oi: _obj()}, honor_delete=True)
-    tally = scrub_oi.scrub_deletions([thing], oi, apply=False)
-    assert oi.puts == []
+    calls = _patch_delete(monkeypatch)
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: _obj()}),
+                                     "http://loc/", apply=False)
+    assert calls == []
     assert tally.acted == 1  # reported as "would delete"
 
 
-def test_delete_missing_oi_file_is_anomaly():
+def test_delete_missing_oi_file_is_anomaly(monkeypatch):
     thing = _mem_thing(rating=-1.0)
-    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: "missing"}), apply=True)
+    calls = _patch_delete(monkeypatch)
+    tally = scrub_oi.scrub_deletions([thing], FakeOI({thing.best_oi: "missing"}),
+                                     "http://loc/", apply=True)
+    assert calls == []
     assert (tally.anomalies, tally.acted) == (1, 0)
 
 
@@ -258,4 +301,135 @@ def test_replicate_listing_unavailable_is_anomaly(monkeypatch):
         raise httpx.HTTPError("503")
     monkeypatch.setattr(scrub_oi, "_bucket_listing", boom)
     tally = scrub_oi.scrub_replication([thing], oi, "http://loc/", apply=True)
+    assert tally.anomalies == 1
+
+
+# --- reduction actions ---------------------------------------------------------------------
+
+SRV1, SRV2, SRV3 = "http://srv1/", "http://srv2/", "http://srv3/"
+
+
+def _patch_reduction(monkeypatch, locations, used, statuses=()):
+    """Wire a one-key listing, a fake health map, and a status-scripted _delete_copy."""
+    calls = {"deleted": []}
+    monkeypatch.setattr(scrub_oi, "_bucket_listing",
+                        lambda locator, bucket: {"k": {"locations": list(locations),
+                                                       "error": None}})
+    monkeypatch.setattr(scrub_oi, "_server_used_bytes", lambda locator: used)
+
+    def fake_delete(server, bucket, key):
+        calls["deleted"].append(server)
+        return dict(statuses).get(server, 204)
+    monkeypatch.setattr(scrub_oi, "_delete_copy", fake_delete)
+    return calls
+
+
+def test_reduce_deletes_copy_on_fullest_server(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 10, SRV2: 999})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV2]
+    assert (tally.acted, tally.pending, tally.anomalies) == (1, 0, 0)
+
+
+def test_reduce_three_copies_keeps_least_used(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2, SRV3],
+                             {SRV1: 5, SRV2: 50, SRV3: 500})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV3, SRV2]  # fullest first; SRV1 survives
+    assert (tally.acted, tally.anomalies) == (1, 0)
+
+
+def test_reduce_at_one_copy_is_noop(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1], {SRV1: 10})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == []
+    assert (tally.ok, tally.acted, tally.anomalies) == (1, 0, 0)
+
+
+def test_reduce_dry_run_touches_nothing(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 10, SRV2: 999})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=False)
+    assert calls["deleted"] == []
+    assert tally.acted == 1  # reported as "would reduce"
+
+
+def test_reduce_busy_server_falls_through_to_next(monkeypatch):
+    # Fullest copy is mid-upload/read-only: the next-fullest goes instead.
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 999, SRV2: 10},
+                             statuses={SRV1: 503})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV1, SRV2]
+    assert (tally.acted, tally.pending, tally.anomalies) == (1, 0, 0)
+
+
+def test_reduce_all_copies_busy_is_pending_not_anomaly(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 999, SRV2: 10},
+                             statuses={SRV1: 503, SRV2: 405})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV1, SRV2]
+    assert (tally.acted, tally.pending, tally.anomalies) == (0, 1, 0)
+
+
+def test_reduce_stale_listing_404_counts_as_removed(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 999, SRV2: 10},
+                             statuses={SRV1: 404})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV1]
+    assert (tally.acted, tally.anomalies) == (1, 0)
+
+
+def test_reduce_hard_error_is_anomaly(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 999, SRV2: 10},
+                             statuses={SRV1: 500})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == [SRV1]
+    assert (tally.acted, tally.anomalies) == (0, 1)
+
+
+def test_reduce_tombstoned_is_converged(monkeypatch):
+    # A deleted-then-re-rated-up-to-C thing: nothing held, nothing to trim.
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj(deleted=True)})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 10, SRV2: 999})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == []
+    assert (tally.ok, tally.anomalies) == (1, 0)
+
+
+def test_reduce_incomplete_object_is_anomaly(monkeypatch):
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj(completed=False)})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 10, SRV2: 999})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == []
+    assert tally.anomalies == 1
+
+
+def test_reduce_locator_error_flag_skips(monkeypatch):
+    # A copy may sit on a sleeping server (simpler-objects#76): deleting a visible
+    # copy could orphan the key onto only the unreachable server. Flag, don't act.
+    thing = _mem_thing(rating=0.0)
+    oi = FakeOI({thing.best_oi: _obj()})
+    calls = _patch_reduction(monkeypatch, [SRV1, SRV2], {SRV1: 10, SRV2: 999})
+    monkeypatch.setattr(scrub_oi, "_bucket_listing",
+                        lambda locator, bucket: {"k": {"locations": [SRV1, SRV2],
+                                                       "error": "down"}})
+    tally = scrub_oi.scrub_reduction([thing], oi, "http://loc/", apply=True)
+    assert calls["deleted"] == []
     assert tally.anomalies == 1
