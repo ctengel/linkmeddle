@@ -174,6 +174,40 @@ class Run(SQLModel, table=True):
         default=None, sa_column=Column(sa.Boolean, nullable=True))
 
 
+# --- V4.x additions: tagging (#126) ----------------------------------------------------
+# Copied verbatim from v5-design models_v5.py — delete the duplicates there on the V5
+# merge. Only the human slice (source='human') is written in 4.x; the source/confidence
+# columns are kept so V5's ML suggester writes machine rows into the same tables.
+
+class Tag(SQLModel, table=True):
+    """Free-form tag vocabulary (human-created)."""
+    id: uuid.UUID = Field(
+        default_factory=uuid.uuid4,
+        sa_column=Column(postgresql.UUID(as_uuid=True), primary_key=True))
+    name: str = Field(sa_column=Column(sa.Text, nullable=False, unique=True))
+    created_dt: Optional[datetime.datetime] = Field(
+        default_factory=naive_utcnow,
+        sa_column=Column(sa.DateTime, nullable=False, server_default=_UTC_NOW))
+
+
+class ThingTag(SQLModel, table=True):
+    __tablename__ = "thing_tag"
+    thing_id: uuid.UUID = Field(
+        sa_column=Column(postgresql.UUID(as_uuid=True),
+                         ForeignKey("thing.id"), primary_key=True))
+    tag_id: uuid.UUID = Field(
+        sa_column=Column(postgresql.UUID(as_uuid=True),
+                         ForeignKey("tag.id"), primary_key=True, index=True))
+    source: str = Field(
+        default="human",
+        sa_column=Column(sa.Text, nullable=False, server_default=text("'human'")))
+    confidence: Optional[float] = Field(
+        default=None, sa_column=Column(sa.Float, nullable=True))
+    created_dt: Optional[datetime.datetime] = Field(
+        default_factory=naive_utcnow,
+        sa_column=Column(sa.DateTime, nullable=False, server_default=_UTC_NOW))
+
+
 # --- V4 API I/O models -----------------------------------------------------------------
 
 class ThingRead(SQLModel):
@@ -278,6 +312,30 @@ class Facet(BaseModel):
     View-model only (not a table). `extractor_key` is None for things no extractor has
     identified yet (never pulled, or added by bare URL)."""
     extractor_key: Optional[str] = None
+    count: int
+
+
+class TagRead(BaseModel):
+    """One tag on a thing (a thing_tag row joined to its tag's name)."""
+    name: str
+    source: str = "human"  # 'human' | 'machine' (machine rows arrive with V5)
+    confidence: Optional[float] = None  # NULL for human-set
+    created_dt: Optional[datetime.datetime] = None
+
+
+class TagAssign(BaseModel):
+    """PUT /things/{id}/tags body: tag names to assert (additive, create-on-assign)."""
+    names: list[str]
+
+
+class TagCreate(BaseModel):
+    """POST /tags/ body: one vocabulary entry (usually implicit via assign)."""
+    name: str
+
+
+class TagFacet(BaseModel):
+    """One GET /tags/ row: a vocabulary tag and how many things carry it."""
+    name: str
     count: int
 
 

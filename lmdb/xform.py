@@ -149,6 +149,13 @@ def merge_attr(thing: models.Thing, key: str, value) -> None:
     thing.attrs = {**(thing.attrs or {}), key: value}
 
 
+def normalize_tag_name(name: str) -> str:
+    """Canonical form of a tag name (#126): trimmed, internal whitespace collapsed to
+    single spaces, lowercased (the extractor_key convention). May return "" — callers
+    reject empty. The soft `type:value` convention is plain text; `:` passes through."""
+    return " ".join(name.split()).lower()
+
+
 def is_channel(thing: models.Thing) -> bool:
     """Whether a thing carries the soft `attrs.kind='channel'` display hint (handles attrs=None)."""
     return (thing.attrs or {}).get("kind") == "channel"

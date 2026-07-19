@@ -453,3 +453,10 @@ def test_next_try_on_consecutive_failures_back_off():
     runs = [_run_on(1, True, b"h"), _run_on(6, False), _run_on(11, False)]
     today = datetime.date(2026, 1, 11)
     assert xform.next_try_on(1.0, runs, today) == today + datetime.timedelta(days=8)
+
+
+def test_normalize_tag_name():
+    # #126: trim, collapse internal whitespace, lowercase; ':' is plain text (soft type:value)
+    assert xform.normalize_tag_name("  Genre:Jazz ") == "genre:jazz"
+    assert xform.normalize_tag_name("TWO\t words\n") == "two words"
+    assert xform.normalize_tag_name("   ") == ""  # callers reject empty

@@ -13,12 +13,14 @@ async function request(method, path, body) {
     err.status = res.status;
     throw err;
   }
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
 export const apiGet = (path) => request("GET", path);
 export const apiPost = (path, body) => request("POST", path, body);
 export const apiPatch = (path, body) => request("PATCH", path, body);
+export const apiPut = (path, body) => request("PUT", path, body);
+export const apiDelete = (path) => request("DELETE", path);
 
 export const thingCache = {};     // id -> ThingPage
 export const playbackCache = {};  // id -> PlaybackInfo {download_url, oi_info, ...} (null if no media)

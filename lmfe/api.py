@@ -118,7 +118,8 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
                       failing: bool = False, watch_soon: bool = False,
                       limit: Optional[int] = None, url: Optional[str] = None,
                       extractor: Optional[str] = None, native_id: Optional[str] = None,
-                      q: Optional[str] = None):
+                      q: Optional[str] = None,
+                      tag: Optional[list[str]] = fastapi.Query(default=None)):
     """List/search things; passes every LMDB filter through (incl. the `q` title search).
     Backs all list views and (with `new`/`failing`/`watch_soon`) the status-dashboard +
     Watch Soon panels. No OI round-trips."""
@@ -132,6 +133,8 @@ async def list_things(container: Optional[bool] = None, kind: Optional[str] = No
                        ("new", new), ("failing", failing), ("watch_soon", watch_soon)):
         if flag:
             params[name] = True
+    if tag:  # repeatable (AND-composing); a list value encodes as repeated params
+        params["tag"] = tag
     async with httpx.AsyncClient(timeout=5) as client:
         resp = _checked(await client.get(_plapi("/things/"), params=params))
     things = [fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(t))
@@ -155,12 +158,14 @@ async def get_thing(thing_id: str):
     """One-call page view-model: the thing, its rel neighbors, and (for an
     acquired thing) its resolved playback URL — all inline, no per-child OI calls."""
     async with httpx.AsyncClient(timeout=5) as client:
-        thing_resp, related_resp = await asyncio.gather(
+        thing_resp, related_resp, tags_resp = await asyncio.gather(
             client.get(_plapi(f"/things/{thing_id}")),
-            client.get(_plapi(f"/things/{thing_id}/related")))
+            client.get(_plapi(f"/things/{thing_id}/related")),
+            client.get(_plapi(f"/things/{thing_id}/tags")))
         thing = pl_models.ThingRead.model_validate(_checked(thing_resp).json())
         related = [pl_models.RelatedThing.model_validate(r) for r in _checked(related_resp).json()]
         page = fe_models.ThingPage(**fe_models.ThingSummary.from_thing_read(thing).model_dump())
+        page.tags = [pl_models.TagRead.model_validate(t) for t in _checked(tags_resp).json()]
         page.related = [
             fe_models.RelatedSummary(direction=r.direction, channel=r.channel,
                                      thing=fe_models.ThingSummary.from_thing_read(r.thing))
@@ -244,6 +249,48 @@ async def patch_thing(thing_id: str, item: fe_models.RatingPatch):
     async with httpx.AsyncClient(timeout=5) as client:
         resp = _checked(await client.patch(_plapi(f"/things/{thing_id}"), json=payload))
     return fe_models.ThingSummary.from_thing_read(pl_models.ThingRead.model_validate(resp.json()))
+
+
+# LM tags (#126): thin proxies of the LMDB tag surface. Distinct from GET /search/tags
+# below, which searches *OI file* tags (key=value stamped on stored files).
+
+@app.get("/tags/", response_model=list[pl_models.TagFacet])
+async def list_tags(q: Optional[str] = None, limit: Optional[int] = None):
+    """LM tag vocabulary with usage counts (the tag explorer / autocomplete);
+    `q` is a prefix match (`q=genre:` drills into the soft type:value convention)."""
+    params = {}
+    if q is not None:
+        params["q"] = q
+    if limit is not None:
+        params["limit"] = limit
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi("/tags/"), params=params))
+    return resp.json()
+
+
+@app.get("/things/{thing_id}/tags", response_model=list[pl_models.TagRead])
+async def get_thing_tags(thing_id: str):
+    """The LM tags on a thing (also inlined on the one-call GET /things/{id} page)."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.get(_plapi(f"/things/{thing_id}/tags")))
+    return resp.json()
+
+
+@app.put("/things/{thing_id}/tags", response_model=list[pl_models.TagRead])
+async def assign_thing_tags(thing_id: str, item: pl_models.TagAssign):
+    """Assert tags on a thing (additive, create-on-assign); returns the full post-state."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        resp = _checked(await client.put(_plapi(f"/things/{thing_id}/tags"),
+                                         json=item.model_dump()))
+    return resp.json()
+
+
+@app.delete("/things/{thing_id}/tags", status_code=204)
+async def unassign_thing_tag(thing_id: str, name: str):
+    """Remove one tag assignment (?name=)."""
+    async with httpx.AsyncClient(timeout=5) as client:
+        _checked(await client.delete(_plapi(f"/things/{thing_id}/tags"),
+                                     params={"name": name}))
 
 
 @app.get("/runs/", response_model=list[fe_models.RunSummary])

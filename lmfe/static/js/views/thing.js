@@ -6,8 +6,8 @@
    AND keeps Picture-in-Picture alive as autoplay advances (the player module owns the
    element). */
 
-import { apiGet, apiPatch, getThingCached, getPlaybackInfoCached, invalidateCache,
-         thingCache, applyRatingUpdate } from "../api.js";
+import { apiGet, apiPatch, apiPut, apiDelete, getThingCached, getPlaybackInfoCached,
+         invalidateCache, thingCache, applyRatingUpdate } from "../api.js";
 import { escapeHtml, escapeAttr, isHttpUrl, fmtDt, fmtSize, isThingFailing,
          typeChip, gradeChip, extractorChip, thingRow, registerAction } from "../util.js";
 import { queue, setQueue, clearQueue, mountVideo, prefetchUpcomingPlayback,
@@ -233,6 +233,7 @@ function infoCardHTML(thing) {
       &nbsp;·&nbsp; Cookies: <b>${thing.cookies === true ? "Always" : "Auto"}</b></div>
     ${status.join("")}
     ${rateBandHTML(thing)}
+    ${lmTagsRowHTML(thing)}
     <div class="actions">
       <button data-action="run-today" data-id="${thing.id}">${acked ? "Retry" : "Run Today"}</button>
       ${isFailing ? `<button class="danger" data-action="ack" data-id="${thing.id}">Permafail Ack</button>` : ""}
@@ -242,6 +243,22 @@ function infoCardHTML(thing) {
     </div>
     ${oiFileHTML(thing.oi_info)}
   `;
+}
+
+/* LM tag chips (#126) — the thing's own tags, distinct from the OI *file* tags below.
+   Chip click opens the tag explorer filtered to that tag; the nested × removes the
+   assignment (innermost [data-action] wins in the delegation). Summaries rendered by the
+   in-place playlist advance carry no `tags`; refreshLmTags patches the row when they land. */
+function lmTagsRowHTML(thing) {
+  const chips = (thing.tags || []).map((t) => `
+    <span class="chip chip-tag" data-action="lm-tag-open" data-name="${escapeAttr(t.name)}"
+          title="Find everything tagged ${escapeAttr(t.name)}">${escapeHtml(t.name)}<span
+          class="chip-x" data-action="lm-tag-remove" data-id="${thing.id}"
+          data-name="${escapeAttr(t.name)}" title="Remove this tag">&times;</span></span>`).join("");
+  return `<div class="tag-chips" id="lmTagsRow">${chips}
+    <button data-action="lm-tag-add" data-id="${thing.id}"
+            title="Tag this — comma-separate several; 'type:value' groups in the explorer">+ Tag</button>
+  </div>`;
 }
 
 /* The acquired file's OI card (objectindex gui.py parity): size/MIME/checksum, the OI
@@ -263,7 +280,7 @@ function oiFileHTML(oi) {
       ${oi.object_uuid ? `<div class="kv">Object: ${oi.source_url && isHttpUrl(oi.source_url)
         ? `<a class="data" href="${escapeAttr(oi.source_url)}" target="_blank">${escapeHtml(oi.object_uuid)}</a>`
         : `<span class="data">${escapeHtml(oi.object_uuid)}</span>`}</div>` : ""}
-      ${tags ? `<div class="tag-chips">${tags}</div>` : ""}
+      ${tags ? `<div class="tag-chips"><span class="muted">File tags:</span>${tags}</div>` : ""}
     </div>`;
 }
 
@@ -375,6 +392,26 @@ async function updateVideoInPlace(newVideoId) {
   document.querySelector("#videoArea video")?.play().catch(() => {});
 
   refreshParentsPanel(newVideoId);
+  if (page.tags === undefined) refreshLmTags(newVideoId);
+}
+
+// Fill the LM-tag row for a video rendered from a container summary (which carries no
+// `tags`). Fired without await, same superseded-navigation guard as refreshParentsPanel.
+async function refreshLmTags(videoId) {
+  const tags = await apiGet(`/things/${videoId}/tags`).catch(() => null);
+  if (!tags || queue.currentVideoId !== videoId) return;
+  applyTagsUpdate(videoId, tags);
+}
+
+// Sync new tag state into the caches and re-render ONLY the tag row (a full re-render
+// would rebuild the <video> and reset playback / close PiP, #182).
+function applyTagsUpdate(id, tags) {
+  if (thingCache[id]) thingCache[id].tags = tags;
+  if (currentInfoShown?.id === id) {
+    currentInfoShown.tags = tags;
+    const el = document.getElementById("lmTagsRow");
+    if (el) el.outerHTML = lmTagsRowHTML(currentInfoShown);
+  }
 }
 
 // Rebuild "In Playlists" for the video now showing (#133): the container summary we render
@@ -491,4 +528,28 @@ registerAction("switch-queue", async (d) => {
 
 registerAction("tag-search", (d) => {
   location.hash = `#/tags?k=${encodeURIComponent(d.k)}&v=${encodeURIComponent(d.v)}`;
+});
+
+/* === LM tags (#126) === */
+
+registerAction("lm-tag-add", async (d) => {
+  const v = prompt("Add tag(s), comma-separated ('type:value' groups in the explorer):");
+  if (v === null) return;                                       // cancelled
+  const names = v.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!names.length) return;
+  try {
+    applyTagsUpdate(d.id, await apiPut(`/things/${d.id}/tags`, { names }));
+  } catch { alert("Failed to add tag."); }
+});
+
+registerAction("lm-tag-remove", async (d) => {
+  try {
+    await apiDelete(`/things/${d.id}/tags?name=${encodeURIComponent(d.name)}`);
+  } catch { alert("Failed to remove tag."); return; }
+  // The chip's name is the server-normalized form, so a local filter matches exactly.
+  applyTagsUpdate(d.id, (currentInfoShown?.tags || []).filter((t) => t.name !== d.name));
+});
+
+registerAction("lm-tag-open", (d) => {
+  location.hash = `#/browse/tags?tag=${encodeURIComponent(d.name)}`;
 });

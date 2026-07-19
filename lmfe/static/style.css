@@ -233,6 +233,8 @@ a { color: inherit; }
 .chip-dl   { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .chip-tag { cursor: pointer; }
 .chip-tag:hover { color: var(--ink); border-color: var(--accent); }
+.chip-x { margin-left: 5px; opacity: 0.55; }  /* LM tag chip's remove × (#126) */
+.chip-x:hover { opacity: 1; color: var(--gF); }
 
 .grade {
   display: inline-flex;

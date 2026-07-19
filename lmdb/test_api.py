@@ -2470,3 +2470,81 @@ def test_runs_feed_limit(client):
     for i in range(3):
         _seed_run_at(t, True, i)
     assert len(client.get("/runs/", params={"limit": 2}).json()) == 2
+
+
+# --- Tags (#126) -----------------------------------------------------------------------
+
+def test_tag_assign_creates_vocab_and_reads_back(client):
+    t = _seed_thing(container=False, url="http://tag/1")
+    r = client.put(f"/things/{t}/tags", json={"names": ["jazz", "genre:live"]})
+    assert r.status_code == 200
+    got = r.json()  # full post-state, alphabetical
+    assert [x["name"] for x in got] == ["genre:live", "jazz"]
+    assert all(x["source"] == "human" and x["confidence"] is None for x in got)
+    assert client.get(f"/things/{t}/tags").json() == got
+    assert {(f["name"], f["count"]) for f in client.get("/tags/").json()} == {
+        ("jazz", 1), ("genre:live", 1)}
+
+
+def test_tag_assign_idempotent_and_additive(client):
+    t = _seed_thing(container=False, url="http://tag/idem")
+    client.put(f"/things/{t}/tags", json={"names": ["jazz"]})
+    # re-assert + add another: existing row untouched (still one), absent names left alone
+    got = client.put(f"/things/{t}/tags", json={"names": ["jazz", "live"]}).json()
+    assert [x["name"] for x in got] == ["jazz", "live"]
+    assert {(f["name"], f["count"]) for f in client.get("/tags/").json()} == {
+        ("jazz", 1), ("live", 1)}
+
+
+def test_tag_name_normalized(client):
+    t = _seed_thing(container=False, url="http://tag/norm")
+    got = client.put(f"/things/{t}/tags", json={"names": ["  Genre:Jazz ", "TWO  words"]}).json()
+    assert [x["name"] for x in got] == ["genre:jazz", "two words"]
+    assert client.put(f"/things/{t}/tags", json={"names": ["   "]}).status_code == 422
+
+
+def test_tag_unassign(client):
+    t = _seed_thing(container=False, url="http://tag/del")
+    client.put(f"/things/{t}/tags", json={"names": ["jazz"]})
+    assert client.delete(f"/things/{t}/tags", params={"name": "Jazz"}).status_code == 204
+    assert client.get(f"/things/{t}/tags").json() == []
+    # unassigned again -> 404; the vocabulary row survives at count 0
+    assert client.delete(f"/things/{t}/tags", params={"name": "jazz"}).status_code == 404
+    assert client.get("/tags/").json() == [{"name": "jazz", "count": 0}]
+
+
+def test_tag_endpoints_404_unknown_thing(client):
+    missing = uuid.uuid4()
+    assert client.get(f"/things/{missing}/tags").status_code == 404
+    assert client.put(f"/things/{missing}/tags", json={"names": ["x"]}).status_code == 404
+    assert client.delete(f"/things/{missing}/tags", params={"name": "x"}).status_code == 404
+
+
+def test_list_things_tag_filter(client):
+    t1 = _seed_thing(container=False, url="http://tagf/1")
+    t2 = _seed_thing(container=False, url="http://tagf/2")
+    client.put(f"/things/{t1}/tags", json={"names": ["jazz", "live"]})
+    client.put(f"/things/{t2}/tags", json={"names": ["jazz"]})
+    assert {t["id"] for t in client.get("/things/", params={"tag": "jazz"}).json()} == {t1, t2}
+    # repeats AND-compose (drill-down); the name is normalized like on write
+    assert [t["id"] for t in client.get(
+        "/things/", params={"tag": ["jazz", " Live "]}).json()] == [t1]
+    assert client.get("/things/", params={"tag": "nosuch"}).json() == []
+
+
+def test_tags_vocabulary_prefix_filter(client):
+    t = _seed_thing(container=False, url="http://tagq/1")
+    client.put(f"/things/{t}/tags", json={"names": ["genre:jazz", "genre:rock", "live"]})
+    assert {f["name"] for f in client.get("/tags/", params={"q": "genre:"}).json()} == {
+        "genre:jazz", "genre:rock"}
+    # prefix (not substring), % literal
+    assert client.get("/tags/", params={"q": "azz"}).json() == []
+    assert client.get("/tags/", params={"q": "%"}).json() == []
+
+
+def test_post_tags_create_then_existing(client):
+    r = client.post("/tags/", json={"name": " Jazz "})
+    assert r.status_code == 201 and r.json() == {"name": "jazz", "count": 0}
+    r = client.post("/tags/", json={"name": "jazz"})
+    assert r.status_code == 200 and r.json() == {"name": "jazz", "count": 0}
+    assert client.post("/tags/", json={"name": "  "}).status_code == 422

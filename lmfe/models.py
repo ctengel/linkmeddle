@@ -149,6 +149,7 @@ class ThingPage(ThingSummary):
     indirect_children: list[IndirectChild] = []
     download_url: Optional[str] = None
     oi_info: Optional[OIFileInfo] = None
+    tags: list[pl_models.TagRead] = []  # LM tags (#126) — distinct from oi_info.extra file tags
 
 
 class PlaybackInfo(pydantic.BaseModel):

@@ -23,8 +23,9 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import SQLModel, Session, create_engine, select
 from . import models, xform
-from .models import (Thing, Rel, Run, ThingRead, RelatedThing,
-                     RunRead, RunActivity, ThingAdd, ThingPatch, ClaimRequest, JobClaim,
+from .models import (Thing, Rel, Run, Tag, ThingTag, ThingRead, RelatedThing,
+                     RunRead, RunActivity, ThingAdd, ThingPatch, TagRead, TagAssign,
+                     TagCreate, TagFacet, ClaimRequest, JobClaim,
                      JobPreview, RunResultIn)
 
 # Effective-rating floor for fetching a video's *media* (Stage-2 download); below it (C band)
@@ -167,6 +168,11 @@ def _set_try_on(session: Session, thing: Thing) -> None:
     thing.try_on = xform.next_try_on(_effective_rating_value(session, thing), runs)
 
 
+def _like_escape(s: str) -> str:
+    """Escape LIKE metacharacters so user text matches literally (escape char `\\`)."""
+    return s.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
+
+
 def get_thing_or_404(session: Session, thing_id: uuid.UUID) -> Thing:
     """Fetch a thing by id or raise 404"""
     thing = session.get(Thing, thing_id)
@@ -260,6 +266,7 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
                 extractor: Optional[str] = None, native_id: Optional[str] = None,
                 q: Optional[str] = None,
                 best_oi: Optional[list[uuid.UUID]] = Query(default=None),
+                tag: Optional[list[str]] = Query(default=None),
                 session: Session = Depends(get_session)):
     """List/search things. Backs every list view + the status dashboard.
 
@@ -279,7 +286,9 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
 
     `q` is a case-insensitive title substring search (#134); `%`/`_` are matched literally.
     `best_oi` (repeatable) selects things by acquired OI file UUID — the OI→LM reverse mapping
-    that lets an OI tag/URL search resolve back to things.
+    that lets an OI tag/URL search resolve back to things. `tag` (repeatable, #126) selects
+    things carrying an LM tag by name; repeats AND-compose (drill-down narrowing), like every
+    other filter here.
     """
     stmt = select(Thing, _machine_rating_expr().label("machine_rating"))
     if container is not None:
@@ -293,10 +302,15 @@ def list_things(container: Optional[bool] = None, kind: Optional[str] = None,
     if native_id is not None:
         stmt = stmt.where(Thing.native_id == native_id)
     if q is not None:
-        escaped = q.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
-        stmt = stmt.where(Thing.title.ilike(f"%{escaped}%", escape="\\"))
+        stmt = stmt.where(Thing.title.ilike(f"%{_like_escape(q)}%", escape="\\"))
     if best_oi:
         stmt = stmt.where(Thing.best_oi.in_(best_oi))
+    for name in tag or []:  # each repeated tag narrows (AND)
+        stmt = stmt.where(
+            select(ThingTag.thing_id)
+            .where(ThingTag.thing_id == Thing.id, ThingTag.tag_id == Tag.id,
+                   Tag.name == xform.normalize_tag_name(name))
+            .exists())
     if rating is not None:
         stmt = stmt.where(Thing.human_rating == rating)
     if min_rating is not None:
@@ -374,6 +388,117 @@ def get_thing_runs(thing_id: uuid.UUID, session: Session = Depends(get_session))
     runs = session.exec(
         select(Run).where(Run.thing_id == thing_id).order_by(Run.starttime.desc())).all()
     return [RunRead.model_validate(r) for r in runs]
+
+
+# --- Tags (#126) ----------------------------------------------------------------------
+# Human tagging on the V4 schema, API shape per LM-V5-DESIGN.md §3.2 so V5 (which adds
+# machine-suggested rows to the same tables) needs no API changes.
+
+def _normalized_tag_names(names: list[str]) -> list[str]:
+    """Normalize a request's tag names, order-preserving deduped; 422 on an empty name."""
+    out: list[str] = []
+    for name in names:
+        norm = xform.normalize_tag_name(name)
+        if not norm:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                detail="empty tag name")
+        if norm not in out:
+            out.append(norm)
+    return out
+
+
+def _thing_tags(session: Session, thing_id: uuid.UUID) -> list[TagRead]:
+    """A thing's tags (thing_tag rows joined to their names), alphabetical."""
+    rows = session.exec(
+        select(Tag.name, ThingTag.source, ThingTag.confidence, ThingTag.created_dt)
+        .where(ThingTag.thing_id == thing_id, ThingTag.tag_id == Tag.id)
+        .order_by(Tag.name)).all()
+    return [TagRead(name=n, source=s, confidence=c, created_dt=d) for n, s, c, d in rows]
+
+
+@app.get("/things/{thing_id}/tags", response_model=list[TagRead])
+def get_thing_tags(thing_id: uuid.UUID, session: Session = Depends(get_session)):
+    """The LM tags on a thing (distinct from OI file tags, which live on the stored file)."""
+    get_thing_or_404(session, thing_id)
+    return _thing_tags(session, thing_id)
+
+
+@app.put("/things/{thing_id}/tags", response_model=list[TagRead])
+def assign_thing_tags(thing_id: uuid.UUID, item: TagAssign,
+                      session: Session = Depends(get_session)):
+    """Assert human tags on a thing (additive upsert, create-on-assign); returns the full
+    post-state tag list.
+
+    Not replace-set semantics: absent names are left alone (a replace would silently delete
+    V5 machine suggestions). Re-asserting an existing assignment is idempotent and upgrades
+    a machine suggestion to human ground truth (source='human', confidence NULL) — the
+    monotonic machine->human rule ([V5-1]). Unassign is the explicit DELETE.
+    """
+    thing = get_thing_or_404(session, thing_id)
+    names = _normalized_tag_names(item.names)
+    for name in names:  # vocabulary create-on-assign, race-safe on UNIQUE(name)
+        session.execute(pg_insert(Tag).values(id=uuid.uuid4(), name=name)
+                        .on_conflict_do_nothing(index_elements=["name"]))
+    if names:
+        for tag_id in session.exec(select(Tag.id).where(Tag.name.in_(names))).all():
+            session.execute(
+                pg_insert(ThingTag).values(thing_id=thing.id, tag_id=tag_id)
+                .on_conflict_do_update(index_elements=["thing_id", "tag_id"],
+                                       set_={"source": "human", "confidence": None}))
+    session.commit()
+    return _thing_tags(session, thing_id)
+
+
+@app.delete("/things/{thing_id}/tags", status_code=status.HTTP_204_NO_CONTENT)
+def unassign_thing_tag(thing_id: uuid.UUID, name: str,
+                       session: Session = Depends(get_session)):
+    """Remove one tag assignment from a thing (?name=). The vocabulary `tag` row is kept
+    (harmless at count 0, and V5 suggestion history may reference it)."""
+    get_thing_or_404(session, thing_id)
+    tag = session.exec(
+        select(Tag).where(Tag.name == xform.normalize_tag_name(name))).one_or_none()
+    assignment = session.get(ThingTag, (thing_id, tag.id)) if tag else None
+    if assignment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tag not assigned")
+    session.delete(assignment)
+    session.commit()
+
+
+@app.get("/tags/", response_model=list[TagFacet])
+def list_tags(q: Optional[str] = None, limit: Optional[int] = None,
+              session: Session = Depends(get_session)):
+    """The tag vocabulary with usage counts, most-used first (the tag explorer / autocomplete).
+
+    `q` is a case-insensitive *prefix* match (`%`/`_` literal) — prefix, not substring, so it
+    serves autocomplete and the soft `type:value` convention's drill-down (`q=genre:`).
+    """
+    stmt = (select(Tag.name, func.count(ThingTag.thing_id).label("count"))
+            .join(ThingTag, ThingTag.tag_id == Tag.id, isouter=True)
+            .group_by(Tag.name)
+            .order_by(func.count(ThingTag.thing_id).desc(), Tag.name.asc()))
+    if q is not None:
+        stmt = stmt.where(Tag.name.ilike(f"{_like_escape(q)}%", escape="\\"))
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return [TagFacet(name=name, count=count) for name, count in session.exec(stmt).all()]
+
+
+@app.post("/tags/", response_model=TagFacet, status_code=status.HTTP_201_CREATED)
+def add_tag(item: TagCreate, response: Response, session: Session = Depends(get_session)):
+    """Create a vocabulary tag explicitly (V5 §3.2 parity; the usual path is create-on-assign
+    via PUT /things/{id}/tags). Idempotent on name: an existing tag returns 200."""
+    names = _normalized_tag_names([item.name])
+    created = session.execute(  # RETURNING yields a row only when the insert happened
+        pg_insert(Tag).values(id=uuid.uuid4(), name=names[0])
+        .on_conflict_do_nothing(index_elements=["name"])
+        .returning(Tag.id)).first() is not None
+    session.commit()
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    count = session.exec(
+        select(func.count()).select_from(ThingTag).join(Tag, ThingTag.tag_id == Tag.id)
+        .where(Tag.name == names[0])).one()
+    return TagFacet(name=names[0], count=count)
 
 
 @app.get("/runs/", response_model=list[RunActivity])
