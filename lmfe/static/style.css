@@ -257,6 +257,74 @@ a { color: inherit; }
 
 .failing-badge { color: var(--gF); font-weight: 700; font-size: 12px; }
 
+/* === Thumbnails === */
+.item-row .thumb {
+  width: 72px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+}
+.item-row .thumb-sm { width: 56px; height: 32px; }
+/* The 320px sidebar can't fit thumb + a 180px-basis title + grade chip on one line —
+   let the title shrink further there so the chip doesn't wrap. */
+.sidebar .item-row .title { flex-basis: 90px; }
+
+/* Library grid (Viewing): 16:9 thumbnail cards */
+.thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.thumb-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+}
+.thumb-card:hover { border-color: var(--accent); }
+.thumb-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.thumb-card-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: var(--bg);
+}
+.thumb-card-media .thumb-wide {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-card-media .grade { position: absolute; left: 6px; top: 6px; }
+.thumb-card-body { padding: 7px 9px; }
+.thumb-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* === Per-list extractor filter chips === */
+.filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.filter-chips .chip-filter { text-decoration: none; padding: 3px 9px; cursor: pointer; }
+.filter-chips .chip-filter:hover { color: var(--ink); border-color: var(--accent); }
+.filter-chips .chip-filter.sel {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.filter-chips .chip-filter .count { font-weight: 400; opacity: 0.75; }
+
 /* === Rating control: the A–F segmented band selector === */
 .rate-band { display: inline-flex; gap: 4px; margin: 8px 0; align-items: center; }
 .rate-band button {
@@ -278,6 +346,10 @@ a { color: inherit; }
 .rate-band button.sel-F { background: var(--gF); border-color: var(--gF); color: var(--bg); }
 .rate-band button.machine-sel { outline: 2px dashed var(--muted); outline-offset: 1px; }
 .rate-band .note { margin-left: 8px; }
+/* Compact in-row variant (Acquire's rating queue) */
+.item-row .rate-band { margin: 0; }
+.item-row .rate-band button { width: 28px; height: 26px; font-size: 12px; padding: 0; }
+.item-row .rate-band .note { display: none; }
 
 /* === Buttons / forms === */
 button, .btn {

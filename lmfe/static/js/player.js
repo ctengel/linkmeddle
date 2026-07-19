@@ -31,13 +31,16 @@ export function getVideoElement() {
   return videoEl;
 }
 
-/* Mount the persistent element into `container` showing `url`. Re-parenting only when
-   needed; the src swap is guarded so re-rendering the same video doesn't reset playback. */
-export function mountVideo(container, url) {
+/* Mount the persistent element into `container` showing `url` (with an optional poster
+   thumbnail shown before playback). Re-parenting only when needed; the src swap is guarded
+   so re-rendering the same video doesn't reset playback (the poster only changes alongside
+   a real src swap, so it can't disturb an in-flight video either). */
+export function mountVideo(container, url, poster) {
   const v = getVideoElement();
   if (v.dataset.src !== url) {
     v.dataset.src = url;
     v.src = url;
+    v.poster = poster || "";
   }
   if (v.parentElement !== container) container.appendChild(v);
   return v;

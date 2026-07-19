@@ -4,10 +4,12 @@ import { setHandler, startRouter, parseHash } from "./router.js";
 import { initActionDelegation } from "./util.js";
 import { getVideoElement, navigatePlaylist, togglePiP, autoPlayEnabled,
          setAutoPlay } from "./player.js";
-import { renderHome, openOrAddUrl } from "./views/home.js";
+import { renderHome } from "./views/home.js";
+import { renderManage } from "./views/manage.js";
+import { renderAcquire, openOrAddUrl } from "./views/acquire.js";
 import { renderThingPage, renderWatchSoon, renderOiFilePage } from "./views/thing.js";
 import { renderBrowse } from "./views/browse.js";
-import { renderAdmin } from "./views/admin.js";
+import { renderOrganize } from "./views/organize.js";
 import { renderSearch, renderTagSearch } from "./views/search.js";
 
 /* === Routing === */
@@ -17,18 +19,26 @@ function dispatch() {
   markActiveNav();
 
   if (parts[0] === "prefill") {
-    renderHome(decodeURIComponent(path.replace(/^\/prefill\//, "")));
+    // Bookmarklet target: land on Acquire with the captured URL pre-filled.
+    renderAcquire(decodeURIComponent(path.replace(/^\/prefill\//, "")));
     return;
   }
+  if (parts[0] === "manage") { renderManage(); return; }
+  if (parts[0] === "acquire") { renderAcquire(); return; }
+  if (parts[0] === "organize") { renderOrganize(params); return; }
   if (parts[0] === "watch-soon") { renderWatchSoon(); return; }
   if (parts[0] === "thing" && parts[1]) { renderThingPage(parts[1], params.get("ctx")); return; }
   if (parts[0] === "oi" && parts[1]) { renderOiFilePage(parts[1]); return; }
   if (parts[0] === "browse") { renderBrowse(parts[1], params); return; }
-  if (parts[0] === "admin") { renderAdmin(params); return; }
   if (parts[0] === "search") { renderSearch(params); return; }
   if (parts[0] === "tags") { renderTagSearch(params); return; }
 
-  // Legacy V3 hash redirects
+  // Legacy hash redirects (V3 routes + the pre-4-mode Admin)
+  if (parts[0] === "admin") {
+    const qs = params.toString();
+    location.replace(`#/organize${qs ? `?${qs}` : ""}`);
+    return;
+  }
   if (parts[0] === "playlist" && parts[1]) {
     location.replace(`#/thing/${parts[1]}`);
     return;
@@ -39,7 +49,7 @@ function dispatch() {
     return;
   }
 
-  renderHome();
+  renderHome(params);
 }
 
 function markActiveNav() {

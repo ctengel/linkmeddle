@@ -3,10 +3,12 @@
    resolve-or-add flow instead (see app.js). */
 
 import { apiGet } from "../api.js";
-import { escapeHtml, escapeAttr, thingRow, extractorChip, urlCell } from "../util.js";
+import { escapeHtml, escapeAttr, thingRow, extractorChip, extractorChipsHTML,
+         urlCell } from "../util.js";
 
 export async function renderSearch(params) {
   const q = params.get("q") || "";
+  const ext = params.get("extractor") || "";
   const app = document.getElementById("app");
   app.innerHTML = `
     <div class="card">
@@ -21,11 +23,16 @@ export async function renderSearch(params) {
     return;
   }
   try {
-    const things = await apiGet(`/things/?q=${encodeURIComponent(q)}&limit=200`);
+    const [things, facets] = await Promise.all([
+      apiGet(`/things/?q=${encodeURIComponent(q)}&limit=200${ext ? `&extractor=${encodeURIComponent(ext)}` : ""}`),
+      apiGet("/things/facets"),
+    ]);
+    const chips = extractorChipsHTML(facets, ext, (key) =>
+      `#/search?q=${encodeURIComponent(q)}${key ? `&extractor=${encodeURIComponent(key)}` : ""}`);
     el.classList.remove("spin");
-    el.innerHTML = things.map((t) => thingRow(t, {
+    el.innerHTML = chips + (things.map((t) => thingRow(t, {
       extras: extractorChip(t.extractor_key) + urlCell(t.url),
-    })).join("") || `<div class="muted">No titles match "${escapeHtml(q)}".</div>`;
+    })).join("") || `<div class="muted">No titles match "${escapeHtml(q)}".</div>`);
   } catch {
     el.classList.remove("spin");
     el.innerHTML = `<div class="error-box">Search failed — is the backend up?</div>`;

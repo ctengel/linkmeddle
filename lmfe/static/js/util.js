@@ -83,6 +83,28 @@ export function railClass(thing) {
   return thing.grade ? ` rail-${thing.grade}` : "";
 }
 
+/* Row/sidebar thumbnail via the BFF's cached /things/{id}/thumb. Rendered only when the
+   thing has a thumbnail_url (so no-thumb things cost no request); a failed fetch is
+   hidden by the capture-phase error listener below, collapsing back to a text-only row. */
+export function thumbImg(t, cls = "thumb") {
+  if (!t.thumbnail_url) return "";
+  return `<img class="${cls}" loading="lazy" src="/things/${t.id}/thumb" alt="" />`;
+}
+
+/* Per-list extractor filter (facet picker): "All" + a chip per facet, as links so the
+   filter lives in the hash (linkable/back-button friendly). `makeHash(key)` builds the
+   target hash for a key ('' = All; note facets may include null = unidentified).
+   Counts are global thing-counts from /things/facets, not per-view counts. */
+export function extractorChipsHTML(facets, current, makeHash) {
+  const chip = (key, label, count) => `
+    <a class="chip chip-filter${(current || "") === key ? " sel" : ""}"
+       href="${escapeAttr(makeHash(key))}">${escapeHtml(label)}${
+       count != null ? ` <span class="count">${count}</span>` : ""}</a>`;
+  return `<div class="filter-chips">${chip("", "All", null)}${facets
+    .filter((f) => f.extractor_key)
+    .map((f) => chip(f.extractor_key, f.extractor_key, f.count)).join("")}</div>`;
+}
+
 /* One standard clickable thing row. `opts.extras` = trailing HTML chips/cells,
    `opts.actions` = HTML for right-aligned buttons, `opts.ctx` = playlist context id.
    `opts.action` makes the row fire that registered action (with data-id) instead of
@@ -94,6 +116,7 @@ export function thingRow(t, opts = {}) {
   return `
     <div class="item-row${railClass(t)}${opts.dim ? " dim" : ""}${opts.active ? " active" : ""}"
          tabindex="0" data-nav="#/thing/${t.id}${ctx}"${action}>
+      ${thumbImg(t)}
       ${typeChip(t.container, t.kind)}
       <span class="title">${escapeHtml(t.title || "Untitled")}</span>
       ${gradeChip(t)}
@@ -101,6 +124,18 @@ export function thingRow(t, opts = {}) {
       ${opts.extras || ""}
       ${opts.actions ? `<span class="actions">${opts.actions}</span>` : ""}
     </div>`;
+}
+
+/* === Panel fill helpers (dashboard-style cards on Viewing/Manage/Acquire) === */
+
+export function fill(el, html, emptyMsg) {
+  el.classList.remove("spin");
+  el.innerHTML = html || `<div class='muted'>${emptyMsg}</div>`;
+}
+
+export function fillError(el) {
+  el.classList.remove("spin");
+  el.innerHTML = "<div class='error-box'>Couldn't load — is the backend up?</div>";
 }
 
 /* === Delegated actions ===
@@ -114,6 +149,11 @@ export function registerAction(name, fn) {
 }
 
 export function initActionDelegation() {
+  // Image error events don't bubble — catch them in the capture phase so a thumb whose
+  // fetch 404s (no upstream image) collapses the row back to its text-only form.
+  document.addEventListener("error", (e) => {
+    if (e.target.classList?.contains("thumb")) e.target.hidden = true;
+  }, true);
   document.addEventListener("click", (e) => {
     const actionEl = e.target.closest("[data-action]");
     if (actionEl) {

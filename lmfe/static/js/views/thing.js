@@ -9,7 +9,8 @@
 import { apiGet, apiPatch, apiPut, apiDelete, getThingCached, getPlaybackInfoCached,
          invalidateCache, thingCache, applyRatingUpdate } from "../api.js";
 import { escapeHtml, escapeAttr, isHttpUrl, fmtDt, fmtSize, isThingFailing,
-         typeChip, gradeChip, extractorChip, thingRow, registerAction } from "../util.js";
+         typeChip, gradeChip, extractorChip, thingRow, thumbImg,
+         registerAction } from "../util.js";
 import { queue, setQueue, clearQueue, mountVideo, prefetchUpcomingPlayback,
          togglePiP, autoPlayEnabled, setAutoPlay } from "../player.js";
 import { rerender } from "../router.js";
@@ -137,7 +138,7 @@ export async function renderThingPage(thingId, ctxId) {
 
   renderInfoCard(page);
   if (isVideo) {
-    renderMediaArea(page.download_url, page.oi_info);
+    renderMediaArea(page.download_url, page.oi_info, posterFor(page));
     prefetchUpcomingPlayback(thingId);
   }
   document.getElementById("runHistory").addEventListener("toggle", (e) => {
@@ -145,9 +146,15 @@ export async function renderThingPage(thingId, ctxId) {
   }, { once: true });
 }
 
+// The thing's thumbnail as a player poster (empty when it has none — the BFF thumb
+// endpoint would just 404).
+function posterFor(thing) {
+  return thing?.thumbnail_url ? `/things/${thing.id}/thumb` : "";
+}
+
 /* Mount the media element by MIME (objectindex gui.py parity): video via the persistent
    player element (PiP survives), audio/image inline, anything else a download link. */
-function renderMediaArea(downloadUrl, oiInfo) {
+function renderMediaArea(downloadUrl, oiInfo, poster) {
   const area = document.getElementById("videoArea");
   const bar = document.getElementById("playerBar");
   if (!area) return;
@@ -164,7 +171,7 @@ function renderMediaArea(downloadUrl, oiInfo) {
     area.innerHTML = `<img style="max-width:100%; display:block;" src="${escapeAttr(downloadUrl)}" alt="" />`;
   } else {
     area.innerHTML = "";
-    mountVideo(area, downloadUrl);
+    mountVideo(area, downloadUrl, poster);
   }
   if (bar) {
     bar.innerHTML = `
@@ -191,8 +198,10 @@ function gradeOf(rating) {
 }
 
 /* The A–F band selector: grades are the app's real rating vocabulary (§2.4), so rate in
-   grades. Solid fill = your rating; dashed outline = the machine's, awaiting yours. */
-function rateBandHTML(thing) {
+   grades. Solid fill = your rating; dashed outline = the machine's, awaiting yours.
+   Also used inline on Acquire's rating-queue rows (the "rate" action registered below
+   is global, and its off-thing-page path rerenders the current view). */
+export function rateBandHTML(thing) {
   const humanGrade = gradeOf(thing.human_rating);
   const machineGrade = thing.human_rating == null ? gradeOf(thing.effective_rating) : null;
   const buttons = ["F", "D", "C", "B", "A"].map((g) => {
@@ -344,6 +353,7 @@ export function sidebarRowsHTML(activeId) {
     return `
       <div class="item-row ${t.id === activeId ? "active" : ""}" tabindex="0"
            data-nav="#/thing/${t.id}?ctx=${queue.containerId}">
+        ${thumbImg(t, "thumb thumb-sm")}
         <span class="title">${escapeHtml(t.title || "Untitled")}</span>
         ${gradeChip(t)}
         ${!t.file_available ? `<span class="muted">(no file)</span>` : ""}
@@ -376,7 +386,7 @@ async function updateVideoInPlace(newVideoId) {
   let playback = null;
   if (page.file_available) playback = await getPlaybackInfoCached(newVideoId);
   page.oi_info = playback?.oi_info || null;
-  renderMediaArea(playback?.download_url || null, page.oi_info);
+  renderMediaArea(playback?.download_url || null, page.oi_info, posterFor(page));
   renderInfoCard(page);
 
   const sidebar = document.getElementById("playlistSidebar");
@@ -455,11 +465,13 @@ registerAction("rate", async (d) => {
   }
   // Refresh caches from the PATCH response, then re-render ONLY the rating-affected DOM:
   // routing would rebuild the <video> element and reset playback (#182) / close PiP.
+  // Off the thing page (e.g. Acquire's inline queue bands) a full rerender is safe —
+  // there is no mounted player to disturb.
   applyRatingUpdate(d.id, updated);
   const infoEl = document.getElementById("currentThingInfo");
   if (infoEl && currentInfoShown?.id === d.id) {
     renderInfoCard({ ...currentInfoShown, ...updated });
-  } else if (infoEl) {
+  } else {
     rerender();
   }
   const sidebar = document.getElementById("playlistSidebar");

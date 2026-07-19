@@ -2,7 +2,8 @@
    and the quick failing/new/due lists. Every row clicks through to the thing page. */
 
 import { apiGet } from "../api.js";
-import { escapeHtml, thingRow, urlCell, extractorChip, fmtDt } from "../util.js";
+import { escapeHtml, thingRow, urlCell, extractorChip, extractorChipsHTML,
+         fmtDt } from "../util.js";
 
 const TABS = [
   ["channels", "Channels"],
@@ -84,20 +85,29 @@ export async function renderBrowse(tab, params) {
       } else {
         el.innerHTML = tagExplorerHTML(await apiGet("/tags/"));
       }
-    } else if (tab === "channels") {
-      const chans = await apiGet("/things/?kind=channel&limit=500");
-      chans.sort((a, b) => (a.title || a.channel || "").localeCompare(b.title || b.channel || ""));
-      el.innerHTML = chans.map((t) => thingRow(t, {
-        extras: extractorChip(t.extractor_key) + urlCell(t.url),
-      })).join("") || `<div class="muted">No channels discovered yet</div>`;
     } else {
-      const query = { failing: "failing=true", new: "new=true&limit=200", due: "due=true&limit=200" }[tab];
-      const things = await apiGet(`/things/?${query}`);
-      el.innerHTML = things.map((t) => thingRow(t, {
+      // channels / failing / new / due: same list shape, each with an extractor chip
+      // filter (?extractor= lives in the hash, so a filtered view is linkable).
+      const ext = params.get("extractor") || "";
+      const extQ = ext ? `&extractor=${encodeURIComponent(ext)}` : "";
+      const query = { channels: "kind=channel&limit=500", failing: "failing=true",
+                      new: "new=true&limit=200", due: "due=true&limit=200" }[tab];
+      const [things, facets] = await Promise.all([
+        apiGet(`/things/?${query}${extQ}`),
+        apiGet("/things/facets"),
+      ]);
+      if (tab === "channels") {
+        things.sort((a, b) => (a.title || a.channel || "").localeCompare(b.title || b.channel || ""));
+      }
+      const chips = extractorChipsHTML(facets, ext,
+        (key) => `#/browse/${tab}${key ? `?extractor=${encodeURIComponent(key)}` : ""}`);
+      el.innerHTML = chips + (things.map((t) => thingRow(t, {
         extras: extractorChip(t.extractor_key)
+          + (tab === "channels" ? urlCell(t.url) : "")
           + (tab === "failing" && t.last_failure_dt ? `<span class="muted">${fmtDt(t.last_failure_dt)}</span>` : "")
           + (tab === "due" && t.try_on ? `<span class="data muted">${t.try_on}</span>` : ""),
-      })).join("") || `<div class="muted">Nothing here \u{1F389}</div>`;
+      })).join("")
+        || `<div class="muted">${tab === "channels" ? "No channels discovered yet" : "Nothing here \u{1F389}"}</div>`);
     }
   } catch {
     el.classList.remove("spin");

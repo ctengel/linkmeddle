@@ -1,18 +1,19 @@
-/* Admin: a filterable table over /things/ with multi-select bulk actions (the "ack twenty
-   permafails at once" tool). Filters live in the hash so results are linkable; bulk
-   actions loop PATCH /things/{id} with a progress readout and per-row failure marks. */
+/* Organize (né Admin): a filterable table over /things/ with multi-select bulk actions
+   (the "ack twenty permafails at once" tool). Filters live in the hash so results are
+   linkable; bulk actions loop PATCH /things/{id} with a progress readout and per-row
+   failure marks. */
 
 import { apiGet, apiPatch, invalidateCache } from "../api.js";
 import { escapeHtml, escapeAttr, fmtDt, gradeChip, typeChip } from "../util.js";
 
 let results = []; // things currently shown, in table order
 
-export async function renderAdmin(params) {
+export async function renderOrganize(params) {
   const app = document.getElementById("app");
   const get = (k) => params.get(k) || "";
   app.innerHTML = `
     <div class="card">
-      <h2>Admin</h2>
+      <h2>Organize</h2>
       <form id="adminFilters" class="filter-bar">
         <input type="text" name="q" placeholder="title contains…" value="${escapeAttr(get("q"))}" />
         <select name="container">
@@ -20,7 +21,10 @@ export async function renderAdmin(params) {
           <option value="true" ${get("container") === "true" ? "selected" : ""}>containers</option>
           <option value="false" ${get("container") === "false" ? "selected" : ""}>videos</option>
         </select>
-        <input type="text" name="extractor" placeholder="extractor" size="10" value="${escapeAttr(get("extractor"))}" />
+        <select name="extractor" id="extractorSelect">
+          <option value="">any extractor</option>
+          ${get("extractor") ? `<option value="${escapeAttr(get("extractor"))}" selected>${escapeHtml(get("extractor"))}</option>` : ""}
+        </select>
         <select name="min_rating">
           <option value="">any grade</option>
           <option value="1.5" ${get("min_rating") === "1.5" ? "selected" : ""}>A only</option>
@@ -70,7 +74,21 @@ export async function renderAdmin(params) {
   document.querySelectorAll("[data-bulk]").forEach((btn) =>
     btn.addEventListener("click", () => runBulk(btn.dataset.bulk)));
 
+  fillExtractorSelect(params.get("extractor") || "");
   await loadTable(params);
+}
+
+// Swap the extractor select's placeholder options for the real facet list (fire-and-forget;
+// the select works as a plain current-value holder until the facets land).
+async function fillExtractorSelect(current) {
+  const facets = await apiGet("/things/facets").catch(() => null);
+  const sel = document.getElementById("extractorSelect");
+  if (!facets || !sel) return;
+  sel.innerHTML = `<option value="">any extractor</option>` + facets
+    .filter((f) => f.extractor_key)
+    .map((f) => `<option value="${escapeAttr(f.extractor_key)}"
+                 ${f.extractor_key === current ? "selected" : ""}>${escapeHtml(f.extractor_key)} (${f.count})</option>`)
+    .join("");
 }
 
 async function loadTable(params) {
