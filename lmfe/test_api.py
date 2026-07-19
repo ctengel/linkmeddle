@@ -50,6 +50,18 @@ def test_thumb_fetch_cache_and_hit(client):
 
 
 @respx.mock
+def test_thumb_head_matches_get(client):
+    _mock_thing(respx, THUMB_URL)
+    respx.get(THUMB_URL).respond(content=JPEG, headers={"content-type": "image/jpeg"})
+    get_resp = client.get(f"/things/{THING_ID}/thumb")
+    head_resp = client.head(f"/things/{THING_ID}/thumb")
+    assert head_resp.status_code == 200
+    assert head_resp.content == b""
+    for header in ("content-type", "cache-control", "content-length", "etag"):
+        assert head_resp.headers[header] == get_resp.headers[header]
+
+
+@respx.mock
 def test_thumb_null_url_404(client):
     _mock_thing(respx, None)
     resp = client.get(f"/things/{THING_ID}/thumb")

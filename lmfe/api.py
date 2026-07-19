@@ -265,7 +265,10 @@ async def _fetch_thumb(url: str) -> tuple[bytes, str]:
     return resp.content, ctype
 
 
-@app.get("/things/{thing_id}/thumb", response_class=FileResponse)
+# HEAD registered explicitly: FastAPI (unlike bare Starlette) doesn't auto-add HEAD to GET
+# routes (fastapi#1773), and FileResponse natively answers HEAD with headers-only.
+@app.api_route("/things/{thing_id}/thumb", methods=["GET", "HEAD"],
+               response_class=FileResponse)
 async def get_thumb(thing_id: uuid.UUID):
     """Serve a thing's thumbnail from the local cache (LMFE_THUMB_DIR), fetching it from
     the thing's thumbnail_url on first request. A cache hit is served straight off disk
