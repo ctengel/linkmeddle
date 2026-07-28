@@ -54,6 +54,26 @@ OBJIDX_URL=http://127.0.0.1/ OBJIDX_AUTH=user \
 pytest lmdb/test_api.py
 ```
 
+### Closing out a stuck job
+
+If a worker dies mid-job, its `run` row is left in progress (`success IS NULL`, `endtime IS NULL`). There is no admin endpoint for this — finalize it by posting a failure result to the same endpoint a worker would use.
+
+```bash
+# 1. Find the stranded run
+curl -s "$LINKMEDDLE_PLAPI/runs/?in_progress=true" | jq
+
+# 2. Close it out as failed
+curl -s -X POST "$LINKMEDDLE_PLAPI/jobs/<run_id>/result" \
+    -H 'Content-Type: application/json' \
+    -d '{"success": false}'
+```
+
+This is the same body `job_runner` sends on a real failure: it stamps the run's `endtime`/`success`, sets `last_failure_dt` on the thing, and applies the normal Fibonacci backoff to `try_on`.
+
+- **One-shot.** A run that already has an `endtime` returns 409 "Run already finalized" — the guard that stops a late failure report from demoting an already-recorded success.
+- **Often unnecessary.** Dispatch only skips things whose in-progress run started within the claim lease (1 day), so a stranded run stops blocking re-claims on its own; the row just stays `success IS NULL` forever. Close it manually when you want the failure recorded *now* (backoff + visible under `GET /things/?failing`) rather than waiting out the lease.
+- Deleting the row instead is possible but discouraged — `run` is append-only history.
+
 ### Backup and restore
 
 The V4 DB is plain PostgreSQL, so `pg_dump`/`pg_restore` work directly against it. They accept the same connection URI as `DATABASE_URL`, except they don't recognize SQLAlchemy's `+psycopg` driver tag — drop that piece (e.g. `postgresql+psycopg://user:pass@host:5432/lmdb` becomes `postgresql://user:pass@host:5432/lmdb`) before using it.
