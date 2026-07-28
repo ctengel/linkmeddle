@@ -361,6 +361,99 @@ def test_init_download_threads_noplaylist_on_download(monkeypatch):
     assert captured["noplaylist"] is False
 
 
+# --- netrc: an opt-in per-box credentials file offered to yt-dlp -----------------------
+
+def test_netrc_file_off_unless_env_names_a_real_file(monkeypatch, tmp_path):
+    # Opt-in only: no WORKER_NETRC (or one naming a file that isn't there) = today's behavior.
+    monkeypatch.delenv(run_bknd.NETRC_ENV, raising=False)
+    assert run_bknd.netrc_file() is None
+    monkeypatch.setenv(run_bknd.NETRC_ENV, "")
+    assert run_bknd.netrc_file() is None
+    monkeypatch.setenv(run_bknd.NETRC_ENV, str(tmp_path / "nope"))
+    assert run_bknd.netrc_file() is None
+    real = tmp_path / "netrc"
+    real.write_text("machine example.com login u password p\n")
+    monkeypatch.setenv(run_bknd.NETRC_ENV, str(real))
+    assert run_bknd.netrc_file() == str(real)
+
+
+def test_netrc_file_expands_user(monkeypatch, tmp_path):
+    # WORKER_NETRC=~/.netrc must work unexpanded (e.g. straight from a systemd unit).
+    (tmp_path / ".netrc").write_text("machine example.com login u password p\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(run_bknd.NETRC_ENV, "~/.netrc")
+    assert run_bknd.netrc_file() == str(tmp_path / ".netrc")
+
+
+def test_ydl_netrc_opts(tmp_path):
+    netrc = tmp_path / "netrc"
+    netrc.write_text("machine example.com login u password p\n")
+    params = run_bknd._ydl(netrc=str(netrc)).params
+    assert params.get("usenetrc") is True
+    assert params.get("netrc_location") == str(netrc)
+    assert not run_bknd._ydl().params.get("usenetrc")
+
+
+def test_init_download_threads_netrc_into_ydl(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(run_bknd, "_ydl",
+                        lambda **kw: captured.update(kw) or _FakeYDL())
+    netrc = tmp_path / "netrc"
+    netrc.write_text("machine example.com login u password p\n")
+    monkeypatch.setenv(run_bknd.NETRC_ENV, str(netrc))
+    run_bknd.init_download("https://x/v", download=False)
+    assert captured["netrc"] == str(netrc)
+    captured.clear()
+    monkeypatch.delenv(run_bknd.NETRC_ENV)
+    run_bknd.init_download("https://x/v", download=False)
+    assert captured["netrc"] is None
+
+
+def test_init_download_netrc_independent_of_cookies(monkeypatch, tmp_path):
+    # Cookies and netrc are separate yt-dlp mechanisms (cookiefile vs usenetrc): enabling
+    # netrc must not disturb the cookie jar, and vice versa — both ride the same run.
+    netrc = tmp_path / "netrc"
+    netrc.write_text("machine example.com login u password p\n")
+    monkeypatch.setenv(run_bknd.NETRC_ENV, str(netrc))
+    monkeypatch.setenv("CRUSTULA_URL", "http://crustula/")
+    monkeypatch.setattr(run_bknd, "get_cookies", lambda url: "# Netscape HTTP Cookie File\n")
+    captured = {}
+    monkeypatch.setattr(run_bknd, "_ydl",
+                        lambda **kw: captured.update(kw) or _FakeYDL())
+    _, cookies_used = run_bknd.init_download("https://x/v", download=False, use_cookies=True)
+    assert cookies_used is True
+    assert captured["netrc"] == str(netrc)
+    captured["cookies"].seek(0)   # init_download's own post-run read left it at EOF
+    assert captured["cookies"].read() == "# Netscape HTTP Cookie File\n"
+
+
+def test_post_result_records_netrc(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(job_runner.requests, "post",
+                        lambda url, json=None, timeout=None:
+                            captured.update(body=json) or _Resp())
+    job_runner.post_result("http://api/", "r9", None, download=False, netrc=True)
+    assert captured["body"]["input_json"] == {"cookies": False, "netrc": True}
+    job_runner.post_result("http://api/", "r9", None, download=False)
+    assert captured["body"]["input_json"] == {"cookies": False, "netrc": False}
+
+
+def test_initiate_job_and_failure_report_netrc(monkeypatch):
+    # Both the normal path and the crash path record the box's netrc decision.
+    monkeypatch.setattr(job_runner.run_bknd, "init_download",
+                        lambda url, **kwargs: (None, False))
+    monkeypatch.setattr(job_runner.run_bknd, "netrc_file", lambda: "/etc/lm/netrc")
+    reported = {}
+    monkeypatch.setattr(job_runner, "post_result", lambda *a, **k: reported.update(k))
+    job = {"run_id": "r1", "download": False, "cookies": False,
+           "thing": {"id": "t1", "url": "https://example.com/v/c", "bucket": "b", "attrs": None}}
+    job_runner.initiate_job("http://api/", job, "w")
+    assert reported["netrc"] is True
+    reported.clear()
+    job_runner.report_failure("http://api/", job, "w")
+    assert reported["netrc"] is True
+
+
 def test_extract_pull_handles_flat_entries():
     # extract_flat='in_playlist' entries carry `url`/`ie_key` (not webpage_url/extractor).
     flat_pl = {"webpage_url": "https://x/pl", "id": "pl", "extractor_key": "YouTube",

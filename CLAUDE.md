@@ -59,7 +59,7 @@ real file again — the V2-era `apiqueue/` copy is gone.)
 
 ## Environment variables
 
-`DATABASE_URL` (V4 defaults to `postgresql+psycopg:///lmdb`; PostgreSQL required), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`), `WORKER_MIN_FREE_BYTES` (job_runner free-space floor in bytes; default 32 GiB, `0` disables — the worker stops claiming when its cwd has less free space; shared with pervellam), `LMFE_THUMB_DIR` (lmfe thumbnail cache directory, default `thumb_cache`).
+`DATABASE_URL` (V4 defaults to `postgresql+psycopg:///lmdb`; PostgreSQL required), `LINKMEDDLE_PLAPI` (backend URL used by CLI/frontend/postprocessor), `OBJIDX_URL` + `OBJIDX_AUTH` (Object Index, required for uploads), `OBJIDX_BUCKET_DEFAULT` (lmfe), `CRUSTULA_URL` (cookie/auth microservice, used when a schedule sets `use_cookies`), `WORKER_NETRC` (worker netrc credentials file offered to yt-dlp as `usenetrc`/`netrc_location`; unset/empty or a missing file = disabled, `~/.netrc` is not auto-detected — independent of cookies, and yt-dlp decides per extractor whether it is relevant), `WORKER_MIN_FREE_BYTES` (job_runner free-space floor in bytes; default 32 GiB, `0` disables — the worker stops claiming when its cwd has less free space; shared with pervellam), `LMFE_THUMB_DIR` (lmfe thumbnail cache directory, default `thumb_cache`).
 
 ## V4 work
 

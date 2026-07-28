@@ -383,7 +383,8 @@ class RunResultIn(BaseModel):
     Stage-1 (playlist pull): `playlist` is the LM-native pull result (required on success).
     Stage-2 (video download): `video` is the full single-video extract (display + identity +
     channel) and `best_oi` is the OI file UUID from the upload (info['oi_uuid']). `data_json`
-    carries the raw yt-dlp output; `input_json` records the per-run decisions (e.g. cookies).
+    carries the raw yt-dlp output; `input_json` records the per-run decisions (e.g. cookies,
+    netrc).
     Stage-2 (video *meta*): `video` is the single-video metadata fetched for a C-band video
     that the flat pull couldn't describe richly enough for a human to rate (no media, no
     `best_oi`) — the meta-job counterpart of `playlist`.

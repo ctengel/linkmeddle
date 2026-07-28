@@ -74,7 +74,7 @@ def claim_job(api_base: str, worker: str, extractor: str | None = None,
 
 
 def post_result(api_base: str, run_id: str, info: dict | None, *,
-                download: bool, use_cookies: bool = False,
+                download: bool, use_cookies: bool = False, netrc: bool = False,
                 worker: str | None = None) -> dict:
     """Push a run's result to POST /jobs/{run_id}/result (one path for all job kinds).
 
@@ -99,9 +99,11 @@ def post_result(api_base: str, run_id: str, info: dict | None, *,
     `download` is only ever set for a single-video job, so it never collides with a playlist body.
 
     `data_json` carries the raw output (kept even on a failed download for debugging);
-    `input_json` records the per-run cookies decision.
+    `input_json` records the per-run credential decisions: `cookies` (what Crustula actually
+    supplied) and `netrc` (whether this box offered yt-dlp a netrc file, WORKER_NETRC).
     """
-    body: dict = {'worker': worker, 'input_json': {'cookies': use_cookies}}
+    body: dict = {'worker': worker,
+                  'input_json': {'cookies': use_cookies, 'netrc': netrc}}
     success = info is not None
     if info is not None:
         body['data_json'] = info
@@ -133,7 +135,8 @@ def report_failure(api_base: str, job: dict, worker: str) -> None:
     off (§4.4/§4.7), so the worker moves on.
     """
     post_result(api_base, job["run_id"], None, download=job.get("download", False),
-                use_cookies=job.get("cookies", False), worker=worker)
+                use_cookies=job.get("cookies", False),
+                netrc=bool(run_bknd.netrc_file()), worker=worker)
 
 
 def initiate_job(api_base: str, job: dict, worker: str) -> bool:
@@ -166,8 +169,11 @@ def initiate_job(api_base: str, job: dict, worker: str) -> bool:
         use_cookies=cookies,
         flat=True,   # flat is a no-op on a single video, so a download still gets a full extract
         info_dict=attrs.get(xform.INFO_JSON_KEY))
-    post_result(api_base, run_id, info, download=download,
-                use_cookies=cookies_used, worker=worker)
+    # netrc is a box capability, not a per-job suggestion (WORKER_NETRC, read the same way
+    # init_download just did) — recorded so a run's credential context is legible after the
+    # fact, alongside the cookies decision.
+    post_result(api_base, run_id, info, download=download, use_cookies=cookies_used,
+                netrc=bool(run_bknd.netrc_file()), worker=worker)
     return bool(info)
 
 

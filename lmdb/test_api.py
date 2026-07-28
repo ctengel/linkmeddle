@@ -2165,9 +2165,10 @@ def test_download_result_sets_best_oi(client):
     r = client.post(f"/jobs/{rid}/result",
                     json={"success": True, "best_oi": oi,
                           "video": {"native_id": "vid42", "extractor_key": "youtube"},
-                          "input_json": {"cookies": False}})
+                          "input_json": {"cookies": False, "netrc": True}})
     assert r.status_code == 200
-    assert r.json()["input_json"] == {"cookies": False}     # per-run decision recorded
+    # per-run credential decisions recorded verbatim (the worker's real body shape)
+    assert r.json()["input_json"] == {"cookies": False, "netrc": True}
     t = client.get(f"/things/{v}").json()
     assert t["best_oi"] == oi                                # OI file uuid stored
     assert t["extractor_key"] == "youtube" and t["native_id"] == "vid42"  # identity backfilled
@@ -2398,11 +2399,12 @@ def test_playlist_failure_sets_backoff(client):
 
 
 def test_claim_cookies_escalation(client):
-    # last completed run failed cookielessly -> the next claim suggests cookies (§4.7)
+    # last completed run failed cookielessly -> the next claim suggests cookies (§4.7).
+    # The netrc key rides along in input_json without disturbing the cookies escalation.
     v = _seed_thing(type="video", url="http://e/esc", human_rating=1.0, try_on=_TODAY)
     with _session() as s:
-        s.add(models.Run(thing_id=uuid.UUID(v), success=False,
-                         starttime=models.naive_utcnow(), input_json={"cookies": False}))
+        s.add(models.Run(thing_id=uuid.UUID(v), success=False, starttime=models.naive_utcnow(),
+                         input_json={"cookies": False, "netrc": True}))
         s.commit()
     job = _claim(client)
     assert job["thing"]["id"] == v and job["cookies"] is True

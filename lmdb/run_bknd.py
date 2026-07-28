@@ -17,6 +17,8 @@ from obj_idx import client as oic
 from yt_dlp_plugins.postprocessor.objidx_upload import ObjIdxUploadPP
 from . import models, ytdl_arch_oi
 
+NETRC_ENV = "WORKER_NETRC"
+
 
 def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
     # Exclude live streams by checking 'is_live' key in info_dict
@@ -26,8 +28,8 @@ def _exclude_live(info_dict, *, incomplete: bool) -> Optional[str]:
     return None
 
 def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
-         extract_flat: bool = False, noplaylist: bool = False) -> YoutubeDL:
-    # TODO user, password
+         extract_flat: bool = False, noplaylist: bool = False,
+         netrc: str | None = None) -> YoutubeDL:
     # TODO simulate, skip_download
     # TODO progress_hooks, quiet
     # TODO cachedir, nooverwrites, playlistrandom, auto_subtitles
@@ -48,6 +50,13 @@ def _ydl(download_archive=None, cookies: io.TextIOBase | str | None = None,
         opts['noplaylist'] = True
     if cookies is not None:
         opts['cookiefile'] = cookies
+    if netrc:
+        # Offer the file; yt-dlp decides relevance per extractor (only those declaring
+        # _NETRC_MACHINE and implementing _perform_login consult it). No entry for the site is
+        # a screen message, an unreadable/unparseable file a warning — never a failed run, and
+        # never a touch on the cookie jar, so `cookies` above stays authoritative either way.
+        opts['usenetrc'] = True
+        opts['netrc_location'] = netrc
     return YoutubeDL(opts)
 
 def _print_download_result(info: dict):
@@ -72,6 +81,21 @@ def get_cookies(url: str) -> str:
     resp = requests.get(crustula_url + 'cookies/', params={'url': url}, timeout=5)
     resp.raise_for_status()
     return resp.json()['jar']['cookies']
+
+
+def netrc_file() -> Optional[str]:
+    """Path of the netrc credentials file to offer yt-dlp, or None.
+
+    Opt-in per worker box: WORKER_NETRC names the file (an env-tuned box capability, like
+    WORKER_MIN_FREE_BYTES). Unset/empty, or naming a file that isn't there, means no netrc —
+    today's behavior exactly; a bare ~/.netrc is not auto-detected. Relevance is yt-dlp's
+    call, see _ydl(). Independent of cookies: a run may carry both.
+
+    Note the file is named explicitly, so CPython's netrc skips the permission check it
+    applies to a default ~/.netrc — a group/world-readable file here is used, not rejected.
+    """
+    path = os.path.expanduser(os.getenv(NETRC_ENV) or "")
+    return path if path and os.path.isfile(path) else None
 
 # --- yt-dlp info dict -> thin pull contract --------------------------------------------
 # The single place on the worker that touches yt-dlp's unstable shape: pull only the fields
@@ -242,7 +266,9 @@ def init_download(url: str, *,
     lpmlib: if provided, provided to OI
     run_id: if provided (download only), written as `lm-run-id` tag in OI object metadata
     thing_id: if provided (download only), written as `lm-thing-id` tag in OI object metadata
-    use_cookies: if True, fetch cookies from Crustula and pass to yt-dlp
+    use_cookies: if True, fetch cookies from Crustula and pass to yt-dlp. Independent of
+        netrc (WORKER_NETRC): a run may carry both, and yt-dlp keeps them separate — the
+        cookie jar is untouched by the login path.
     info_dict: if provided, download straight from this pre-extracted yt-dlp info dict
         (like `yt-dlp --load-info-json`) instead of re-extracting `url`. See the
         process_ie_result branch below.
@@ -251,6 +277,7 @@ def init_download(url: str, *,
     OBJIDX_URL=
     OBJIDX_AUTH=
     CRUSTULA_URL=
+    WORKER_NETRC=
     """
 
     # TODO consider extractor_id and id (of playlist) instead of URL
@@ -283,6 +310,11 @@ def init_download(url: str, *,
             cookies = io.StringIO(cookiestr)
             cookies_used = True
 
+    netrc = netrc_file()
+    if netrc:
+        # Path only — never the contents; this file holds plaintext passwords.
+        print("using netrc:", netrc)
+
     download_archive = None
     if download:
         assert os.getenv("OBJIDX_URL"), "OBJIDX_URL must be set to download"
@@ -294,7 +326,7 @@ def init_download(url: str, *,
     # video+playlist "both" shape never arises for downloads (#164). Pulls/meta keep it off so
     # container enumeration still works; noplaylist makes the flat-on-download case moot.
     with _ydl(download_archive=download_archive, cookies=cookies, extract_flat=flat,
-              noplaylist=download) as ydl:
+              noplaylist=download, netrc=netrc) as ydl:
         try:
             # NOTE - postprocessors may also be added by setting 'postprocessors' in the opts dict
             if download and oibucket:
